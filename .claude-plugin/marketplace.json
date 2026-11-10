@@ -1,0 +1,13 @@
+{
+  "name": "agent-hub",
+  "owner": {
+    "name": "Kensei"
+  },
+  "plugins": [
+    {
+      "name": "agent-hub",
+      "source": "./claude-plugin",
+      "description": "Answer permission requests and session questions from Agent Hub (macOS menu bar)."
+    }
+  ]
+}

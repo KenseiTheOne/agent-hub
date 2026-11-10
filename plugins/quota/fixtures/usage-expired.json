@@ -1,0 +1,3 @@
+{"version": 1, "fetched_at": 1793780000.25, "checked_at": 1793790000.25, "error": "token-expired", "rows": [
+  {"kind": "weekly_all", "group": "weekly", "percent": 44, "severity": "normal", "resets_at": "2026-11-09T04:00:00+00:00"}
+]}

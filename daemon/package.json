@@ -1,0 +1,19 @@
+{
+  "name": "agenthub-daemon",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Agent Hub: the daemon (core) — Node ESM with no dependencies",
+  "license": "MIT",
+  "bin": {
+    "agenthubd": "bin/agenthubd",
+    "agenthub": "bin/agenthub"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build:native": "../scripts/build-native.sh",
+    "test": "env -u NODE_OPTIONS node --test 'test/*.test.mjs'"
+  }
+}

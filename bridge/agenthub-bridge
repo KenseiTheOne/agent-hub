@@ -1,0 +1,7 @@
+#!/bin/sh
+# Agent Hub ↔ cmux bridge. Run it in a pinned cmux tab:
+#   ~/path/to/agent-hub/bridge/agenthub-bridge
+# We drop NODE_OPTIONS: the cmux preload crashes child node processes. The daemon recognizes the bridge by the agenthub-bridge.mjs path
+# (peer.bridgePaths), so the path is passed as absolute, without symlinks.
+dir=$(cd "$(dirname "$0")" && pwd -P) || exit 1
+exec /usr/bin/env -u NODE_OPTIONS node "$dir/agenthub-bridge.mjs" "$@"

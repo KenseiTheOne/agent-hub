@@ -1,0 +1,7 @@
+{"type":"user","uuid":"u1","timestamp":"2026-11-05T10:00:00.000Z","message":{"role":"user","content":"СИНТЕТИКА-ТЕКСТ-ПОЛЬЗОВАТЕЛЯ"}}
+{"type":"assistant","uuid":"a1","timestamp":"2026-11-05T10:00:05.000Z","effort":"medium","message":{"role":"assistant","content":[{"type":"text","text":"СИНТЕТИКА-ТЕКСТ-ОТВЕТА \"effort\":\"max\""}]}}
+{"type":"attachment","uuid":"at1","timestamp":"2026-11-05T10:01:00.000Z","attachment":{"type":"ultra_effort_enter","reminderType":"full"}}
+{"type":"user","uuid":"u2","timestamp":"2026-11-05T10:01:00.000Z","message":{"role":"user","content":"СИНТЕТИКА-ВОПРОС"}}
+{"type":"assistant","uuid":"a2","timestamp":"2026-11-05T10:01:09.000Z","effort":"high","perTurnEffort":"xhigh","message":{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"Workflow","input":{"effort":"low","script":"СИНТЕТИКА"}}]}}
+{"type":"user","uuid":"u3","timestamp":"2026-11-05T10:01:10.000Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"{\"type\":\"assistant\",\"perTurnEffort\":\"max\"}"}]}}
+{"type":"assistant","uuid":"a3","timestamp":"2026-11-05T10:01:11.000Z","isApiErrorMessage":true,"effort":"low","message":{"role":"assistant","content":[{"type":"text","text":"СИНТЕТИКА-ОШИБКА"}]}}

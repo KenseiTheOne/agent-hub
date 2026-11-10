@@ -1,0 +1,41 @@
+{
+ "runId": "wf_REPLACE",
+ "timestamp": "2026-11-04T10:00:00.000Z",
+ "taskId": "t",
+ "script": "СИНТЕТИЧЕСКИЙ-СЦЕНАРИЙ",
+ "scriptPath": "/synthetic/script.js",
+ "result": {
+  "summary": "СИНТЕТИЧЕСКИЙ-ИТОГ"
+ },
+ "agentCount": 3,
+ "logs": [
+  "СИНТЕТИЧЕСКИЙ-ЛОГ"
+ ],
+ "durationMs": 600000,
+ "summary": "СИНТЕТИЧЕСКИЙ-ИТОГ",
+ "workflowName": "demo-review",
+ "status": "completed",
+ "startTime": 0,
+ "phases": [
+  {
+   "title": "Plan"
+  },
+  {
+   "title": "Build"
+  }
+ ],
+ "defaultModel": "synthetic-model",
+ "workflowProgress": [
+  {
+   "type": "workflow_agent",
+   "agentId": "a1",
+   "label": "x",
+   "promptPreview": "СИНТЕТИЧЕСКИЙ-ПРОМПТ",
+   "resultPreview": "СИНТЕТИЧЕСКИЙ-ИТОГ",
+   "state": "done",
+   "tokens": 999999
+  }
+ ],
+ "totalTokens": 123456789,
+ "totalToolCalls": 10
+}

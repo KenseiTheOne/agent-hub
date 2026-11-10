@@ -1,0 +1,218 @@
+# Push (stage 4)
+
+The `lib/services/push.mjs` service listens on the bus for `event.raised` / `event.cleared` (key `<pluginId>:<key>` from
+`event=<key>` in plugin output, plus `plugin-error` from the core) and decides where and when to call the human.
+
+| Module | What |
+|---|---|
+| `engine.mjs` | dedup, quiet hours, digest, evening blocker, escalation of a waiting session, routing |
+| `rules.mjs` | the event table (design section 6), the kind of every rule (`kind`, `kindOf`) |
+| `prefs.mjs` | "Settings → Notifications": kinds, the master switch, quiet hours from `settings.json`, edits via `PUT /settings/notifications` |
+| `clock.mjs` | local time in a given time zone (Intl), quiet hours, the "night day" |
+| `idle.mjs` | HID idle time: `ioreg -c IOHIDSystem -d 4` → `HIDIdleTime` |
+| `macos.mjs` | `push.notify` on the bus → the shell; without an acknowledgement — `osascript display notification` |
+| `acks.mjs` | waiting for `POST /push/ack` (route `lib/routes/push.mjs`) |
+| `telegram.mjs` | `sendMessage` only; token and chat_id from the keychain |
+| `store.mjs` | `<home>/push-state.json` (0600): what was sent, the digest queue |
+| `send-test.mjs` | manual bot check (run by the user) |
+
+## Event keys for plugins
+
+A rule is chosen by the key without the plugin id: an exact name/alias, or a name plus an instance suffix after `:`,
+`.`, `/`, `-` (`session-waiting:<sessionId>`, `build-blocked:<what>`). The message text is the title of the output
+line that carries `event=` (up to 160 characters, no control characters); the subtitle is the plugin name plus the
+rule label ("Mail · message not sent"): a leading "<plugin name>:" is cut from the label, and if the detail already says
+the same (≥ 60 % of the label's significant words), the subtitle is only the name ("Quota" · "At this pace 85% will be
+reached Sun 08.11 12:36 — before the reset"). With no detail, the label becomes the body. **The title of such a line
+must contain metadata only**: a task name, a tab, a reason; no conversation text, no `tool_input`, no paths to secrets.
+
+**A plugin's own rules.** A plugin declares rules for its own keys with a tag in its metadata:
+
+```
+# <agenthub.push key="build-blocked" hold="evening" cooldown="0s" kind="plugin">Сборка не запустится</agenthub.push>
+# <agenthub.push key="crashed" quiet="true" kind="plugin">Упало</agenthub.push>
+# <agenthub.push key="service-silent" macOnly="true" away="5m" kind="plugin" was="runs">Молчит</agenthub.push>
+# <agenthub.push key="service-silent" lang="en">Silent</agenthub.push>
+```
+
+`hold="evening"`, `quiet="true"` (goes through during quiet hours), `macOnly="true"`, `cooldown=<interval>`,
+`away=<interval>` (Telegram if the human is away and the event stays raised longer), `kind=<kind>` (the switch in
+"Settings": a shared core kind `sessions`, `updates`, `problems`, `other`; `plugin` — **the plugin's own toggle** (a
+line with the plugin name in "Settings → Notifications"); `security` — a security exception, cannot be turned off; an
+unknown value is a parse warning and the rule is dropped), `was=runs|night` (only with `kind="plugin"`: the former
+contract 1 kind — if the user turned it off, it turns this toggle off, see "Migration" below); the tag text is the label
+(up to 80 characters). The deprecated `kind="runs"` and `kind="night"` (contract 1) are accepted as
+`kind="plugin" was="<kind>"`, and the linter warns. The service takes such rules **only from built-in, official and
+own** plugins (`trusted`: the tier comes from the signed registry index or from the human's consent to an own plugin
+from a folder — [`docs/plugins-registry.md`](../../../docs/plugins-registry.md), "Own sources"); they go ahead of the
+shared table. Other plugins' tags are ignored. This way the core knows no plugin's keys: official plugins' rules live in
+their metadata (registry `agent-hub-plugins`), own plugins' rules in their metadata in the tool's repository; built-in
+plugins (`agents`, `claude-sessions`) declare theirs the same way. For an own plugin, rules with `kind="security"` and
+`quiet="true"` are `push` permissions: they are shown in the consent window, and their appearance is a permission
+increase (not a silent update from the folder).
+
+The shared table (`rules.mjs`) contains only the core's shared keys (since contract 2 it no longer has `blocker`,
+`session-died`, `workflow-failed`, `workflow-orphaned` or the quota keys: the plugins that need them declare them —
+`claude-sessions` (`died`), `agents` (`wf-failed`, `wf-orphaned`), `quota` (`week-80` and `pace-85` — at most once a
+week, `token-lost` — immediately; all of them "failures and warnings")):
+
+| Key | When it is sent |
+|---|---|
+| `session-waiting` (`waiting:<sessionId>` in claude-sessions) | at the Mac — macOS immediately; away and waiting > 5 min — Telegram once; no flap window |
+| `auth-failed` | immediately |
+| `source-broken`, `plugin-error` | once until recovery |
+| `approvals-paused` (source `@hub`) | immediately |
+| `app-pin-changed` (source `@hub`) | immediately and during quiet hours, on every change of `requirements.app` (no flap window); at the Mac — always `osascript`, without `push.notify` and `/push/ack` (`bannerAlways`); the text says where the pin came from (`из Claude Code` — capitalized at the start) |
+| `app-pin-path-changed` (source `@hub`) | immediately and during quiet hours, on every change of `appPin.path` with the same requirement (the bundle the daemon launches); at the Mac — always `osascript` (`bannerAlways`); "The path of the pinned Agent Hub build changed — the daemon now launches <path>. If it wasn't you, open the journal" |
+| `app-restart-stopped` (source `@hub`) | immediately, once per episode of the supervisor stopping (app service: the app crashed 3 times in 10 min or 3 checks in a row could not launch it — `why`); again only after the app has opened the event stream and the stop is cleared; at the Mac — always `osascript` (`bannerAlways`: there is no app to acknowledge); "Agent Hub keeps crashing — restarts stopped: 3 restarts in 10 min. Open Agent Hub yourself; details — agenthub logs" (with `why` — "Cannot launch Agent Hub (<why>)…") |
+| anything else | immediately, labeled "Event "key"" |
+
+In general: while a key is raised there is one message; cleared and raised again within 10 min after sending — it is
+suppressed (flapping). Events of **third-party** plugins (`trusted: false`) go to macOS only, without their text and
+without their rules.
+
+Limits (protecting the daemon from an event flood): at most `maxPerPluginPerMin` (20) new notifications per minute from
+one trusted plugin and `maxPerUntrustedPerMin` (5) from a third-party one; the first one over the limit produces a
+single notification "notifications from the plugin are muted for a minute" (`push-throttled` in the journal), the
+other events are only remembered. Entries (keys) per plugin — at most `maxEntriesPerPlugin` (500) /
+`maxEntriesPerUntrusted` (100): beyond that the longest-cleared ones are evicted, and if all are raised the new key is
+not remembered (`push-dropped`: the first refusal in a minute is recorded immediately, the rest as one `push-dropped`
+summary with `dropped: N` when the minute ends). Hub events (`@hub`) have no such limits. `push-state.json` is written
+once per batch of events (when the queue is empty, at least every 2 s); the queue yields the event loop between
+operations.
+
+## Switches — "Settings → Notifications" (2026-11-09)
+
+Stored in `<home>/settings.json → notifications` (`{enabled, kinds: {<kind>: bool}, quiet: {enabled, start, end} | null}`),
+written only by the app class (the pinned build) via `PUT /settings/notifications`
+([`docs/api.md`](../../../docs/api.md)); the service picks up changes on `settings.changed` without a restart.
+
+| Kind | Core rules | Plugins (`kind=` in the tag) |
+|---|---|---|
+| `sessions` — waiting for an answer / session questions | `session-waiting`, `approvals-paused` | — |
+| `updates` — hub and plugin updates | `plugin-update`, `hub-update`, `hub-update-ready`, `hub-update-installed`, `hub-update-failed` | — |
+| `problems` — plugin failures and warnings | `source-broken`, `plugin-error`, `auth-failed` (and plugin rules with `kind="problems"`, for example quota) | a rule with `kind="problems"` or a key from the table (`auth-failed`) |
+| `other` — everything else from plugins | a key without a rule; **all** events of third-party plugins | a rule without `kind` and without a match in the table |
+| `plugin:<id>` — **the plugin's own toggle** | — | rules with `kind="plugin"` (and the deprecated `kind="runs"`/`"night"`): a line in "Settings" with the plugin name, only while the plugin is installed |
+| `security` — **cannot be turned off** | `app-pin-changed`, `app-pin-path-changed`, `app-restart-stopped`, `hub-update-tag-moved`, `hub-update-suspect` | rules with `kind="security"` (tampering signals) |
+
+**The plugin's own toggle** (contract 2). `settings.json → pluginNotifications.plugins` holds `{<id>: bool}`;
+`/state.notifications.plugins` has lines `{id, title, on, labels, legacy?}` for installed trusted plugins that have a
+`kind="plugin"` rule. The title is in the hub language (from `<agenthub.title lang=…>`), `labels` are the labels of its
+rules. No plugin — no line; the value in `settings.json` stays (if the plugin comes back, the same choice applies).
+The master switch also silences plugin toggles; they do not affect `security`.
+
+**Migrating contract 1 settings.** Before 2026-11-09 `settings.json` had the kinds `runs` ("Agent runs") and `night`.
+The core no longer knows them, but the user's choice is not lost:
+
+1. Turned-off `kinds.runs/night = false` stay in `settings.json → notifications.kinds` as they are — the core sees
+   them as "a former kind is off" (`legacy` in memory); `true` means nothing (it is on by default anyway).
+2. A plugin toggle without an explicit value is off if at least one of its rules declared a turned-off former kind:
+   `kind="night"`/`kind="runs"` (deprecated synonym) or `kind="plugin" was="night"|"runs"`. The built-in `agents` and
+   `claude-sessions` declare `was="runs"` — before 2026-11-09 their events used the "Agent runs" kind.
+3. As soon as the core sees such a plugin, it fixes the inferred value as an explicit `plugins.<id> = false` with a
+   `migrated.<id>` mark (journal `settings-migrated {plugin, from}`, event `settings.changed`): from then on the plugin
+   may change `kind="night"` to `kind="plugin"` without `was=` and the choice is kept. Migration never touches an
+   explicit human choice; a line inferred from migration has `legacy: true` ("Turned off by an earlier notification
+   setting") until the human touches it.
+4. **Once only.** After the first full plugin scan (`host.start` → `core.pluginsScanned`) the core records which plugins
+   the migration applies to (`pluginNotifications.legacyFor` — ids of the plugins installed at that time; journal
+   `settings-migrated {legacyFor}`). A plugin installed later is not turned off by the old setting, even if it declares
+   `was=`.
+5. `PUT /settings/notifications` with `kinds.runs|night` — `400 args:kinds:enum`; a digest item from a pre-migration
+   file with kind `runs`/`night` counts as "other".
+
+**A hub rollback** (`agenthub hub rollback` to a contract 1 core) keeps the choice: in `settings.json` the turned-off
+`runs`/`night` live in `notifications.kinds`, where the old core reads them (its "Runs" and "Night" stay silent), and
+the plugin toggles and migration marks live in a separate top-level key `pluginNotifications {plugins, migrated,
+legacyFor}`: the old core does not normalize it and keeps it as is when it writes `settings.json`. After updating again
+the choice is in place. If the human turned a former kind back on in the old hub, the new core drops the "off" values
+inferred from it (`migrated`), while explicit choices stay.
+
+The kind of a plugin rule without `kind` is the kind of the shared-table rule with the same key (`auth-failed` →
+`problems`), otherwise `other`. Only the core and a trusted plugin set kinds; `services.push.rules` in `config.json`
+does not change the kind, and a third-party plugin cannot declare `security` (its rules are not taken at all). The
+`security` kind from the core table applies only to the hub's own events (`@hub`): a plugin that raises a core key
+(`app-restart-stopped` and the like) gets a rule without a kind, without `bannerAlways`, `quietException` and the hub
+label — a trusted plugin declares a security exception only with its own `<agenthub.push kind="security">` tag (the
+registry linter warns about such a tag and about core keys).
+
+**`config.json` does not override security exceptions**: `services.push.rules` is not applied to rules of kind
+`security` (core or trusted plugins) — no `hold`, no `awayDelayMs`, no `cooldownMs`, no `label`, no new alias that
+hijacks a core key. The only way to silence them is to turn off the whole service (`services.push.enabled = false`),
+and "Settings → Notifications" warns about that.
+
+- **A turned-off kind goes nowhere**: no `push.notify` to the shell, no fallback `osascript`, no Telegram, no digest
+  item; the journal gets `push-muted {key, rule, kind, reason: "kind"|"all"}` without text. The event stays in the
+  plugin state (popover, plugin page) and in the journal. Raising it does not consume the plugin rate limit and does not
+  produce "notifications muted".
+- The decision is made when the event is raised and before every deferred send: the evening blocker waited for 21:00, a
+  waiting session for idleness, an item for the morning digest (`push-muted {key: "digest", count}`). Off at send time —
+  not sent; turned off while waiting but on again by send time — sent as usual (`push-muted` once per "off"). Raised
+  while the kind was off — not re-sent after it is turned on (the next state will arrive). A digest item without `kind`
+  (a file from before 2026-11-09) gets its kind from the key.
+- The master switch (`enabled: false`) silences all kinds except `security`.
+- **Why `security` cannot be turned off**: these are signals of possible tampering (the app re-pinned, the build path
+  changed, a release tag moved, a tampering signal declared by a plugin) and of app restarts being stopped. Settings are
+  changed by the app class — that is, by the very build the pin notification is about; a switch for such events would be
+  the first thing a swapped build flips. So they are neither under the master switch nor among the kinds (`PUT` with
+  `kinds.security` — `400 args:kinds:enum`), and the banner for hub events still bypasses the shell (`bannerAlways`).
+- **Quiet hours** — `quiet` in settings; until it is set, `services.push.quietStart/quietEnd` from `config.json` apply
+  (as before 2026-11-09), and without them 23:00–08:00 (`/state.notifications.quiet.from`: `settings` | `config` |
+  `default`). The first edit in "Settings" starts from the effective values. `quiet.enabled: false` — at night everything
+  takes the normal route (Telegram immediately, no digest); the evening blocker and the "night day" are computed from the
+  same bounds. `quietStart == quietEnd` in `config.json` (formerly "no quiet hours") is shown as quiet hours turned off
+  with bounds 23:00–08:00. The blocker's evening window runs from `eveningAt` to the start of quiet hours, only if that
+  is in the evening (no longer than 12 h): quiet hours from 20:00 with `eveningAt` 21:00 give no window, and the blocker
+  waits for the night to start.
+
+## Routing
+
+- HID idle < 10 min or unknown — a macOS notification: event `push.notify`
+  `{notifyId, title, subtitle, body, plugin, key, digest}` on the bus and SSE. The shell shows a banner
+  (`UNUserNotificationCenter`, an "Open" button → the panel on `plugin`) and answers `POST /push/ack {"id": notifyId}`.
+  No answer within 3 s — the daemon shows the banner itself via `osascript` (the text goes as arguments, not inside the
+  script text). The exception is a rule with `bannerAlways` (only the built-in `app-pin-changed`, `app-pin-path-changed`
+  and `app-restart-stopped`; this field can be neither set nor cleared through `config.json` or plugins): `osascript`
+  right away, nothing goes to the shell. Acknowledgements are accepted from the app class, and right after a re-pin, app
+  is the very build the pin notification is about.
+- Idle ≥ 10 min — Telegram; off, no credentials, failure or more than 10 messages in 10 min — macOS.
+- Quiet hours (23:00–08:00 by default, "Settings") while idle: only `quietException` goes to Telegram (pin and path
+  changes, a moved tag, `hub-update-suspect`, `hub-update-failed`, and for plugins `quiet="true"`), the rest goes into
+  the digest, including `app-restart-stopped`; the digest is sent as one message on the first tick after 08:00 (at the
+  Mac — as one banner).
+- Time is in the `services.push.timezone` zone (the system one by default: the service checks it on every tick and
+  writes `push-timezone` to the journal when it changes); DST transitions follow wall-clock time. The zone is exposed
+  in `/state.notifications.quiet.timezone`, the idle threshold in `awayAfterMs`.
+- A hub update failure that looks like tampering (`commit-mismatch`, `not-on-main`, `untrusted-build`, `verify-failed`,
+  `tag-moved`) uses the key `hub-update-suspect:<label>` (`security`); other failures use `hub-update-failed:<label>`
+  (`updates`).
+
+## Settings (`services.push` in `<home>/config.json`)
+
+`timezone`, `quietStart` ("23:00"), `quietEnd` ("08:00") — fallbacks only, until quiet hours are set in "Settings"
+(above), `eveningAt` ("21:00"), `idleThresholdMs` (600000),
+`ackTimeoutMs` (3000), `acceptCliAck` (false), `tickMs` (30000), `flapCooldownMs` (600000),
+`staleGraceMs` (600000), `digestMaxItems` (30), `maxPerPluginPerMin` (20), `maxPerUntrustedPerMin` (5),
+`maxEntriesPerPlugin` (500), `maxEntriesPerUntrusted` (100), `telegram.enabled` (**false**), `telegram.keychainService`
+("agent-hub.telegram"), `telegram.maxPer10Min` (10), `rules` — overrides/additions to the table:
+`{"my-key": {"label": "…", "macOnly": true}}`. Plugin rules from `<agenthub.push>` go ahead of this table, but user
+overrides apply to them too: `{"service-silent": {"macOnly": false}}` (by rule name) or
+`{"<plugin>:service-silent": {…}}` (for that plugin only) — the fields are layered over the plugin rule.
+`enabled: false` — the service does not start.
+
+## Telegram (done by the user)
+
+1. Create a bot via BotFather and find the chat_id of your chat with the bot.
+2. Entries in the `login` keychain (the token value is entered at the prompt and does not end up in shell history):
+   ```
+   security add-generic-password -s agent-hub.telegram -a token   -T /usr/bin/security -w
+   security add-generic-password -s agent-hub.telegram -a chat_id -T /usr/bin/security -w
+   ```
+3. `"services": {"push": {"telegram": {"enabled": true}}}` in `~/Library/Application Support/AgentHub/config.json`.
+4. Check: `env -u NODE_OPTIONS node daemon/lib/push/send-test.mjs --yes`.
+
+In test mode (`AGENTHUB_HOME`) Telegram is always off. The token, chat_id and message text are never written to the
+journal: only `push-sent {key, channel, rule}`, `push-held`, `push-deferred`, `push-suppressed`,
+`push-fallback {key, reason}`, `push-digest {count, channel}`, `push-error {channel, code}`, `push-muted {key, rule,
+kind, reason}`.

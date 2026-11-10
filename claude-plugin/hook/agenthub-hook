@@ -1,0 +1,184 @@
+#!/usr/bin/env -S -u NODE_OPTIONS node
+// agenthub-hook — a Claude Code hook (type command) for Agent Hub.
+//
+// hook stdin → POST /hook on the daemon's hub.sock → stdout. Always exits with code 0 and always prints JSON:
+// daemon not running, someone else's socket, timeout, error, a 403 refusal — it prints {} and Claude Code continues
+// as if there were no hook (hooks.json has no onFailure: block).
+//
+// Defense in depth (the daemon checks everything itself, this is the second line):
+//   - only the needed event fields are forwarded: without transcript_path, last_assistant_message,
+//     background_tasks, cwd and the rest; tool_input — only for PermissionRequest;
+//   - only a narrow daemon response is let through: for PermissionRequest — decision.behavior allow|deny,
+//     updatedInput (only with allow), message (only with deny). updatedPermissions, interrupt,
+//     setMode, additionalContext, systemMessage and everything else are dropped. For other events — {}.
+//
+// Environment: NODE_OPTIONS is removed by the #! line (the cmux preload crashes child node processes).
+//   AGENTHUB_HOME            — the daemon's state directory (default ~/Library/Application Support/AgentHub)
+//   AGENTHUB_HOOK_TIMEOUT_MS — overall timeout for waiting for a PermissionRequest response (default 118000)
+//   AGENTHUB_HOOK_DEBUG=1    — the reason for {} as one line on stderr
+//
+// The same file lives in claude-plugin/hook/agenthub-hook (a copy; a test checks that they are identical).
+
+"use strict";
+
+const { request } = require("node:http");
+const { lstatSync } = require("node:fs");
+const { homedir, userInfo } = require("node:os");
+const { join, resolve } = require("node:path");
+
+const MAX_STDIN = 1024 * 1024;
+const FORWARD = {
+  // fields common to all events
+  common: ["session_id", "hook_event_name", "permission_mode", "agent_id", "agent_type"],
+  SessionStart: ["source", "model"],
+  SessionEnd: ["reason"],
+  Stop: ["stop_hook_active"],
+  PermissionRequest: ["tool_name", "tool_input"],
+};
+const DEFAULT_TIMEOUT_MS = { PermissionRequest: 118_000, other: 5_000 };
+
+let done = false;
+function finish(obj, why) {
+  if (done) return;
+  done = true;
+  if (why && process.env.AGENTHUB_HOOK_DEBUG === "1") process.stderr.write(`agenthub-hook: ${why}\n`);
+  process.stdout.write(JSON.stringify(obj || {}) + "\n", () => process.exit(0));
+}
+
+// The daemon address — as in daemon/lib/platform.mjs: a Unix socket in the state directory, a named pipe on Windows.
+const WINDOWS = process.platform === "win32";
+function socketPath() {
+  if (WINDOWS) {
+    let user = "user";
+    try {
+      user = String(userInfo().username || "user").replace(/[^\w.-]/g, "_").slice(0, 64) || "user";
+    } catch {}
+    return `\\\\.\\pipe\\agenthub-${user}`;
+  }
+  const home = process.env.AGENTHUB_HOME ? resolve(process.env.AGENTHUB_HOME) : join(homedir(), "Library", "Application Support", "AgentHub");
+  return join(home, "hub.sock");
+}
+
+function pick(body) {
+  const ev = body.hook_event_name;
+  const out = {};
+  for (const k of [...FORWARD.common, ...(FORWARD[ev] || [])]) if (body[k] !== undefined) out[k] = body[k];
+  return out;
+}
+
+// JSON with sorted keys — for comparing inputs.
+function stable(v) {
+  if (Array.isArray(v)) return `[${v.map(stable).join(",")}]`;
+  if (v && typeof v === "object") return `{${Object.keys(v).sort().map((k) => `${JSON.stringify(k)}:${stable(v[k])}`).join(",")}}`;
+  return JSON.stringify(v ?? null);
+}
+
+// updatedInput is allowed only for AskUserQuestion and only as "the original input + answers": everything except answers
+// matches the tool_input the hook itself got from Claude; answers are strings. A foreign process on hub.sock (the daemon
+// killed and replaced) cannot slip in another Bash command or another Edit file this way.
+function answersOnly(body, updated) {
+  if (body?.tool_name !== "AskUserQuestion") return false;
+  const orig = body.tool_input;
+  if (!orig || typeof orig !== "object" || Array.isArray(orig)) return false;
+  if (!updated || typeof updated !== "object" || Array.isArray(updated)) return false;
+  const a = updated.answers;
+  if (!a || typeof a !== "object" || Array.isArray(a) || !Object.values(a).every((x) => typeof x === "string")) return false;
+  const strip = (o) => Object.fromEntries(Object.entries(o).filter(([k]) => k !== "answers"));
+  return stable(strip(updated)) === stable(strip(orig));
+}
+
+// A narrow response to the PermissionRequest hook: allow (with updatedInput — only AskUserQuestion answers) or deny.
+function sanitize(ev, ans, body) {
+  if (ev !== "PermissionRequest") return {};
+  const d = ans && typeof ans === "object" ? ans.hookSpecificOutput?.decision : null;
+  if (!d || typeof d !== "object") return {};
+  if (d.behavior === "allow") {
+    const decision = { behavior: "allow" };
+    if (d.updatedInput !== undefined) {
+      if (!answersOnly(body, d.updatedInput)) return {};
+      decision.updatedInput = d.updatedInput;
+    }
+    return { hookSpecificOutput: { hookEventName: "PermissionRequest", decision } };
+  }
+  if (d.behavior === "deny") {
+    const decision = { behavior: "deny" };
+    if (typeof d.message === "string") decision.message = d.message.slice(0, 500);
+    return { hookSpecificOutput: { hookEventName: "PermissionRequest", decision } };
+  }
+  return {};
+}
+
+function main(text) {
+  let body;
+  try {
+    body = JSON.parse(text);
+  } catch {
+    return finish({}, "stdin is not JSON");
+  }
+  if (!body || typeof body !== "object" || typeof body.session_id !== "string") return finish({}, "no session_id");
+  const ev = body.hook_event_name;
+  if (!Object.hasOwn(FORWARD, ev) || ev === "common") return finish({}, `event ${String(ev)} is not forwarded`);
+
+  const sock = socketPath();
+  // On POSIX — the socket is ours (same uid); a Windows named pipe has no file, access is decided by the pipe's ACL.
+  if (!WINDOWS) {
+    try {
+      const st = lstatSync(sock);
+      if (!st.isSocket() || st.uid !== process.getuid()) return finish({}, "socket is not ours");
+    } catch {
+      return finish({}, "daemon is not running");
+    }
+  }
+
+  const envMs = parseInt(process.env.AGENTHUB_HOOK_TIMEOUT_MS || "", 10);
+  const timeoutMs = Number.isInteger(envMs) && envMs > 0 ? envMs : ev === "PermissionRequest" ? DEFAULT_TIMEOUT_MS.PermissionRequest : DEFAULT_TIMEOUT_MS.other;
+  const timer = setTimeout(() => {
+    req.destroy();
+    finish({}, "timeout");
+  }, timeoutMs);
+
+  const data = JSON.stringify(pick(body));
+  const req = request(
+    { socketPath: sock, method: "POST", path: "/hook", agent: false, headers: { "content-type": "application/json", "content-length": Buffer.byteLength(data) } },
+    (res) => {
+      let s = "";
+      res.setEncoding("utf8");
+      res.on("data", (c) => {
+        s += c;
+        if (s.length > 2 * MAX_STDIN) req.destroy();
+      });
+      res.on("end", () => {
+        clearTimeout(timer);
+        if (res.statusCode !== 200) return finish({}, `daemon answered ${res.statusCode}`);
+        let ans;
+        try {
+          ans = JSON.parse(s);
+        } catch {
+          return finish({}, "response is not JSON");
+        }
+        finish(sanitize(ev, ans, body));
+      });
+      res.on("error", () => finish({}, "response cut off"));
+    },
+  );
+  req.on("error", (e) => {
+    clearTimeout(timer);
+    finish({}, `socket: ${e.code || e.message}`);
+  });
+  req.end(data);
+}
+
+// Claude Code waits for the hook until it closes stdin; read to the end with a limit.
+const chunks = [];
+let size = 0;
+process.stdin.on("data", (b) => {
+  size += b.length;
+  if (size > MAX_STDIN) return finish({}, "stdin is larger than 1 MB");
+  chunks.push(b);
+});
+process.stdin.on("end", () => {
+  if (!done) main(Buffer.concat(chunks).toString("utf8"));
+});
+process.stdin.on("error", () => finish({}, "stdin"));
+// Just in case: any unexpected error — {} and code 0.
+process.on("uncaughtException", () => finish({}, "exception"));

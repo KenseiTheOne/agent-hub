@@ -1,0 +1,11 @@
+{
+  "name": "agent-hub",
+  "displayName": "Agent Hub",
+  "version": "0.1.0",
+  "description": "Answer permission requests and session questions from Agent Hub (macOS menu bar): the PermissionRequest hook waits for the hub card's decision — \"allow once\", \"deny\" or a chosen option; with no daemon or for unknown sessions the hook answers {} and everything goes on as usual. Async SessionStart/SessionEnd/Stop register interactive sessions.",
+  "author": {
+    "name": "Kensei"
+  },
+  "license": "MIT",
+  "keywords": ["agent-hub", "permissions", "hooks", "menu-bar", "cmux", "remote-control"]
+}

@@ -1,0 +1,729 @@
+#!/usr/bin/env node
+// agenthub — CLI Agent Hub.
+//
+//   agenthub status [--json]          plugin statuses (table) or the GET /state snapshot
+//   agenthub logs [-n N] [-f]         the journal (metadata)
+//   agenthub refresh <plugin>         restart a plugin
+//   agenthub pause                    pause the hub: answers to sessions, launches, stops and plugin actions
+//                                     are off; resume with the "Resume hub" button in the app or by deleting
+//                                     <AGENTHUB_HOME>/ESTOP (the old command name is `agenthub estop on`)
+//   agenthub lang                     hub language: the setting and the effective one (change it only in the app)
+//   agenthub pin-app <AgentHub.app> [--dry-run]
+//                                     pin this build: requirements.app = identifier + the build's cdhash (ad hoc
+//                                     signature by default; scripts/bundle.sh calls this itself). The daemon picks it up
+//                                     without a restart; the previous build gets 403; the change goes to the journal and push.
+//                                     The build path (appPin.path, realpath) is for the daemon to restart a crashed app;
+//                                     a bundle in someone else's or a world-writable directory (/tmp) is refused;
+//                                     a path change also goes to the journal (app-pin-path-changed) and push
+//   agenthub install [--apply] [--no-launchd] [--app-cert-sha1 SHA1] [--registry-pubkey FILE] [--registry-url URL]
+//                                     without --apply, only the plan; --no-launchd writes only config.json;
+//                                     --app-cert-sha1 is an optional certificate mode (bundle.sh --cert);
+//                                     a full install (with launchd) also puts a copy of the built-in plugins into
+//                                     <state dir>/Builtin and points config.json there (builtinPluginsDir);
+//                                     with AGENTHUB_HOME on a test directory it is refused (launchd starts the live hub)
+//   agenthub builtin [status]         where the hub takes built-in plugins from: config.json and the running daemon
+//                                     (/state.hub.builtinDir); whether the copy matches the repo. Exit code 0 only
+//                                     if the daemon answers, runs on the directory from config.json and the copy is up to date
+//   agenthub builtin update [--dry-run] [--from <dir>]
+//                                     update the <state dir>/Builtin copy from <repo>/plugins (after editing
+//                                     plugins) and point config.json there; the daemon picks up the files itself
+//   agenthub uninstall [--apply] [--purge] [--no-launchd] [--yes]
+//                                     remove the hub: stop the daemon and the app, remove the launchd job, delete
+//                                     versions (Versions), update state and the built-in plugin copy; settings,
+//                                     the journal, plugins and their data stay (--purge removes them). --apply only from
+//                                     a human's terminal (confirm with "y"); --yes only in a test directory
+//   agenthub plugins install <id>     install a plugin from the signed registry catalog (services.plugins in
+//                                     config.json): a permission window in the terminal, consent by typing the id; TTY only
+//   agenthub plugins install --from <folder>
+//                                     an own plugin from a local folder (convention: <repo>/agenthub/<id>/; the repo root
+//                                     also works): a request to the running daemon. The CLI does not install: a human approves
+//                                     the install in the pinned app (consent window); without it, refused
+//   agenthub plugins remove <id> [--purge]
+//   agenthub version [--json]         this code's version (the VERSION file) and where it runs from
+//   agenthub hub [status]             the separate hub install (docs/hub-updates.md): current and previous versions
+//   agenthub hub migrate [--apply] [--from <repo>] [--allow-dirty] [--no-launchd] [--under-estop]
+//                                     move the live hub from a working folder to Versions/<label> (tag on HEAD → X.Y.Z,
+//                                     otherwise X.Y.Z-dev.<commit>), the plist via Versions/current
+//   agenthub hub install [--apply] [--origin <url|path>] [--no-launchd]
+//                                     install from scratch, called by the scripts/install.sh installer (docs/hub-updates.md §8a)
+//   agenthub setup [--plan] [--no-launchd]
+//                                     after `brew install KenseiTheOne/tap/agent-hub`: install the hub from the Homebrew keg
+//                                     (hub install --brew --apply, docs/hub-updates.md §8b) — build, pin, launchd job, start;
+//                                     the hub then takes new versions from `brew upgrade agent-hub`, not from git tags
+//   agenthub hub rollback [--apply] [--under-estop]   emergency: Versions/current → previous and kickstart -k, without
+//                                     the daemon; --apply (as with migrate) only from a terminal (TTY), not while paused
+//
+// State directory: ~/Library/Application Support/AgentHub or AGENTHUB_HOME.
+
+import { request } from "node:http";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync, openSync, readSync, closeSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { execFileSync } from "node:child_process";
+import { defaultHome, loadConfig, pathsFor, readJsonFile, REPO_DIR } from "../lib/config.mjs";
+import { hasLaunchd, installPlan, localAppRequirement, plistXml, stateDirs, LABEL } from "../lib/launchd.mjs";
+import { cdhashRequirement, pinFingerprint, requirementSha, writeAppPinPath, writeAppRequirement } from "../lib/app-pin.mjs";
+import { readBundleCode } from "../lib/app-sign.mjs";
+import { parsePublicKey } from "../lib/registry/minisign.mjs";
+import { appBundleProblem, samePath } from "../lib/platform.mjs";
+import { builtinCopyDir, builtinStatus, pointConfigAtCopy, REPO_PLUGINS, syncBuiltin } from "../lib/builtin-copy.mjs";
+import { createInterface } from "node:readline/promises";
+import { INSTALL } from "../lib/config.mjs";
+import { VERSION } from "../lib/version.mjs";
+import { CONTRACT_VERSION } from "../lib/meta.mjs";
+import { daemonLocation } from "../lib/launchd.mjs";
+import { hubCli, uninstallCli } from "../lib/hub-update/cli.mjs";
+import { brewDirOf } from "../lib/hub-update/brew.mjs";
+import { currentLabel, versionPlugins } from "../lib/hub-update/layout.mjs";
+import { LANGS, errText, has as hasMsg, msg, setLangSource } from "../lib/i18n.mjs";
+import { langForHome } from "../lib/settings.mjs";
+
+const args = process.argv.slice(2);
+const cmd = args[0];
+const has = (f) => args.includes(f);
+const opt = (f) => {
+  const i = args.indexOf(f);
+  return i >= 0 ? args[i + 1] : undefined;
+};
+
+// The CLI speaks the hub language: AGENTHUB_LANG when the daemon spawned this process (the hub-update builder and
+// watchdog), otherwise the home's settings.json (--home for `hub build|watch`), as the daemon reads it (lib/settings.mjs).
+// English unless the hub language is Russian.
+let cliLang = null;
+setLangSource(() => (cliLang ??= LANGS.includes(process.env.AGENTHUB_LANG) ? process.env.AGENTHUB_LANG : langForHome(opt("--home") || defaultHome())));
+
+// A corrupt config.json gives one clear line and exit code 1, not an unhandled exception with a stack.
+let config;
+try {
+  config = loadConfig();
+} catch (e) {
+  console.error(`agenthub: ${e.message}`);
+  process.exit(1);
+}
+// The live hub directory is the one the launchd daemon uses (the plist has no AGENTHUB_HOME). AGENTHUB_HOME pointing to another
+// directory is a test copy: its daemon is started by hand, not via launchd.
+const LIVE_HOME = stateDirs().home;
+const isLiveHome = samePath(config.paths.home, LIVE_HOME);
+
+function call(method, path, body) {
+  return new Promise((resolve, reject) => {
+    const data = body ? JSON.stringify(body) : null;
+    const req = request(
+      { socketPath: config.paths.socket, method, path, headers: data ? { "content-type": "application/json", "content-length": Buffer.byteLength(data) } : {} },
+      (res) => {
+        let s = "";
+        res.setEncoding("utf8");
+        res.on("data", (c) => (s += c));
+        res.on("end", () => {
+          let j = null;
+          try {
+            j = JSON.parse(s);
+          } catch {}
+          resolve({ status: res.statusCode, body: j });
+        });
+      },
+    );
+    req.on("error", reject);
+    req.setTimeout(5000, () => req.destroy(new Error("timeout")));
+    if (data) req.write(data);
+    req.end();
+  });
+}
+
+function age(iso) {
+  if (!iso) return "—";
+  const s = Math.round((Date.now() - Date.parse(iso)) / 1000);
+  if (s < 60) return `${s}s`;
+  if (s < 3600) return `${Math.round(s / 60)}m`;
+  return `${Math.round(s / 3600)}h`;
+}
+
+function pad(s, n) {
+  s = String(s ?? "");
+  const w = [...s].length;
+  return w >= n ? [...s].slice(0, n - 1).join("") + "…" : s + " ".repeat(n - w);
+}
+
+async function status() {
+  let r;
+  try {
+    r = await call("GET", "/state");
+  } catch (e) {
+    console.error(msg("cli.unreachable.at", { socket: config.paths.socket, why: e.code || e.message }));
+    process.exit(2);
+  }
+  if (r.status !== 200) {
+    console.error(`GET /state → ${r.status} ${r.body?.error || ""}`);
+    process.exit(2);
+  }
+  const st = r.body;
+  if (has("--json")) {
+    process.stdout.write(JSON.stringify(st, null, 2) + "\n");
+    return;
+  }
+  console.log(msg("cli.status.head", { version: st.version, status: st.status, waiting: st.waitingSessions, paused: st.estop, you: st.peer?.class }));
+  if (!st.plugins.length) {
+    console.log(msg("cli.status.none"));
+    return;
+  }
+  console.log(msg("cli.status.cols", { pad }));
+  for (const p of st.plugins) {
+    const head = p.header.map((h) => h.title).filter(Boolean)[0] || p.error || "";
+    console.log(`${pad(p.id, 22)}${pad(p.status, 9)}${pad(age(p.lastRunAt), 9)}${head}`);
+  }
+  if (st.sessions.length) {
+    console.log(msg("cli.status.sessions"));
+    for (const s of st.sessions) console.log(`  ${pad(s.name || s.sessionId.slice(0, 8), 24)}${pad(s.status || "?", 9)}pid ${s.pid}${s.waitingFor ? ` · ${s.waitingFor}` : ""}`);
+  }
+}
+
+function tailFile(path, n) {
+  if (!existsSync(path)) return [];
+  const size = statSync(path).size;
+  const want = Math.min(size, Math.max(64 * 1024, n * 400));
+  const fd = openSync(path, "r");
+  const buf = Buffer.alloc(want);
+  readSync(fd, buf, 0, want, size - want);
+  closeSync(fd);
+  const lines = buf.toString("utf8").split("\n").filter(Boolean);
+  if (want < size) lines.shift();
+  return lines.slice(-n);
+}
+
+function fmtEntry(line) {
+  try {
+    const e = JSON.parse(line);
+    const { ts, type, ...rest } = e;
+    return `${ts} ${type} ${Object.entries(rest).map(([k, v]) => `${k}=${Array.isArray(v) ? v.join(",") : v}`).join(" ")}`;
+  } catch {
+    return line;
+  }
+}
+
+async function logs() {
+  const n = parseInt(opt("-n") || "50", 10) || 50;
+  const path = config.paths.journal;
+  for (const l of tailFile(path, n)) console.log(has("--json") ? l : fmtEntry(l));
+  if (!has("-f")) return;
+  let pos = existsSync(path) ? statSync(path).size : 0;
+  setInterval(() => {
+    if (!existsSync(path)) return;
+    const size = statSync(path).size;
+    if (size < pos) pos = 0; // rotation
+    if (size === pos) return;
+    const fd = openSync(path, "r");
+    const buf = Buffer.alloc(size - pos);
+    readSync(fd, buf, 0, buf.length, pos);
+    closeSync(fd);
+    pos = size;
+    for (const l of buf.toString("utf8").split("\n").filter(Boolean)) console.log(has("--json") ? l : fmtEntry(l));
+  }, 1000);
+}
+
+// Wait for the launchd-started daemon to bring up the socket and answer /health.
+async function waitHealthy(socket, ms) {
+  const until = Date.now() + ms;
+  while (Date.now() < until) {
+    if (existsSync(socket)) {
+      const ok = await new Promise((resolve) => {
+        const r = request({ socketPath: socket, path: "/health", agent: false, timeout: 1000 }, (res) => {
+          res.resume();
+          resolve(res.statusCode === 200);
+        });
+        r.on("error", () => resolve(false));
+        r.on("timeout", () => {
+          r.destroy();
+          resolve(false);
+        });
+        r.end();
+      });
+      if (ok) return true;
+    }
+    await new Promise((r) => setTimeout(r, 250));
+  }
+  return false;
+}
+
+// Where to copy the live hub's built-in plugins from: the current version of the separate install, if there is one
+// (docs/hub-updates.md), otherwise, as before, this repository.
+function builtinSource(home) {
+  const cur = currentLabel(home);
+  return cur ? versionPlugins(home, cur) : REPO_PLUGINS;
+}
+
+async function install() {
+  const apply = has("--apply");
+  const launchd = !has("--no-launchd");
+  if (launchd && !hasLaunchd()) {
+    console.error(msg("cli.install.noLaunchd"));
+    process.exit(2);
+  }
+  // The LaunchAgent always starts the live daemon (default directory). With AGENTHUB_HOME on another directory the
+  // built-in plugin copy and config.json would go to the test directory while launchd started the live hub on plugins
+  // from the repo working tree, silently. So a full install from a test environment is not done.
+  const testShell = launchd && !isLiveHome;
+  if (testShell) {
+    console.error(msg("cli.install.testHome", { live: LIVE_HOME, home: config.paths.home }));
+    // the plan can be shown (it changes nothing), the install cannot
+    if (apply) process.exit(2);
+  }
+  // plist (and the uid in the plan) only where launchd exists: on Linux and Windows only --no-launchd gets here
+  let plan = null;
+  if (hasLaunchd()) {
+    plan = installPlan();
+    mkdirSync(dirname(plan.repoPlist), { recursive: true });
+    writeFileSync(plan.repoPlist, plistXml());
+    console.log(msg("cli.install.plistWritten", { path: plan.repoPlist }));
+  }
+  const sha1 = opt("--app-cert-sha1");
+  let req = null;
+  if (sha1) {
+    req = localAppRequirement(sha1);
+    console.log(msg("cli.install.requirement", { config: config.paths.config, req }));
+  }
+  // Plugin registry: the minisign public key (.pub file) and the index.json URL go into services.plugins.
+  let pubKey = null;
+  const pubFile = opt("--registry-pubkey");
+  if (pubFile) {
+    pubKey = readFileSync(pubFile, "utf8").trim();
+    try {
+      parsePublicKey(pubKey);
+    } catch (e) {
+      console.error(msg("cli.install.badPubkey", { why: errText(e) }));
+      process.exit(2);
+    }
+    console.log(msg("cli.install.pubkeyFrom", { file: pubFile }));
+  }
+  const indexUrl = opt("--registry-url");
+  if (indexUrl !== undefined) {
+    if (!/^(https:\/\/|file:\/\/|\/)/.test(indexUrl)) {
+      console.error(msg("cli.install.badUrl"));
+      process.exit(2);
+    }
+    console.log(`services.plugins.indexUrl: ${indexUrl}`);
+  }
+  const patchConfig = Boolean(req || pubKey || indexUrl);
+  if (!apply) {
+    console.log(msg("cli.install.planHead"));
+    if (patchConfig) console.log(msg("cli.install.planWrite", { what: [req && "requirements.app", pubKey && "services.plugins.publicKey", indexUrl && "services.plugins.indexUrl"].filter(Boolean).join(", "), config: config.paths.config }));
+    if (testShell) console.log(msg("cli.install.planRefuse"));
+    else if (launchd) {
+      console.log(msg("cli.install.planCopy", { src: builtinSource(stateDirs().home), dest: builtinCopyDir(stateDirs().home) }));
+      const loc = daemonLocation(stateDirs().home);
+      console.log(msg("cli.install.planPlist", { daemon: loc.daemon, installed: loc.installed }));
+    }
+    if (launchd && !testShell) {
+      console.log(`  cp ${plan.repoPlist} ${plan.target}`);
+      console.log(`  ${plan.bootstrap.join(" ")}`);
+    }
+    return;
+  }
+  if (patchConfig) {
+    let cfg = {};
+    if (existsSync(config.paths.config)) cfg = readJsonFile(config.paths.config);
+    if (req) {
+      cfg.requirements = { ...(cfg.requirements || {}), app: req };
+      // pin details for the daemon journal (app-requirement-changed: who)
+      cfg.appPin = { pinnedAt: new Date().toISOString(), requirementSha: requirementSha(req), by: "agenthub install --app-cert-sha1", under: await pinnerUnder() };
+    }
+    if (pubKey || indexUrl) {
+      cfg.services = cfg.services || {};
+      cfg.services.plugins = { ...(cfg.services.plugins || {}), ...(pubKey ? { publicKey: pubKey } : {}), ...(indexUrl ? { indexUrl } : {}) };
+    }
+    mkdirSync(config.paths.home, { recursive: true, mode: 0o700 });
+    writeFileSync(config.paths.config, JSON.stringify(cfg, null, 2) + "\n", { mode: 0o600 });
+    console.log(msg("cli.install.written", { path: config.paths.config }));
+  }
+  if (!launchd) return;
+  // launchd does not create the StandardOutPath/StandardErrorPath directory itself, and without it the job does not start (78).
+  const dirs = stateDirs();
+  mkdirSync(dirs.home, { recursive: true, mode: 0o700 });
+  chmodSync(dirs.home, 0o700);
+  mkdirSync(dirs.logs, { recursive: true, mode: 0o700 });
+  chmodSync(dirs.logs, 0o700);
+  // The live daemon's built-in plugins come from a copy in the state directory, not from the repo working tree
+  // (a plugin edit does not reach the running hub until `agenthub builtin update` is run). Only the live
+  // directory gets here (the test one is cut off above); a test daemon started by hand uses the repo, as before.
+  {
+    // a hub in a separate install (Versions/current): copy from the current version, not from the working folder
+    const r = syncBuiltin({ src: builtinSource(dirs.home), home: dirs.home });
+    pointConfigAtCopy(pathsFor(dirs.home).config, r.dest);
+    console.log(msg("cli.install.copied", { dest: r.dest, n: Object.keys(r.manifest.files).length, src: builtinSource(dirs.home) }));
+  }
+  mkdirSync(dirname(plan.target), { recursive: true });
+  copyFileSync(plan.repoPlist, plan.target);
+  try {
+    execFileSync(plan.bootout[0], plan.bootout.slice(1), { stdio: "ignore" });
+  } catch {}
+  execFileSync(plan.bootstrap[0], plan.bootstrap.slice(1), { stdio: "inherit" });
+  const waitMs = parseInt(process.env.AGENTHUB_INSTALL_WAIT_MS || "", 10) || 15_000;
+  if (await waitHealthy(dirs.socket, waitMs)) {
+    console.log(msg("cli.install.running", { label: LABEL, socket: dirs.socket }));
+    return;
+  }
+  console.error(msg("cli.install.noAnswer", { label: LABEL, socket: dirs.socket, secs: Math.round(waitMs / 1000), print: plan.print.join(" "), logs: dirs.logs }));
+  process.exit(1);
+}
+
+// Who is pinning, as reported by this process (the daemon logs it as "who"): from under Claude Code or from a
+// terminal. Anyone who writes config.json themselves can fake it; it is a hint for a human, not proof.
+async function pinnerUnder() {
+  try {
+    const { claudeAncestor } = await import("../lib/registry/terminal.mjs");
+    const a = await claudeAncestor({ config });
+    if (a) return "claude-code";
+    return process.stdin.isTTY ? "terminal" : "no-tty";
+  } catch {
+    return null;
+  }
+}
+
+async function pinApp() {
+  const app = args[1];
+  if (!app || app.startsWith("-")) {
+    console.error(msg("cli.pin.usage"));
+    process.exit(64);
+  }
+  let code;
+  try {
+    code = readBundleCode(app);
+  } catch (e) {
+    console.error(`pin-app: ${e.message}`);
+    process.exit(1);
+  }
+  const req = cdhashRequirement(code.cdhash);
+  const before = config.requirements?.app ?? null;
+  console.log(msg("cli.pin.build", { app }));
+  console.log(msg("cli.pin.signed", { adhoc: code.adhoc, authority: code.authority || "?", identifier: code.identifier, cdhash: code.cdhash }));
+  console.log(msg("cli.pin.before", { label: pinFingerprint(before).label }));
+  console.log(msg("cli.pin.after", { label: pinFingerprint(req).label }));
+  console.log(msg("cli.pin.config", { path: config.paths.config }));
+  // the path is the real one (realpath): the daemon launches from here at start and after a crash. If the bundle or a directory above it
+  // is not ours or is writable by group and others (/tmp), an outsider could replace the build there: do not pin
+  let appPath;
+  try {
+    appPath = realpathSync(resolve(app));
+  } catch (e) {
+    console.error(`pin-app: ${e.message}`);
+    process.exit(1);
+  }
+  const problem = appBundleProblem(appPath, { testMode: !isLiveHome });
+  if (problem) {
+    const why = msg(problem === "path-unsafe" || problem === "unsupported" ? `cli.pin.why.${problem}` : "cli.pin.why.other");
+    console.error(`pin-app: ${appPath}: ${why} (${problem})`);
+    process.exit(1);
+  }
+  const oldPath = typeof config.appPin?.path === "string" && config.appPin.requirementSha === requirementSha(before) ? config.appPin.path : null;
+  if (oldPath && oldPath !== appPath) console.log(msg("cli.pin.pathChange", { old: oldPath, new: appPath }));
+  if (requirementSha(before) === requirementSha(req)) {
+    // the pinned build path is for daemon supervision (restarting a crashed app, the app service): entries from
+    // before 2026-11-06 lack it, and a build moved to another directory has a different one
+    if (config.appPin?.path !== appPath && !has("--dry-run")) {
+      try {
+        if (writeAppPinPath(config.paths.config, req, appPath)) {
+          console.log(msg("cli.pin.pathWritten", { path: appPath }));
+          if (oldPath) console.log(msg("cli.pin.pathNotice"));
+          return;
+        }
+      } catch (e) {
+        console.error(`pin-app: ${e.message}`);
+        process.exit(1);
+      }
+    }
+    console.log(msg("cli.pin.same"));
+    return;
+  }
+  if (has("--dry-run")) {
+    console.log(msg("cli.dryRun"));
+    return;
+  }
+  try {
+    writeAppRequirement(config.paths.config, req, { by: "agenthub pin-app", under: await pinnerUnder(), cdhash: code.cdhash, path: appPath });
+  } catch (e) {
+    console.error(`pin-app: ${e.message}`);
+    process.exit(1);
+  }
+  console.log(msg("cli.pin.done"));
+  const notice = msg(before === null ? "push.rule.app-pin-first" : "push.rule.app-pin-changed");
+  console.log(msg("cli.pin.notice", { notice }));
+}
+
+// Built-in plugins: where the hub takes them from and updating the <home>/Builtin copy.
+//
+// Only the daemon itself knows whether it actually runs on the copy (/state.hub.builtinDir: it reads config.json
+// at start), so `builtin` and `builtin update` ask the running daemon, not just config.json.
+async function daemonBuiltinDir() {
+  try {
+    const r = await call("GET", "/state");
+    if (r.status === 200 && r.body?.hub) return { up: true, dir: r.body.hub.builtinDir ?? null };
+    return { up: true, dir: null, error: `GET /state → ${r.status}` };
+  } catch (e) {
+    return { up: false, error: e.code || e.message };
+  }
+}
+
+// How to restart THIS daemon: the live one via launchd; a test one (AGENTHUB_HOME) by hand, since launchctl here
+// would restart the live hub.
+function restartHint() {
+  if (isLiveHome) return `  launchctl kickstart -k gui/$(id -u)/${LABEL}`;
+  return msg("cli.restart.test", { home: config.paths.home, live: LIVE_HOME });
+}
+
+async function builtin() {
+  const sub = args[1] && !args[1].startsWith("-") ? args[1] : "status";
+  const home = config.paths.home;
+  const from = opt("--from") || builtinSource(home);
+  const copy = builtinCopyDir(home);
+  const rel = (list) => (list.length > 8 ? [...list.slice(0, 8), msg("cli.builtin.more", { n: list.length - 8 })] : list).join(", ");
+  const label = (dir) => (samePath(dir, copy) ? msg("cli.builtin.copyMark") : samePath(dir, REPO_PLUGINS) ? msg("cli.builtin.repoMark") : "");
+  if (sub === "status") {
+    let bad = false;
+    console.log(msg("cli.builtin.home", { home, test: !isLiveHome }));
+    console.log(msg("cli.builtin.config", { dir: `${config.builtinPluginsDir}${label(config.builtinPluginsDir)}` }));
+    const d = await daemonBuiltinDir();
+    if (!d.up) {
+      console.log(msg("cli.builtin.daemonDown", { why: d.error }));
+      bad = true;
+    } else if (!d.dir) {
+      console.log(msg("cli.builtin.daemonNoDir", { why: d.error }));
+      bad = true;
+    } else {
+      console.log(msg("cli.builtin.daemonNow", { dir: `${d.dir}${label(d.dir)}` }));
+      if (!samePath(d.dir, config.builtinPluginsDir)) {
+        console.log(msg("cli.builtin.notSwitched"));
+        console.log(restartHint());
+        bad = true;
+      }
+    }
+    const st = builtinStatus({ src: from, home });
+    if (!st.exists) {
+      console.log(msg("cli.builtin.noCopy", { copy }));
+      process.exit(1);
+    }
+    const diff = st.added.length + st.updated.length + st.removed.length;
+    console.log(msg("cli.builtin.copy", { copy, at: st.manifest?.copiedAt }));
+    if (!diff) console.log(msg("cli.builtin.matches", { from }));
+    else {
+      console.log(msg("cli.builtin.behind", { from }));
+      if (st.added.length) console.log(msg("cli.builtin.added", { list: rel(st.added) }));
+      if (st.updated.length) console.log(msg("cli.builtin.changed", { list: rel(st.updated) }));
+      if (st.removed.length) console.log(msg("cli.builtin.removed", { list: rel(st.removed) }));
+      console.log(msg("cli.builtin.updateHint"));
+    }
+    if (!samePath(config.builtinPluginsDir, copy)) console.log(msg("cli.builtin.notPointed"));
+    process.exit(diff || bad ? 1 : 0);
+  }
+  if (sub !== "update") {
+    console.error(msg("cli.builtin.usage"));
+    process.exit(64);
+  }
+  let r;
+  try {
+    r = syncBuiltin({ src: from, home, dryRun: has("--dry-run") });
+  } catch (e) {
+    console.error(`builtin update: ${e.message}`);
+    process.exit(1);
+  }
+  console.log(msg("cli.builtin.from", { from }));
+  console.log(msg("cli.builtin.to", { to: r.dest }));
+  console.log(msg("cli.builtin.counts", { added: r.added.length, changed: r.updated.length, removed: r.removed.length, same: r.same }));
+  for (const [k, list] of [["+", r.added], ["~", r.updated], ["-", r.removed]]) for (const f of list) console.log(`  ${k} ${f}`);
+  if (r.skipped.length) console.log(msg("cli.builtin.skipped", { list: rel(r.skipped) }));
+  if (r.dryRun) {
+    console.log(msg("cli.dryRun"));
+    return;
+  }
+  let pointed;
+  try {
+    pointed = pointConfigAtCopy(config.paths.config, r.dest);
+  } catch (e) {
+    console.error(`builtin update: ${e.message}`);
+    process.exit(1);
+  }
+  if (pointed.changed) console.log(msg("cli.builtin.pointed", { dest: r.dest, before: pointed.before }));
+  // AGENTHUB_BUILTIN_PLUGINS on the daemon overrides config.json; then the copy has no effect even after a restart
+  if (process.env.AGENTHUB_BUILTIN_PLUGINS) console.log(msg("cli.builtin.envOverride", { dir: process.env.AGENTHUB_BUILTIN_PLUGINS }));
+  const d = await daemonBuiltinDir();
+  if (!d.up) {
+    console.log(msg("cli.builtin.afterDown", { why: d.error }));
+  } else if (samePath(d.dir, r.dest)) {
+    console.log(msg("cli.builtin.afterSame"));
+  } else {
+    console.log(msg("cli.builtin.afterOther", { dir: d.dir ?? "?" }));
+    console.log(restartHint());
+  }
+}
+
+async function simple(method, path, body) {
+  try {
+    const r = await call(method, path, body);
+    console.log(`${r.status} ${JSON.stringify(r.body)}`);
+    process.exit(r.status < 300 ? 0 : 1);
+  } catch (e) {
+    console.error(msg("cli.unreachable", { why: e.code || e.message }));
+    process.exit(2);
+  }
+}
+
+// An own plugin from a folder: a request to the daemon (POST /registry/own/request). A human installs it in the app.
+async function pluginsFrom(dirArg) {
+  if (!dirArg || dirArg.startsWith("--")) {
+    console.error(msg("cli.own.usage"));
+    process.exit(64);
+  }
+  const path = dirArg.startsWith("~/") || dirArg === "~" ? dirArg : resolve(process.cwd(), dirArg);
+  let r;
+  try {
+    r = await call("POST", "/registry/own/request", { path });
+  } catch (e) {
+    console.error(msg("cli.own.daemonDown", { why: e.code || e.message }));
+    process.exit(2);
+  }
+  const b = r.body || {};
+  if (r.status === 200 && b.already) {
+    console.log(msg("cli.own.already", { id: b.id, version: b.version ?? "", path: b.path }));
+    return;
+  }
+  if (r.status === 200 && b.pending) {
+    const m = b.migrate;
+    const was = !m
+      ? ""
+      : m.from === "own"
+        ? msg("cli.own.was.own", { id: b.id, version: m.version, path: m.pathShort || m.path })
+        : m.from === "catalog"
+          ? msg("cli.own.was.catalog", { id: b.id, title: m.title || b.id, tier: msg(m.tier === "official" ? "cli.tier.official" : "cli.tier.community") })
+          : msg("cli.own.was.registry", { id: b.id, version: m.version, tier: msg(m.from === "official" ? "cli.tier.official" : "cli.tier.community") });
+    console.log(msg("cli.own.created", { title: b.title, version: b.version, id: b.id, path: b.pathShort || b.path, fp: String(b.fingerprint).slice(0, 16), permissions: b.permissions, was }));
+    return;
+  }
+  const params = { path: b.path ?? path, ids: (b.ids || []).join(", "), id: b.id ?? "", pending: b.pending?.pathShort || b.pending?.path || "?", max: b.max ?? 10 };
+  const why = b.error === "own:hub-too-old" ? hubTooOld(b) : typeof b.error === "string" && hasMsg(`cli.own.err.${b.error}`) ? msg(`cli.own.err.${b.error}`, params) : null;
+  if (b.error === "own:lint") {
+    console.error(msg("cli.own.lint", { id: b.id ?? "", errors: (b.errors || []).join("\n  ") }));
+  } else console.error(why || msg("cli.own.failed", { status: r.status, error: b.error || JSON.stringify(b) }));
+  process.exit(1);
+}
+
+// The plugin needs a newer contract version than this hub has (<agenthub.contract>): not a plugin error but an old hub.
+function hubTooOld(b) {
+  return msg("cli.hubTooOld", { id: b.id ?? "", need: b.need ?? "?", have: b.have ?? "?" });
+}
+
+async function plugins() {
+  const sub = args[1];
+  const id = args[2];
+  if (sub === "install" && has("--from")) return pluginsFrom(opt("--from"));
+  if (!["install", "remove"].includes(sub) || !id) {
+    console.error(msg("cli.plugins.usage"));
+    process.exit(64);
+  }
+  const { terminalInstall, terminalRemove } = await import("../lib/registry/terminal.mjs");
+  // readline only for the duration of the question: otherwise input that arrived before the question would go to the line event past it
+  let rl = null;
+  const ask = async (q) => {
+    rl = createInterface({ input: process.stdin, output: process.stdout });
+    try {
+      return await rl.question(q);
+    } finally {
+      rl.close();
+      rl = null;
+    }
+  };
+  try {
+    const r = sub === "install" ? await terminalInstall({ config, id, ask }) : await terminalRemove({ config, id, ask, purge: has("--purge") });
+    if (r.declined) {
+      console.log(msg("cli.plugins.cancelled"));
+      process.exit(1);
+    }
+    console.log(sub === "install" ? msg("cli.plugins.installed", { id: r.id, version: r.version }) : msg("cli.plugins.removed", { id: r.id }));
+  } catch (e) {
+    const why = e.code === "registry:hub-too-old" ? hubTooOld({ id, ...(e.extra || {}) }) : typeof e.code === "string" && hasMsg(`cli.plugins.err.${e.code}`) ? msg(`cli.plugins.err.${e.code}`) : null;
+    console.error(why ? why : msg("cli.failed", { why: `${e.code || errText(e)}${e.extra?.errors ? `\n  ${e.extra.errors.join("\n  ")}` : ""}` }));
+    process.exit(1);
+  } finally {
+    rl?.close();
+  }
+}
+
+switch (cmd) {
+  case "status":
+    await status();
+    break;
+  case "logs":
+    await logs();
+    break;
+  case "refresh":
+    if (!args[1]) {
+      console.error(msg("cli.usage.refresh"));
+      process.exit(64);
+    }
+    await simple("POST", `/plugins/${encodeURIComponent(args[1])}/refresh`);
+    break;
+  case "estop":
+  case "pause":
+    if (cmd === "estop" && args[1] !== "on") {
+      console.error(msg("cli.pause.usage", { estop: config.paths.estop }));
+      process.exit(64);
+    }
+    try {
+      const r = await call("POST", "/estop", { on: true });
+      if (r.status >= 300) {
+        console.error(msg("cli.pause.failed", { status: r.status, error: r.body?.error || "" }));
+        process.exit(1);
+      }
+      console.log(msg("cli.pause.done"));
+      console.log(msg("cli.pause.resume", { estop: config.paths.estop }));
+    } catch (e) {
+      console.error(msg("cli.unreachable", { why: e.code || e.message }));
+      process.exit(2);
+    }
+    break;
+  case "lang": {
+    let r;
+    try {
+      r = await call("GET", "/settings");
+    } catch (e) {
+      console.error(msg("cli.unreachable", { why: e.code || e.message }));
+      process.exit(2);
+    }
+    if (r.status !== 200) {
+      console.error(`GET /settings → ${r.status} ${r.body?.error || ""}`);
+      process.exit(2);
+    }
+    const l = r.body.lang;
+    console.log(msg("cli.lang", l));
+    break;
+  }
+  case "install":
+    await install();
+    break;
+  case "uninstall":
+    process.exitCode = await uninstallCli({ config, isLiveHome, has, home: config.paths.home });
+    break;
+  case "pin-app":
+    await pinApp();
+    break;
+  case "builtin":
+    await builtin();
+    break;
+  case "plugins":
+    await plugins();
+    break;
+  case "version":
+    {
+      // this code runs from a Homebrew keg (the formula's source tree) — not a working folder
+      const brew = INSTALL ? null : brewDirOf(REPO_DIR);
+      if (has("--json")) console.log(JSON.stringify({ version: VERSION, contract: CONTRACT_VERSION, label: INSTALL?.label ?? null, installed: Boolean(INSTALL), brew }));
+      else console.log(msg("cli.version", { version: VERSION, label: INSTALL?.label, brew: Boolean(brew), contract: CONTRACT_VERSION }));
+    }
+    break;
+  case "hub":
+    process.exitCode = await hubCli({ args, config, isLiveHome, opt, has });
+    break;
+  case "setup":
+    // --plan — only the plan; otherwise as `hub install --brew --apply` (the "y/N" question stays)
+    process.exitCode = await hubCli({ args: ["hub", "install", ...args.slice(1)], config, isLiveHome, opt, has, setup: true });
+    break;
+  default:
+    console.log(msg("cli.usage"));
+    process.exit(cmd ? 64 : 0);
+}

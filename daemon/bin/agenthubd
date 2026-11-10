@@ -1,0 +1,109 @@
+#!/usr/bin/env node
+// agenthubd — the Agent Hub daemon. Listens only on the Unix socket <home>/hub.sock.
+// State directory: ~/Library/Application Support/AgentHub or AGENTHUB_HOME (test mode).
+
+import { existsSync } from "node:fs";
+import { defaultHome, loadConfig } from "../lib/config.mjs";
+import { setLangSource } from "../lib/i18n.mjs";
+import { langForHome } from "../lib/settings.mjs";
+import { Core } from "../lib/core.mjs";
+import { createPeer } from "../lib/peer.mjs";
+import { loadNative } from "../lib/native.mjs";
+import { startServer } from "../lib/server.mjs";
+import { stopHub } from "../lib/lifecycle.mjs";
+
+if (process.env.NODE_OPTIONS) {
+  // the cmux preload and the like must not get into plugins; the daemon itself runs without NODE_OPTIONS
+  delete process.env.NODE_OPTIONS;
+}
+
+// The "restart me" exit code: a hub update switched Versions/current (docs/hub-updates.md) — launchd
+// (KeepAlive.SuccessfulExit = false) brings the daemon up again, now from the new version.
+const EXIT_RESTART = 75;
+
+// Self-check of a version before switching to it (the update builder, lib/hub-update/build.mjs): load all
+// core modules, open the socket in a test directory (AGENTHUB_HOME is required), answer /health, stop.
+// Prints one JSON line: {ok, version, native, error?}. Never touches the live directory.
+if (process.argv.includes("--self-test")) {
+  const { selfTest } = await import("../lib/selftest.mjs");
+  const r = await selfTest();
+  process.stdout.write(JSON.stringify(r) + "\n");
+  process.exit(r.ok ? 0 : 1);
+}
+
+// Texts before the core is up (a corrupt config.json) are in the hub language too: AGENTHUB_LANG, otherwise the home's
+// settings.json (lib/settings.mjs); the core then takes over as the language source. The self-test above answers in
+// AGENTHUB_LANG (the builder passes the hub language) or English.
+setLangSource(() => (process.env.AGENTHUB_LANG === "ru" || process.env.AGENTHUB_LANG === "en" ? process.env.AGENTHUB_LANG : langForHome(defaultHome())));
+
+// A corrupted config.json — one log line and code 1, not the stack of an unhandled exception (launchd restarts
+// a crashed daemon, and the stack would repeat in the log on every round).
+let config;
+try {
+  config = loadConfig();
+} catch (e) {
+  process.stderr.write(`[agenthubd ${new Date().toISOString()}] ${e.message}\n`);
+  process.exit(1);
+}
+const peer = createPeer({ config });
+const core = new Core({ config, peer });
+
+function log(msg) {
+  process.stderr.write(`[agenthubd ${new Date().toISOString()}] ${msg}\n`);
+}
+
+if (!loadNative()) log("WARNING: no peercred addon (scripts/build-native.sh) — every client counts as cli");
+if (!existsSync(config.builtinPluginsDir)) log(`WARNING: no built-in plugins directory ${config.builtinPluginsDir} — restore the copy: agenthub builtin update`);
+if (!config.requirements.app) log("requirements.app is not set — the app class is unreachable (scripts/bundle.sh pins the build: agenthub pin-app)");
+
+let srv;
+try {
+  await core.init();
+  srv = await startServer(core);
+} catch (e) {
+  log(`startup failed: ${e.message}`);
+  await core.stop().catch(() => {});
+  process.exit(1);
+}
+log(`listening on ${config.paths.socket} (pid ${process.pid})`);
+
+// A regular shutdown is code 0: launchd (KeepAlive.SuccessfulExit=false) does not restart on such an exit. This covers
+// SIGTERM (launchctl, logout), POST /shutdown from the pinned app that is closing, and
+// "login-off" — "Launch at login" is off and the app did not show up within services.app.loginGraceMs (the app
+// service: the daemon was started at login, not by the app).
+// A crash (uncaughtException, startup failure) is code 1, launchd brings the daemon up again.
+// An "update" restart during a shutdown already in progress (SIGTERM arrived while the update service was switching files):
+// Versions/current already points to the new version — exit with code 75 so launchd brings it up instead of leaving the hub down.
+let stopping = false;
+let exitCode = 0;
+async function shutdown(reason) {
+  if (reason === "update") exitCode = EXIT_RESTART;
+  if (stopping) {
+    if (reason === "update") log("hub update during shutdown: exiting with code 75");
+    return;
+  }
+  stopping = true;
+  if (reason !== "update") core.shuttingDown = true;
+  const why = {
+    shutdown: "POST /shutdown from the app",
+    update: "hub update: restarting into the new version (code 75)",
+    "login-off": "\"Launch at login\" is off and the app did not show up",
+  };
+  log(`${why[reason] || reason}: shutting down`);
+  const t = setTimeout(() => process.exit(exitCode), 5000);
+  t.unref();
+  await stopHub({ srv, core, reason });
+  process.exit(exitCode);
+}
+core.shutdownHandler = (reason) => shutdown(reason);
+process.on("SIGTERM", () => shutdown("SIGTERM"));
+process.on("SIGINT", () => shutdown("SIGINT"));
+process.on("SIGHUP", () => core.host.rescan());
+process.on("uncaughtException", (e) => {
+  // the state may have been corrupted — exit, launchd will restart us
+  log(`uncaughtException: ${e.stack || e.message}`);
+  process.exit(1);
+});
+process.on("unhandledRejection", (e) => {
+  log(`unhandledRejection: ${e?.stack || e}`);
+});

@@ -1,0 +1,6 @@
+{"type":"launched"}
+{"type":"started","key":"k1","agentId":"a1","label":"СИНТЕТИЧЕСКАЯ-МЕТКА","phase":"Plan"}
+{"type":"result","key":"k1","agentId":"a1","result":{"summary":"СИНТЕТИЧЕСКИЙ-ИТОГ"},"toolsUsed":["Read"]}
+{"type":"started","key":"k2","agentId":"a2","label":"СИНТЕТИЧЕСКАЯ-МЕТКА","phase":"Build"}
+{"type":"started","key":"k3","agentId":"a3","label":"СИНТЕТИЧЕСКАЯ-МЕТКА","phase":"Build"}
+{"type":"failed","key":"k3","agentId":"a3"}

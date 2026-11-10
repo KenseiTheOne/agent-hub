@@ -1,0 +1,52 @@
+{
+  "description": "Agent Hub: PermissionRequest is forwarded to the hub daemon over a Unix socket and waits for the card's decision (no longer than ~2 min); SessionStart/SessionEnd/Stop are async and only register sessions. Daemon not running, session not interactive, timeout — the hook prints {} and the terminal dialog works as if there were no hook. onFailure: block is not used.",
+  "hooks": {
+    "PermissionRequest": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/hook/agenthub-hook\"",
+            "timeout": 125
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/hook/agenthub-hook\"",
+            "async": true,
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/hook/agenthub-hook\"",
+            "async": true,
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/hook/agenthub-hook\"",
+            "async": true,
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}
