@@ -4,6 +4,19 @@ Releases are git tags `vX.Y.Z` (also published as GitHub releases); the current 
 The plugin contract has its own version history in
 [`docs/extension-points.md`](docs/extension-points.md#contract-versions).
 
+## 0.1.1 — 2026-11-10
+
+### Plugin page controls
+
+- Four new kinds of body lines on the plugin page, optional within contract 3 (a hub 0.1.0 draws their children as
+  plain lines and buttons): `segment=true` — a segmented control from the children (`selected=true` is the current
+  one), falling back to a popup button when it does not fit; `select=true` — a popup button with a menu of the children
+  (`note=` dimmed); `toggle=on|off` — a switch that runs the line's own offer; `table=true columns="A¦B"` — ~34 pt rows
+  with `cells=`, `cellColors=`, a state dot, buttons and icon-only buttons (`icon=true`) from row children, gray notes,
+  collapsible `group=true` subheadings (remembered while the app runs) and `header=true` buttons by the table title.
+  Consecutive segment/select/toggle lines share a label column. Every clickable part uses the usual offer gate,
+  confirmation and busy spinner ([`docs/writing-plugins.md`](docs/writing-plugins.md#43-controls)).
+
 ## 0.1.0 — 2026-11-10
 
 The first public release, under the [MIT license](LICENSE). It covers all the work below, grouped by date.

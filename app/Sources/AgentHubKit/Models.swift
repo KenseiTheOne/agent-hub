@@ -143,6 +143,46 @@ public struct Item: Codable, Sendable, Hashable {
     public var isStrip: Bool { params["strip"] == "true" }
     /// The row's children at the second level, collapsed (`details=true`): process ids, schedules, internals.
     public var isDetails: Bool { params["details"] == "true" }
+
+    // Controls (hub 0.1.1, optional within contract 3: an older hub draws the children as plain lines and buttons).
+    /// `segment=true`: the line's children form a segmented control; `selected=true` marks the current child.
+    public var isSegment: Bool { params["segment"] == "true" }
+    /// `select=true`: the line's children form a popup button (the current child and a menu of the others).
+    public var isSelect: Bool { params["select"] == "true" }
+    /// `toggle=on|off`: a switch drawn in that state; a click runs the line's own offer. nil — not a toggle.
+    public var toggleState: Bool? {
+        switch params["toggle"] {
+        case "on": return true
+        case "off": return false
+        default: return nil
+        }
+    }
+    /// `table=true`: the line's children are table rows.
+    public var isTable: Bool { params["table"] == "true" }
+    /// `columns="Tab¦State¦Model"` on a table line: the column titles.
+    public var columns: [String] { Item.splitCells(params["columns"]) }
+    /// `cells="idle¦Opus 5.5"` on a table row: the columns after the first one (the first is the title).
+    public var cells: [String] { Item.splitCells(params["cells"]) }
+    /// `cellColors="¦#FFB454"`: a color per `cells` entry; empty — the default color (nil).
+    public var cellColors: [String?] { Item.splitCells(params["cellColors"]).map { $0.isEmpty ? nil : $0 } }
+    /// `selected=true`: the current child of a segment or a select.
+    public var isSelected: Bool { params["selected"] == "true" }
+    /// `icon=true`: an icon-only button (`sfimage`), the title is its tooltip and accessibility label.
+    public var isIconOnly: Bool { params["icon"] == "true" }
+    /// `group=true` on a table row: a collapsible subheading whose children are rows.
+    public var isGroup: Bool { params["group"] == "true" }
+    /// `header=true` on a direct child of a table with an offer: a button to the right of the table title.
+    public var isHeader: Bool { params["header"] == "true" }
+
+    /// The cell separator in `columns=`, `cells=`, `cellColors=`: `¦` (U+00A6), the same character plugins already use
+    /// in place of `|` in titles.
+    public static let cellSeparator: Character = "\u{00A6}"
+
+    /// `a¦b¦¦c` → ["a", "b", "", "c"] (empty entries kept: they hold their place); nil or "" → [].
+    public static func splitCells(_ raw: String?) -> [String] {
+        guard let raw, !raw.isEmpty else { return [] }
+        return raw.split(separator: cellSeparator, omittingEmptySubsequences: false).map { $0.trimmingCharacters(in: .whitespaces) }
+    }
 }
 
 public struct PluginAction: Codable, Sendable, Hashable {

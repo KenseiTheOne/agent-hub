@@ -275,14 +275,17 @@ Line after a separator
 
 | Parameter | Where | Meaning |
 |---|---|---|
-| `status=ok\|wait\|block\|error\|unknown` | header (body — a colored dot on the line) | the plugin status (4.3) |
+| `status=ok\|wait\|block\|error\|unknown` | header (body — a colored dot on the line) | the plugin status (4.4) |
 | `tile="…"` | first header line | a short value for the popover tile and the panel badge: "04:30", "2 waiting", "62%". Say what is happening, not "!" — the status icon already shows alarm |
 | `tileLabel="…"` | first header line | a short tile caption instead of the plugin name (the tile fits ~110 pt): "Agents" instead of "Background agents" |
 | `gauge=0…100`, `gaugeLabel="…"` | first header line — a ring on the plugin page; body — a card with a bar (`note` on the right, children under the bar) | |
 | `stat="caption"`, `note="…"` | body | a number card: the line title is the value ("04:30"), `stat` the caption, `note` a line under it; consecutive ones form a row |
 | `strip=true` | body | the line's children form a strip of cells (`sfimage`, title, `note`; a cell with an effect is a button): "Recent runs" |
 | `details=true` | body | the line's children are collapsed under "Details": process ids, cron lines, internal ids |
-| `activity="…"`, `needsOn="…"` | header | the "can I shut down" verdict (4.4) |
+| `segment=true`, `select=true` | body | the line's children are the options of a segmented control or a popup button; `selected=true` marks the current one, the others carry `action=`/`effect=`; `note=` on the line is gray text beside the control ([4.3](#43-controls)) |
+| `toggle=on\|off` | body | a switch in that state; a click runs the line's own `action=`/`effect=` ([4.3](#43-controls)) |
+| `table=true`, `columns="A¦B¦C"` | body | the line's children are table rows: `cells="b¦c"`, `cellColors="¦#FFB454"`, row children as buttons (`icon=true` — icon only) or gray notes, `group=true` subheadings, `header=true` buttons by the title ([4.3](#43-controls)) |
+| `activity="…"`, `needsOn="…"` | header | the "can I shut down" verdict (4.5) |
 | `event=<key>` | any line | a notification key (section 9) |
 | `effect="<primitive> <args>"`, `href=<url>` | any line | a button that runs a core primitive (section 5) |
 | `action=<id>`, `arg=<value>` | any line | a button that runs your declared action (section 5) |
@@ -313,7 +316,61 @@ Details | details=true
 --pid 4242 · cron 30 4 * * *
 ```
 
-### 4.3 Status: what it means
+### 4.3 Controls
+
+Hub 0.1.1 draws four more kinds of body lines on the plugin page. They stay within contract 3: the keys are optional,
+and an older hub draws the children as plain lines and capsule buttons, so the same output still works there. Every
+clickable part is an ordinary offer (`action=`/`arg=`, `effect=`, `href=`): the same gate (disabled with the reason in
+the tooltip while paused or without the bridge), confirmation level ("…" after the title of an offer that asks first)
+and spinner while it runs. After an action the hub runs the plugin again, so the new state comes from your next frame —
+the hub never flips a control by itself.
+
+```
+Model | segment=true note="for new sessions"
+--Default (Opus 5.5) | action=set-model arg=default
+--Opus 5.5 | selected=true
+--Sonnet 5.5 | action=set-model arg=claude-sonnet-5-5
+Output style | select=true note="open tabs pick it up from their next message"
+--Explanatory | selected=true
+--Terse | action=set-style arg=Terse note="yours"
+Ultracode | toggle=off action=ultracode-on note="multi-agent workflows on every task"
+---
+Open sessions · 13 | table=true columns="Tab¦State¦Model¦Effort"
+--Apply base · 2 | action=apply-all header=true
+--api-server | cells="idle¦Opus 5.5¦xhigh" cellColors="¦¦#FFB454" sfimage=circle.fill iconColor=#8E8E93
+----Fix | action=apply arg=3f2c9a1e-7b4d-4c8e-9f10-2a3b4c5d6e7f
+----Switch | effect="session.focus 3f2c9a1e-7b4d-4c8e-9f10-2a3b4c5d6e7f" sfimage=arrow.up.forward.app icon=true
+--web-client | cells="busy¦Sonnet 5.5¦medium"
+----after the turn | color=#8E8E93
+--As base · 9 | group=true
+----Agent Hub | cells="waiting¦Opus 5.5¦medium" sfimage=circle.fill iconColor=#FFB454
+------Switch | effect="session.focus 4a3d0b2f-8c5e-4d9f-a021-3b4c5d6e7f80" sfimage=arrow.up.forward.app icon=true
+```
+
+- **`segment=true`** — the children form a segmented control: one shared track, the `selected=true` child highlighted
+  (it is not pressable). The others need an offer; one without is shown dimmed. When the options do not fit the page
+  width, the same choice is drawn as a popup button.
+- **`select=true`** — a popup button with the current (`selected=true`) child and a chevron; the menu lists all
+  children, the current one with a checkmark, each child's `note=` as a dimmed second line. For lists that can be long.
+- **`toggle=on|off`** — a switch drawn in that state; a click runs the line's own offer (print `toggle=off
+  action=…-on` and `toggle=on action=…-off`). Without an offer the switch only shows the state.
+- Consecutive segment, select and toggle lines form one block: titles in a label column, controls beside them, `note=`
+  as gray text right of the control. Under a heading line (`For new sessions` with the controls as its children) they
+  line up with the heading instead of being indented.
+- **`table=true`** — the line title is the table title, `columns=` the column titles. Each child is a ~34 pt row: the
+  title is the first column, `cells=` the other columns, `cellColors=` a color per cell (empty — default; a colored cell
+  is also bold), `sfimage=circle.fill` with `iconColor=` (or `status=`) a small state dot before the title (another
+  `sfimage` — a small icon). A row's own children: with an offer — small buttons at the right of the row, with
+  `icon=true` an icon-only button (`sfimage`; the title is its tooltip and accessibility label); without an offer — a
+  gray note in the same place (`color=` tints it). Rows outside groups have a subtle fill.
+- **`group=true`** on a table child — a collapsible subheading whose children are rows. Groups start expanded; the
+  hub remembers a collapsed group while the app runs (by the table and group titles without a trailing count, so
+  `As base · 9` → `As base · 10` stays collapsed).
+- **`header=true`** on a direct table child with an offer — a button right of the table title, not a row.
+- `¦` (U+00A6) separates entries in `columns=`, `cells=` and `cellColors=`; entries are trimmed, empty ones keep their
+  place. Quote the value when an entry has a space. A truncated cell shows its full text on hover.
+
+### 4.4 Status: what it means
 
 | Status | Shared label (without your `<agenthub.status>`) | Use it when |
 |---|---|---|
@@ -332,7 +389,7 @@ Details | details=true
 - Give each status you use an unambiguous label with `<agenthub.status>`: "waiting" for a quota and for a session mean
   different things.
 
-### 4.4 "Can I shut down?"
+### 4.5 "Can I shut down?"
 
 The popover answers whether the Mac can be shut down. A plugin takes part only if its header carries `activity=` or
 `needsOn=` (any tier — this is not a permission):

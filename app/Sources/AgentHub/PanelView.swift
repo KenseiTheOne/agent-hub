@@ -851,6 +851,14 @@ struct PluginDetailView: View {
             }
         case .strip(let node):
             StripCard(store: store, node: node)
+        case .controls(let nodes):
+            ControlsGrid(store: store, nodes: nodes)
+                .padding(.horizontal, 16).padding(.vertical, 14)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(RoundedRectangle(cornerRadius: 16).fill(Color.white.opacity(0.05)))
+                .overlay(RoundedRectangle(cornerRadius: 16).strokeBorder(Color.white.opacity(0.09), lineWidth: 0.5))
+        case .table(let node):
+            PluginTableView(store: store, node: node, card: true)
         case .list(let nodes):
             VStack(alignment: .leading, spacing: 0) {
                 ForEach(Array(nodes.enumerated()), id: \.offset) { i, node in
@@ -994,6 +1002,15 @@ struct BlockNode: View {
 
     var body: some View {
         let it = node.item
+        if let c = node.control {
+            // a control reached directly (inside details, a gauge card): drawn on its own
+            if c == .table { PluginTableView(store: store, node: node, card: false) } else { ControlsGrid(store: store, nodes: [node]) }
+        } else {
+            lineBody(it)
+        }
+    }
+
+    @ViewBuilder private func lineBody(_ it: Item) -> some View {
         VStack(alignment: .leading, spacing: 5) {
             if it.separator || (it.isDetails && node.hasChildren) {
                 EmptyView()
@@ -1024,16 +1041,27 @@ struct BlockNode: View {
             if node.hasChildren, it.isDetails {
                 DetailsDisclosure(store: store, node: node, depth: depth)
             } else if node.hasChildren {
-                // capsule offers gather in one row below; link offers (`link=true`) stay in place as lines
-                let offers = node.children.filter { $0.item.offer != nil && !$0.item.isLink }
-                let rest = node.children.filter { $0.item.offer == nil || $0.item.isLink }
-                VStack(alignment: .leading, spacing: 4) {
-                    ForEach(rest) { BlockNode(store: store, node: $0, depth: depth + 1) }
+                // capsule offers gather in one row below; link offers (`link=true`) and controls (a toggle carries its
+                // own offer) stay in place
+                let gathered: (ItemNode) -> Bool = { $0.item.offer != nil && !$0.item.isLink && $0.control == nil }
+                let offers = node.children.filter(gathered)
+                let rest = node.children.filter { !gathered($0) }
+                let runs = ItemTree.runs(rest)
+                let hasControls = runs.contains { if case .node = $0 { return false } else { return true } }
+                VStack(alignment: .leading, spacing: hasControls ? 10 : 4) {
+                    ForEach(Array(runs.enumerated()), id: \.offset) { _, run in
+                        switch run {
+                        case .controls(let nodes): ControlsGrid(store: store, nodes: nodes)
+                        case .table(let n): PluginTableView(store: store, node: n, card: false)
+                        case .node(let n): BlockNode(store: store, node: n, depth: depth + 1)
+                        }
+                    }
                     if !offers.isEmpty {
                         HStack(spacing: 6) { ForEach(offers) { o in OfferButton(store: store, item: o.item, offer: o.item.offer!) } }
                     }
                 }
-                .padding(.leading, 16)
+                // controls and tables under a heading line line up with it, as in the "Page" design
+                .padding(.leading, hasControls ? 0 : 16)
             }
         }
     }
@@ -1254,6 +1282,8 @@ struct OfferButton: View {
     let store: HubStore
     let item: Item
     let offer: Offer
+    /// Table rows use a smaller capsule, a table header — a filled one.
+    var style = CapsuleStyle(height: 26, expand: false)
 
     /// What the core will certainly reject (connection, unpinned build, pause, bridge) — the button is disabled, and the tooltip
     /// says why (without the bridge — how to start it).
@@ -1269,7 +1299,7 @@ struct OfferButton: View {
                 if store.busyAction == offer.id { ProgressView().controlSize(.mini) }
             }
         }
-        .buttonStyle(CapsuleStyle(height: 26, expand: false))
+        .buttonStyle(style)
         .help(block.map { BridgeText.help($0, primitive: offer.primitive, store) } ?? (offer.level == .immediate ? (offer.label ?? "") : offer.level == .confirmCost ? tr("С подтверждением: тратит квоту или выходит в сеть", "Asks first: uses quota or the network") : tr("С подтверждением", "Asks first")))
         .disabled(store.busyAction != nil || block != nil)
     }
