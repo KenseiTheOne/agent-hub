@@ -3,7 +3,7 @@
 
 import { EventEmitter } from "node:events";
 import { createHash, randomBytes } from "node:crypto";
-import { existsSync, mkdirSync, chmodSync, rmSync, statSync, watch, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, chmodSync, rmSync, statSync, watch, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { DAEMON_DIR, REPO_DIR } from "./config.mjs";
 import { AppPinWatcher } from "./app-pin.mjs";
@@ -17,7 +17,8 @@ import { makeCtx, makeExec } from "./ctx.mjs";
 import { PluginHost } from "./host.mjs";
 import { liveStateDir, samePath } from "./platform.mjs";
 import { actionArgv } from "./runner.mjs";
-import { tabOf } from "./terminals/index.mjs";
+import { tabOf, terminalsInfo } from "./terminals/index.mjs";
+import { realExec, refuseExec } from "./terminals/_exec.mjs";
 import { msg, pickLang, releaseLangSource, setLangSource, t } from "./i18n.mjs";
 import { Settings } from "./settings.mjs";
 import { applyPatch, effectiveQuiet, legacyMuted, pluginToggle, PLUGIN_KIND } from "./push/prefs.mjs";
@@ -29,7 +30,11 @@ export { VERSION } from "./version.mjs";
 import { VERSION } from "./version.mjs";
 
 // What a third-party plugin may offer, whatever its metadata says.
-export const THIRD_PARTY_EFFECTS = ["open.*", "cmux.focus", "session.focus"];
+export const THIRD_PARTY_EFFECTS = ["open.*", "terminal.focus", "cmux.focus", "session.focus"];
+// Primitive aliases: the old name is still accepted until the next contract (docs mark it deprecated). A plugin that declared one
+// name in <agenthub.effects> may offer the other.
+export const PRIMITIVE_ALIASES = Object.freeze({ "cmux.focus": "terminal.focus" });
+const canonical = (name) => PRIMITIVE_ALIASES[name] || name;
 export const LOCAL_EFFECTS = ["open.*"];
 // Primitives accepted only from app, regardless of what the module declared.
 // Controlling external agents (launchers, schedulers) is not a core primitive but a declared plugin action.
@@ -85,7 +90,7 @@ const WARN_PER_MIN = 20;
 const HOOK_LIFECYCLE = new Set(["SessionStart", "SessionEnd", "Stop"]);
 
 export function effectAllowed(name, patterns) {
-  return patterns.some((p) => (p.endsWith(".*") ? name.startsWith(p.slice(0, -1)) : name === p));
+  return patterns.some((p) => (p.endsWith(".*") ? name.startsWith(p.slice(0, -1)) : name === p || canonical(name) === canonical(p)));
 }
 
 function sha(s) {
@@ -102,9 +107,21 @@ function pluginWhy(st) {
 }
 
 export class Core {
-  constructor({ config, peer, journal = null }) {
+  constructor({ config, peer, journal = null, terminalExec = null }) {
     this.config = config;
     this.peer = peer;
+    // Runner of terminal tools (tmux, osascript) for the terminal layer (lib/terminals/_exec.mjs): AGENTHUB_TEST_EXEC_LOG — only
+    // written to the file; a test hub without a double — refused (no real terminal is touched from a test copy).
+    this.terminalExec =
+      terminalExec ||
+      (config.testExecLog
+        ? async (file, args) => {
+            appendFileSync(config.testExecLog, JSON.stringify({ file, args }) + "\n");
+            return { code: 0, stdout: "", timedOut: false };
+          }
+        : config.testMode
+          ? refuseExec
+          : realExec);
     this.bus = new EventEmitter();
     this.bus.setMaxListeners(200);
     // SSE event ids start from the startup timestamp (ms × 1000): a Last-Event-ID from a previous
@@ -499,6 +516,8 @@ export class Core {
       remoteAllowed: Boolean(mod.remoteAllowed),
       appOnly,
       safeUnderEstop: Boolean(mod.safeUnderEstop) && !appOnly,
+      // a deprecated alias of another primitive (cmux.focus → terminal.focus): accepted, marked in /state.primitives
+      aliasOf: typeof mod.aliasOf === "string" ? mod.aliasOf : null,
       argsSchema: mod.argsSchema || {},
       verifyFacts: typeof mod.verifyFacts === "function" ? mod.verifyFacts : () => ({ ok: true }),
       describe: typeof mod.describe === "function" ? mod.describe : null,
@@ -618,6 +637,13 @@ export class Core {
       runningActions: () => core.runningActionList(),
       // Executable path of our own process (proc_pidpath) — the app service uses it to confirm candidates from ps.
       processPath: (pid) => (Number.isInteger(pid) && pid > 0 ? (core.peer?.sys?.pidPath?.(pid) ?? null) : null),
+      // The terminal layer (lib/terminals/_proc.mjs): parent and start time, argv (the tmux server's socket flags) and the
+      // controlling terminal of a process — to find which terminal a session runs in and its tab.
+      processInfo: (pid) => (Number.isInteger(pid) && pid > 0 ? (core.peer?.sys?.pidInfo?.(pid) ?? null) : null),
+      processArgv: (pid) => (Number.isInteger(pid) && pid > 0 ? (core.peer?.sys?.procArgv?.(pid) ?? null) : null),
+      processTty: (pid) => (Number.isInteger(pid) && pid > 0 ? (core.peer?.sys?.ttyName?.(pid) ?? null) : null),
+      // Runs a terminal's tool for an adapter (tmux, osascript): → Promise<{code, stdout, timedOut}>.
+      terminalExec: (file, args, opts) => core.terminalExec(file, args, opts),
       // Whose process has this pid: a running plugin run (standard) or its streamable process. → {id, source, tier,
       // trusted, net} or null. The route that serves plugins (POST /connections/:id/mcp) uses this to identify the
       // plugin by the peer pid on the socket: a plugin's child process is not included, a plugin action only with
@@ -693,11 +719,12 @@ export class Core {
     else this.sessionMap.delete(sessionId);
     this.emit({ type: "sessions", sessions: this.sessionList() });
   }
-  // Registry entries for display and plugins; terminal and focusable — the tab found by the terminal layer (focusable:
-  // the adapter can switch to it — the "Go to" button via session.focus). Computed on every call, not written to the registry.
+  // Registry entries for display and plugins; terminal, focusable and terminalInfo — the tab found by the terminal layer
+  // (focusable: the adapter can switch to it — the "Go to" button via session.focus; terminalInfo: the adapter, its label and
+  // capabilities). Computed on every call, not written to the registry.
   sessionList() {
     return [...this.sessionMap.values()].map((s) => {
-      let tab = { terminal: null, focusable: false };
+      let tab = { terminal: null, focusable: false, terminalInfo: null };
       try {
         if (this.facts) tab = tabOf(s, this.facts);
       } catch {}
@@ -1471,7 +1498,18 @@ export class Core {
       defaultHome: samePath(home, liveStateDir()),
     };
   }
+  // Settings → Terminal: the terminal adapters, what each supports, whether it can run now, where a new session opens
+  // (lib/terminals/index.mjs terminalsInfo). services.terminal.launch — an adapter id or "auto".
+  terminalsInfo(sessions = this.sessionList()) {
+    try {
+      const prefer = this.config.services?.terminal?.launch;
+      return terminalsInfo(this.facts, { prefer: typeof prefer === "string" && prefer ? prefer : "auto", sessions });
+    } catch {
+      return null;
+    }
+  }
   snapshot(peerInfo = null) {
+    const sessions = this.sessionList();
     return {
       version: VERSION,
       // plugin contract version this core understands (lib/meta.mjs CONTRACT_VERSION)
@@ -1483,8 +1521,8 @@ export class Core {
       waitingSessions: this.waitingCount(),
       severity: SEVERITY,
       plugins: this.pluginStates(),
-      sessions: this.sessionList(),
-      primitives: [...this.primitives.values()].map((p) => ({ name: p.name, level: p.level, remoteAllowed: p.remoteAllowed, appOnly: p.appOnly, safeUnderEstop: p.safeUnderEstop })),
+      sessions,
+      primitives: [...this.primitives.values()].map((p) => ({ name: p.name, level: p.level, remoteAllowed: p.remoteAllowed, appOnly: p.appOnly, safeUnderEstop: p.safeUnderEstop, ...(p.aliasOf ? { aliasOf: p.aliasOf, deprecated: true } : {}) })),
       appPin: this.appPin ? this.appPin.info() : null,
       lang: this.langInfo(),
       // Available updates of registry plugins (plugins service, lib/registry/updates.mjs); null — no service.
@@ -1504,6 +1542,7 @@ export class Core {
       connections: this.facts.get("oauth.connections") ?? null,
       hub: this.hubInfo(),
       bridge: this.bridgeInfo(),
+      terminals: this.terminalsInfo(sessions),
       ...(peerInfo ? { peer: { class: peerInfo.class, reason: peerInfo.reason || null } } : {}),
       seq: this.seq,
     };

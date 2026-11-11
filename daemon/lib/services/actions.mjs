@@ -1,4 +1,5 @@
-// actions service (stage 5): the channel to the cmux bridge and facts for action primitives.
+// actions service (stage 5): the channel to the cmux bridge (the cmux terminal adapter's internal detail, lib/terminals/cmux.mjs),
+// tracking of launched sessions (session.launch, any terminal) and facts for action primitives.
 //
 // Facts:
 //   actions.config  — merged config.actions settings (cmux file, session launch) — needed by primitives' verifyFacts;
@@ -237,24 +238,36 @@ export class BridgeChannel {
     return { status: 200, body: { ok: true } };
   }
 
-  // After session.launch: wait until cmux writes the session with this sessionId (and its surfaceId) to
-  // claude-hook-sessions.json; a prompt file launch.sh never read gets deleted.
-  trackLaunch({ sessionId, promptFile, workspaceId = null }) {
+  // After session.launch: wait until the launched session appears — registered() from the terminal adapter (cmux: its entry
+  // with the tab in claude-hook-sessions.json; other terminals: the core session registry); a prompt file launch.sh never
+  // read gets deleted. Without registered() — the cmux file (callers before the terminal layer).
+  trackLaunch({ sessionId, promptFile, workspaceId = null, registered = null, terminal = null }) {
     const cfg = actionsConfig(this.ctx.config);
     const until = Date.now() + (cfg.launch.registerTimeoutMs || 60_000);
     const step = cfg.launch.pollMs || 500;
+    const fromCmux = () => {
+      const e = readCmuxSessions(cfg)?.get(String(sessionId).toLowerCase());
+      if (!e?.surfaceId) return null;
+      if (workspaceId && UUID_RE.test(workspaceId) && e.workspaceId && e.workspaceId.toLowerCase() !== workspaceId.toLowerCase()) return null;
+      return e;
+    };
     const tick = () => {
       if (this.closed) return;
-      const e = readCmuxSessions(cfg)?.get(String(sessionId).toLowerCase());
-      if (e?.surfaceId && (!workspaceId || !UUID_RE.test(workspaceId) || !e.workspaceId || e.workspaceId.toLowerCase() === workspaceId.toLowerCase())) {
-        this.ctx.journal.write({ type: "launch-registered", sessionId, surfaceId: e.surfaceId, workspaceId: e.workspaceId, pid: e.pid });
-        this.ctx.emit({ type: "bridge.launch.registered", sessionId, surfaceId: e.surfaceId, workspaceId: e.workspaceId });
+      let e = null;
+      try {
+        e = typeof registered === "function" ? registered() : fromCmux();
+      } catch {}
+      if (e) {
+        const surfaceId = e.surfaceId ?? null;
+        const ws = e.workspaceId ?? null;
+        this.ctx.journal.write({ type: "launch-registered", sessionId, surfaceId, workspaceId: ws, pid: e.pid ?? null, terminal });
+        this.ctx.emit({ type: "bridge.launch.registered", sessionId, surfaceId, workspaceId: ws, terminal });
         removePrompt(this.ctx, promptFile, "after-register");
         return;
       }
       if (Date.now() >= until) {
-        this.ctx.journal.write({ type: "launch-timeout", sessionId });
-        this.ctx.emit({ type: "bridge.launch.timeout", sessionId });
+        this.ctx.journal.write({ type: "launch-timeout", sessionId, terminal });
+        this.ctx.emit({ type: "bridge.launch.timeout", sessionId, terminal });
         removePrompt(this.ctx, promptFile, "timeout");
         return;
       }

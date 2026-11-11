@@ -6,6 +6,13 @@ routes of trusted plugins). Inside a cmux tab it legitimately inherits access to
 neither has nor gets that access. The daemon recognizes the bridge by its script path (`peer.bridgePaths`, by default
 `<repo>/bridge/agenthub-bridge.mjs`) — peer class `bridge`, which may use only the `/bridge/*` routes.
 
+The bridge is the **cmux terminal adapter's internal detail** (`daemon/lib/terminals/cmux.mjs`): the core and the shell
+talk to terminals only through the terminal layer, and only cmux sessions need the bridge. Other terminals (tmux, iTerm2,
+Terminal.app) have their own adapters and work without it — see
+[`docs/extension-points.md`](../docs/extension-points.md#terminal-adapter-daemonlibterminalsidmjs). The input-field
+analysis (`analyzeScreen`) lives in `daemon/lib/terminals/_screen.mjs` and is shared with the tmux adapter; the bridge
+imports it from there, so it runs only from a hub tree that has `daemon/` next to `bridge/`.
+
 ## Running
 
 ```sh

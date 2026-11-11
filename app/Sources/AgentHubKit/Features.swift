@@ -115,7 +115,7 @@ public struct LaunchStatus: Equatable, Sendable {
         switch state {
         case .started: return tr("«\(name)»: вкладка открыта, жду сессию…", "\"\(name)\": tab opened, waiting for the session…")
         case .registered: return tr("«\(name)»: сессия появилась в хабе", "\"\(name)\": the session appeared in the hub")
-        case .timeout: return tr("«\(name)»: сессия не появилась за минуту — проверьте вкладку cmux", "\"\(name)\": the session didn't appear within a minute — check the cmux tab")
+        case .timeout: return tr("«\(name)»: сессия не появилась за минуту — проверьте вкладку терминала", "\"\(name)\": the session didn't appear within a minute — check the terminal tab")
         }
     }
 }

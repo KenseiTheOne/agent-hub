@@ -10,7 +10,7 @@
 // lock and the index stored them before 2026-11-05) are parsed by permissionList the same way: keys of old and new entries match.
 
 // Effects ceiling for third-party plugins — the same as in the core (core.mjs: THIRD_PARTY_EFFECTS, LOCAL_EFFECTS).
-export const THIRD_PARTY_EFFECTS = ["open.*", "cmux.focus", "session.focus"];
+export const THIRD_PARTY_EFFECTS = ["open.*", "terminal.focus", "cmux.focus", "session.focus"];
 export const LOCAL_EFFECTS = ["open.*"];
 
 export const KINDS = ["fsRead", "fsWrite", "watch", "exec", "secrets", "net", "effects", "actions", "connections", "terminal"];
@@ -520,6 +520,8 @@ export function lintPlugin({ id, meta, source = "", official = false, local = fa
   // effects are under the ceiling for all registry plugins (official ones too: control only via their own actions)
   const ceiling = local ? LOCAL_EFFECTS : THIRD_PARTY_EFFECTS;
   for (const e of perms.effects) if (!effectUnderCeiling(e, ceiling)) errors.push(L(lang, `effects «${e}»: плагину реестра доступны только ${ceiling.join(", ")}`, `effects "${e}": a registry plugin may use only ${ceiling.join(", ")}`));
+  // cmux.focus is an alias of terminal.focus until the next contract
+  if (perms.effects.includes("cmux.focus")) warnings.push(L(lang, `effects «cmux.focus»: устарело — пишите terminal.focus (то же, для любого терминала) или session.focus <sessionId>`, `effects "cmux.focus": deprecated — write terminal.focus (the same, for any terminal) or session.focus <sessionId>`));
   if (!official) {
     if (perms.actions.length) errors.push(L(lang, `<agenthub.action>: действия есть только у официальных плагинов`, `<agenthub.action>: only official plugins have actions`));
   } else {

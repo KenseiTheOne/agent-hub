@@ -1,14 +1,15 @@
 // The session.focus primitive — switch to a Claude Code session's tab (contract 3).
 // The plugin does not need to know the terminal: the terminals layer (lib/terminals/, locate) finds the tab from the core's session registry,
-// and the adapter switches to it (focus; for cmux — the bridge operation surface.focus). Harmless, like cmux.focus: level "immediate",
-// available to cli and third-party plugins (the core effects ceiling — open.*, cmux.focus, session.focus).
+// and the adapter switches to it (focus; cmux — the bridge operation surface.focus, tmux — select-window/select-pane, iTerm2 and
+// Terminal.app — AppleScript by the tab's tty). Harmless, like terminal.focus: level "immediate", available to cli and third-party
+// plugins (the core effects ceiling — open.*, terminal.focus, cmux.focus, session.focus).
 //
 // Refusals (facts:<code>, 409): unknown-session — the session is not in the registry; no-terminal — no adapter knows its tab;
 // pid-mismatch — the terminal tab belongs to another process; focus-unsupported — the adapter cannot switch; the adapter's
 // code if it is currently unavailable (cmux: bridge-offline). A failure of the switch itself — ok: false with the adapter's code.
 
 import { t } from "../i18n.mjs";
-import { canFocus, locate } from "../terminals/index.mjs";
+import { availability, canFocus, locate } from "../terminals/index.mjs";
 import { UUID_SRC } from "./_actions-support.mjs";
 
 export const name = "session.focus";
@@ -33,8 +34,8 @@ function target(args, facts) {
   const loc = locate(s, facts);
   if (loc.error) return { ok: false, reason: loc.error === "no-tab" ? "no-terminal" : loc.error };
   if (!canFocus(loc.adapter)) return { ok: false, reason: "focus-unsupported" };
-  const avail = typeof loc.adapter.available === "function" ? loc.adapter.available(facts) : null;
-  if (avail?.error) return { ok: false, reason: avail.error };
+  const avail = availability(loc.adapter, facts);
+  if (avail.error) return { ok: false, reason: avail.error };
   return { ok: true, s, adapter: loc.adapter, target: loc.target };
 }
 

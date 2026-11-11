@@ -27,6 +27,7 @@ import { accessSync, constants, lstatSync, readFileSync, statSync } from "node:f
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { analyzeScreen, SCREEN_LINES_DEFAULT, SCREEN_LINES_MAX } from "../daemon/lib/terminals/_screen.mjs";
 
 // The version is the VERSION file at the repository root (the hub's single source of truth, docs/hub-updates.md).
 export const VERSION = (() => {
@@ -50,8 +51,7 @@ const CMUX_TIMEOUT_MS = 10_000;
 // No control characters or line breaks: the bridge itself presses Enter as a single key after checking the field.
 export const SEND_TEXT_RE = /^[\x21-\x5B\x5D-\x7E](?:[\x20-\x5B\x5D-\x7E]{0,198}[\x21-\x5B\x5D-\x7E])?$/;
 // How many last lines of the visible screen read-screen looks at (the Claude Code input field is at the bottom).
-export const SCREEN_LINES_MAX = 30;
-export const SCREEN_LINES_DEFAULT = 20;
+export { SCREEN_LINES_MAX, SCREEN_LINES_DEFAULT };
 // Pause between typing the line and checking the field (lets the terminal render).
 const SETTLE_MS = 250;
 
@@ -147,43 +147,9 @@ function execCmux(cmux, argv) {
 }
 
 // ---------- Claude Code input field on screen ----------
-// The input field is a line starting with ">" or "❯" (with a frame "│ > …") right under a horizontal line (─), plus continuation
-// lines up to the next such line. A turn is running — "esc to interrupt" is on screen outside the field. The empty field placeholder
-// (pale "Try "…"") can't be told apart from typed text on a text screen — then the field counts as non-empty: refuse, don't type.
-const RULE_RE = /^\s*[╭╰┌└]?[─━]{8,}[╮╯┐┘]?\s*$/;
-const PROMPT_RE = /^\s*[│┃]?\s*[>❯›](?:[ \u00a0]|$)/;
-const BUSY_RE = /\besc to interrupt\b/i;
+// The screen analysis is shared with the daemon's terminal layer (tmux types with the same protocol): daemon/lib/terminals/_screen.mjs.
+export { analyzeScreen };
 const squash = (s) => String(s).replace(/[\s\u00a0]+/g, "");
-
-// text — read-screen output. → {promptFound, promptEmpty, busy, promptText}. promptText is only for checking the typed line
-// inside the bridge: it doesn't go to the daemon (the screen may show conversation text).
-export function analyzeScreen(text, maxLines = SCREEN_LINES_DEFAULT) {
-  const all = String(text ?? "")
-    .replace(/\r/g, "")
-    .split("\n")
-    .map((l) => l.replace(/[\u0000-\u0008\u000b-\u001f\u007f]/g, ""));
-  while (all.length && !all[all.length - 1].trim()) all.pop();
-  const lines = all.slice(-Math.min(Math.max(1, maxLines | 0), SCREEN_LINES_MAX));
-  for (let i = lines.length - 1; i > 0; i--) {
-    if (!PROMPT_RE.test(lines[i]) || !RULE_RE.test(lines[i - 1])) continue;
-    let end = i + 1;
-    while (end < lines.length && !RULE_RE.test(lines[end])) end++;
-    if (end >= lines.length) continue; // no bottom line — not an input field
-    const body = lines
-      .slice(i, end)
-      .map((l, k) => {
-        let x = l.replace(/^\s*[│┃]/, "").replace(/[│┃]\s*$/, "");
-        if (k === 0) x = x.replace(/^\s*[>❯›]/, "");
-        return x;
-      })
-      .join(" ")
-      .replace(/[\s\u00a0]+/g, " ")
-      .trim();
-    const busy = lines.some((l, k) => (k < i || k >= end) && BUSY_RE.test(l));
-    return { promptFound: true, promptEmpty: body === "", busy, promptText: body };
-  }
-  return { promptFound: false, promptEmpty: null, busy: lines.some((l) => BUSY_RE.test(l)), promptText: null };
-}
 
 const flags = (a) => ({ promptFound: a.promptFound, promptEmpty: a.promptEmpty, busy: a.busy });
 const pause = (ms) => new Promise((r) => setTimeout(r, ms));

@@ -4,6 +4,33 @@ Releases are git tags `vX.Y.Z` (also published as GitHub releases); the current 
 The plugin contract has its own version history in
 [`docs/extension-points.md`](docs/extension-points.md#contract-versions).
 
+## Unreleased
+
+### Terminal layer: cmux is one terminal among several (AH-33)
+
+- The core no longer builds terminal work on cmux. Everything the hub does with a session's tab — switch to it, read the
+  end of the screen, type a line, press Esc, open a new tab with a session — goes through built-in terminal adapters
+  (`daemon/lib/terminals/<id>.mjs`, a separate kind of extension, not a plugin), each declaring what it supports:
+  **cmux** (all five, through the bridge — now the adapter's internal detail; behaviour unchanged), **tmux** (all five,
+  through the server's own tmux binary: pane by tty, `send-keys -l` with the same input-field checks as the bridge),
+  **iTerm2** and **Terminal.app** (switch to the tab and open a new tab, through `osascript` with values in argv; no
+  screen reading, typing or Esc — their AppleScript cannot check the input field safely).
+- The session's terminal is detected from the process table (the nearest terminal among the ancestors of the Claude Code
+  process; cmux — from its own session file); the process environment is not read. `/state.sessions[].terminalInfo`
+  `{adapter, label, capabilities, focusable, via}` and `/state.terminals` (adapters, availability, session counts, where
+  new sessions open) are new; `terminal` (a string) and `focusable` stay as in contract 3.
+- `terminal.focus` — the generic name of `cmux.focus`; `cmux.focus` stays an accepted, deprecated alias until the next
+  contract (`/state.primitives[].aliasOf`, a registry linter warning; either name satisfies `<agenthub.effects>`).
+- Capability gaps are refused clearly: `409 terminal:unsupported {terminal, capability}` on `/terminal/*`,
+  `facts:esc-unsupported`, `facts:launch-unsupported`, `facts:no-launch-terminal` on primitives. `session.interrupt` and
+  `session.launch` work in any terminal that supports them; `services.terminal.launch` picks the launch terminal (`auto`
+  by default: the terminal most sessions run in, otherwise the first installed of cmux, iTerm2, Terminal).
+- A test hub never runs a real terminal tool (`terminal-test-mode`); tests use command doubles.
+- Shell: a **Terminal** card in Settings (each terminal with its capabilities, session count and state; the cmux bridge
+  status and start command moved under the cmux row; where new sessions open). Session rows show the terminal, and
+  "Go to tab" / Esc are disabled with a tooltip naming the terminal when it can't; the bridge banner appears only for
+  sessions in cmux. Texts say "terminal tab" instead of "cmux tab".
+
 ## 0.1.1 — 2026-11-10
 
 ### Plugin page controls

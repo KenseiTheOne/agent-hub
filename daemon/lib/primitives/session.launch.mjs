@@ -1,20 +1,26 @@
-// session.launch primitive: starts a new Claude Code session in a new cmux tab via the bridge.
+// session.launch primitive: starts a new Claude Code session in a new terminal tab (the terminal layer, lib/terminals/: cmux —
+// through the bridge, tmux — new-window, iTerm2 and Terminal.app — AppleScript). Which terminal: services.terminal.launch
+// (an adapter id) or "auto" — the terminal most live sessions run in, otherwise the first installed (launchAdapter).
 //
 // The folder, name and prompt are entered by a human in the app form; plugin suggestions are not accepted
-// (ctx.plugin ≠ null → refusal). The prompt never goes to the journal, the confirmation text or the cmux command
-// line: it is written to <AgentHub>/launch/<uuid>.prompt (0600), the bridge opens a tab with bridge/launch.sh,
-// and launch.sh reads the file, deletes it and runs
+// (ctx.plugin ≠ null → refusal). The prompt never goes to the journal, the confirmation text or the terminal's command
+// line: it is written to <AgentHub>/launch/<uuid>.prompt (0600), the new tab runs bridge/launch.sh, and launch.sh reads the file,
+// deletes it and runs
 //   claude --session-id <uuid> --remote-control -n <name> -- <prompt>
-// (no --allow-dangerously-skip-permissions or other bypasses). After the bridge replies, the actions service waits
-// for the session entry in ~/.cmuxterm/claude-hook-sessions.json (event bridge.launch.registered / bridge.launch.timeout)
-// and deletes the prompt file if launch.sh never read it.
+// (no --allow-dangerously-skip-permissions or other bypasses). After the terminal replies, the actions service waits for the
+// session to appear (cmux: its entry in ~/.cmuxterm/claude-hook-sessions.json; other terminals: the core session registry;
+// event bridge.launch.registered / bridge.launch.timeout) and deletes the prompt file if launch.sh never read it.
 // Level "confirm with cost", from app only (the core enforces this for session.*), from the Mac only.
+//
+// Refusals (facts:<code>): actions-off, no-launch-dir, bad-name, bad-cwd, forbidden-cwd, no-launch-terminal (no terminal can
+// open a tab), launch-unsupported, the adapter's code when it is unavailable (bridge-offline), offer-not-allowed.
 
 import { t } from "../i18n.mjs";
 import { mkdirSync, realpathSync, rmSync, writeFileSync, chmodSync } from "node:fs";
 import { isAbsolute, join, sep } from "node:path";
 import { randomUUID } from "node:crypto";
 import { SESSION_NAME_RE, bridgeOf, cfgOf, isDir } from "./_actions-support.mjs";
+import { availability, launchFor, supports } from "../terminals/index.mjs";
 
 export const name = "session.launch";
 export const level = "confirm-cost";
@@ -52,9 +58,15 @@ function check(args, facts) {
     } catch {}
     if (inside(real, rd)) return { ok: false, reason: "forbidden-cwd" };
   }
+  const l = launchFor(facts);
+  if (!l) return { ok: false, reason: "no-launch-terminal" };
+  if (!supports(l.adapter, "launch")) return { ok: false, reason: "launch-unsupported" };
+  const av = availability(l.adapter, facts);
+  if (av.error) return { ok: false, reason: av.error };
+  // the launch tracker lives in the actions service (bridge.channel), whether or not the bridge is connected
   const ch = bridgeOf(facts);
-  if (!ch?.online()) return { ok: false, reason: "bridge-offline" };
-  return { ok: true, cfg, ch, cwd: real };
+  if (!ch) return { ok: false, reason: "actions-off" };
+  return { ok: true, cfg, ch, cwd: real, adapter: l.adapter };
 }
 
 // The core's third argument: { peer, plugin, config }. Only a human enters the prompt; a plugin suggestion
@@ -67,8 +79,13 @@ export function verifyFacts(args, facts, { plugin = null } = {}) {
 
 export function describe(args, facts, lang = "ru") {
   const n = (args.prompt || "").length;
+  let terminal = null;
+  try {
+    const l = launchFor(facts);
+    terminal = l ? l.adapter.label || l.adapter.id : null;
+  } catch {}
   return {
-    text: t(lang, "prim.session.launch", { name: args.name, cwd: args.cwd, n }),
+    text: t(lang, "prim.session.launch", { name: args.name, cwd: args.cwd, n, terminal }),
     cost: t(lang, "prim.session.launch.cost"),
   };
 }
@@ -82,11 +99,24 @@ export async function run(args, ctx) {
   chmodSync(r.cfg.launchDir, 0o700);
   const promptFile = join(r.cfg.launchDir, `${sessionId}.prompt`);
   writeFileSync(promptFile, args.prompt || "", { mode: 0o600, flag: "wx" });
-  const res = await r.ch.call({ op: "new-workspace", cwd: r.cwd, name: args.name, sessionId, promptFile }, { resultMs: 20_000 });
-  if (!res.ok) {
-    rmSync(promptFile, { force: true });
-    return { ok: false, error: res.error ?? null, code: res.code ?? null, sessionId };
+  let res;
+  try {
+    res = await r.adapter.launch({ cwd: r.cwd, name: args.name, sessionId, promptFile }, ctx.facts);
+  } catch {
+    res = { ok: false, error: "terminal-failed" };
   }
-  r.ch.trackLaunch({ sessionId, promptFile, workspaceId: res.workspaceId || null });
-  return { ok: true, sessionId, workspaceId: res.workspaceId || null };
+  if (!res?.ok) {
+    rmSync(promptFile, { force: true });
+    return { ok: false, error: res?.error ?? null, code: res?.code ?? null, sessionId, terminal: r.adapter.id };
+  }
+  const adapter = r.adapter;
+  const facts = ctx.facts;
+  const workspaceId = res.workspaceId || null;
+  // the session has appeared: the adapter knows (cmux — its session file), otherwise the core registry
+  const registered = typeof adapter.registered === "function" ? () => adapter.registered(sessionId, facts, { workspaceId }) : () => {
+    const s = facts.session?.(sessionId);
+    return s ? { pid: s.pid ?? null, surfaceId: null, workspaceId: null } : null;
+  };
+  r.ch.trackLaunch({ sessionId, promptFile, workspaceId, registered, terminal: adapter.id });
+  return { ok: true, sessionId, workspaceId, terminal: adapter.id };
 }

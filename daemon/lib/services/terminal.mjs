@@ -1,7 +1,8 @@
 // terminal service (contract 3): "read a tab's screen" and "type a line into a tab" of a Claude Code session for
 // trusted plugins. Routes are in lib/routes/terminal.mjs (POST /terminal/read-screen, POST /terminal/send-text), the terminal
-// layer is lib/terminals/ (the cmux adapter runs operations through the bridge: the daemon and plugins have no access to the cmux
-// socket). The service knows nothing about specific plugins: the plugin declares the permission itself (<agenthub.terminal>), and a human sees it in
+// layer is lib/terminals/: one adapter per terminal (cmux runs operations through the bridge — the daemon and plugins have no
+// access to the cmux socket; tmux through its CLI). An adapter that does not declare the operation (iTerm2, Terminal.app) —
+// 409 terminal:unsupported {terminal, capability}. The service knows nothing about specific plugins: the plugin declares the permission itself (<agenthub.terminal>), and a human sees it in
 // the consent sheet.
 //
 // Checks (in order, all before the bridge):
@@ -12,15 +13,15 @@
 //   3. the line (send-text): printable ASCII without "\", no leading or trailing space, 1…200 chars (cmux send treats
 //      \n, \r, \t as Enter and Tab — so no backslash at all; the bridge presses Enter itself, as a single key);
 //   4. the session is in the core registry, the Claude Code signature was verified just now and the process start time is the same (pid not reused
-//      by another); the terminal knows the tab, under the same pid and start time;
+//      by another); the terminal knows the tab, under the same pid and start time; the terminal supports the operation;
 //   5. send-text: the Claude Code process isn't stopped (Ctrl+Z) and is in its terminal's foreground group (otherwise the line
 //      would go to the shell); the session is free — per the registry (Claude Code's own status: idle; no status — per the terminal),
 //      whether a turn is running or not, the bridge looks at the screen once more; send rate — per plugin (sendPerMin) and per tab
 //      (sendPerTabPerMin);
 //   6. before typing, the bridge looks at the screen once more: the input field is found, empty, no turn running; before Enter the field holds exactly
 //      this line (otherwise it doesn't press Enter: prompt-mismatch).
-// Journal: every send is terminal-send {plugin, sessionId, surfaceId, workspaceId, terminal, len, sha, head, ok,
-// error}: head is the declared slash command at the start of the line (shown in the consent sheet), sha is the first 12 chars of the line's sha256,
+// Journal: every send is terminal-send {plugin, sessionId, surfaceId, workspaceId, terminal, tab, len, sha, head, ok,
+// error} (surfaceId and workspaceId — cmux only, tab — the adapter's tab key): head is the declared slash command at the start of the line (shown in the consent sheet), sha is the first 12 chars of the line's sha256,
 // only together with head (a line sent under "*" isn't hashed: a short one could be brute-forced), otherwise both null. The line
 // itself never reaches the journal, the bus or responses. terminal-send is duplicated to the audit journal (AUDIT_TYPES): the bridge-op stream
 // from read-screen won't push it out. Denials are terminal-denied {plugin, op, sessionId, error}; screen reads are bridge-op.
@@ -29,7 +30,7 @@
 
 import { createHash } from "node:crypto";
 import { terminalGrants, terminalTextAllowed } from "../registry/perms.mjs";
-import { locate } from "../terminals/index.mjs";
+import { locate, supports } from "../terminals/index.mjs";
 
 export const name = "terminal";
 
@@ -53,6 +54,9 @@ const ADAPTER_STATUS = {
   "bridge-timeout": 504,
   "bridge-pickup-timeout": 504,
   "cmux-timeout": 504,
+  "tmux-timeout": 504,
+  "no-tab": 409,
+  "terminal-test-mode": 409,
 };
 
 const running = new Map(); // ctx → TerminalService
@@ -123,7 +127,7 @@ export class TerminalService {
     return { pl, grants, sid };
   }
 
-  async session(pl, op, sid) {
+  async session(pl, op, sid, cap) {
     const s = this.ctx.sessions.get(sid) || this.ctx.sessions.list().find((x) => typeof x.sessionId === "string" && x.sessionId.toLowerCase() === sid.toLowerCase()) || null;
     if (!s || !Number.isInteger(s.pid)) return { res: this.deny(pl, op, sid, 409, "terminal:unknown-session") };
     let v = null;
@@ -135,11 +139,12 @@ export class TerminalService {
     // start time — from the registry or just verified: the adapter will match it against the terminal's record
     const loc = locate({ ...s, startSec: s.startSec ?? v.startSec ?? null }, this.ctx.facts, this.adapters);
     if (loc.error) return { res: this.deny(pl, op, sid, 409, `terminal:${loc.error}`) };
+    if (cap && !supports(loc.adapter, cap)) return { res: this.deny(pl, op, sid, 409, "terminal:unsupported", { terminal: loc.adapter.id, capability: cap }) };
     return { s, adapter: loc.adapter, target: loc.target };
   }
 
   // Whether the session is free. The registry status is Claude Code's own status (claude agents, ~/.claude/sessions): idle — free,
-  // busy/waiting — not. No status — per the terminal (cmux: agentLifecycle idle). The terminal doesn't override the registry status:
+  // busy/waiting — not. No status — per the terminal (cmux: agentLifecycle idle; tmux knows nothing — not free). The terminal doesn't override the registry status:
   // after an Esc mid-turn the Stop hook doesn't fire and cmux stays "running", even though the session is free. Whether a turn is actually
   // running, the bridge checks on screen before typing and before Enter ("esc to interrupt").
   idle(q) {
@@ -164,7 +169,7 @@ export class TerminalService {
     const p = await this.prepare(peer, body, "read-screen");
     if (p.res) return p.res;
     if (body.lines !== undefined && (!Number.isInteger(body.lines) || body.lines < 1 || body.lines > 30)) return err(400, "args:lines:range");
-    const q = await this.session(p.pl, "read-screen", p.sid);
+    const q = await this.session(p.pl, "read-screen", p.sid, "read-screen");
     if (q.res) return q.res;
     const r = await q.adapter.readScreen(q.target, this.ctx.facts, { sessionId: q.s.sessionId, lines: body.lines });
     if (!r.ok) return this.deny(p.pl, "read-screen", p.sid, ADAPTER_STATUS[r.error] || 502, `terminal:${r.error}`);
@@ -193,13 +198,13 @@ export class TerminalService {
     if (!TEXT_RE.test(text)) return this.deny(p.pl, "send-text", p.sid, 400, "terminal:bad-text");
     const head = terminalTextAllowed(p.grants, text);
     if (!head) return this.deny(p.pl, "send-text", p.sid, 403, "terminal:text-not-declared");
-    const q = await this.session(p.pl, "send-text", p.sid);
+    const q = await this.session(p.pl, "send-text", p.sid, "send-text");
     if (q.res) return q.res;
     if (!this.idle(q)) return this.deny(p.pl, "send-text", p.sid, 409, "terminal:session-busy");
     // a stopped (Ctrl+Z) or background process: the screen shows an old input field, and the line would go to the shell
     const fg = this.foreground(q.s.pid);
     if (fg !== true) return this.deny(p.pl, "send-text", p.sid, 409, fg === false ? "terminal:not-foreground" : "terminal:process-unknown");
-    const tab = `${q.target.terminal}:${q.target.surfaceId}`;
+    const tab = `${q.target.terminal}:${q.target.tab ?? q.target.surfaceId}`;
     const wPl = this.sends.wait(p.pl.id, this.sendPerMin);
     const wTab = this.sends.wait(tab, this.sendPerTabPerMin);
     if (wPl || wTab) return this.deny(p.pl, "send-text", p.sid, 429, "terminal:rate-limited", { scope: wPl ? "plugin" : "tab", retryAfterMs: Math.max(wPl, wTab) });
@@ -211,9 +216,10 @@ export class TerminalService {
       type: "terminal-send",
       plugin: p.pl.id,
       sessionId: q.s.sessionId,
-      surfaceId: q.target.surfaceId,
+      surfaceId: q.target.surfaceId ?? null,
       workspaceId: q.target.workspaceId ?? null,
       terminal: q.target.terminal,
+      tab: q.target.tab ?? null,
       len: text.length,
       sha: head === "*" ? null : shortSha(text),
       head: head === "*" ? null : head,

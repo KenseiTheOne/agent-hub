@@ -317,7 +317,7 @@ extension PluginRequirement {
 // MARK: - sessions
 
 extension SessionInfo {
-    /// A name like the cmux tab's: `-n` (name) → "сессия 1a2b3c4d".
+    /// A name like the terminal tab's: `-n` (name) → "сессия 1a2b3c4d".
     public var displayName: String {
         if let n = name, !n.isEmpty { return n }
         return tr("сессия \(sessionId.prefix(8))", "session \(sessionId.prefix(8))")
@@ -413,7 +413,7 @@ extension PluginPermission {
             case "open.url": return tr("открывать ссылки в браузере", "open links in the browser")
             case "open.file": return tr("открывать файлы и папки", "open files and folders")
             case "open.*": return tr("открывать ссылки и файлы", "open links and files")
-            case "cmux.focus": return tr("переводить во вкладку cmux", "switch to a cmux tab")
+            case "terminal.focus", "cmux.focus": return tr("переводить во вкладку терминала", "switch to a terminal tab")
             case "session.focus": return tr("переводить во вкладку сессии", "switch to a session's tab")
             case "session.interrupt": return tr("прерывать ход сессии (с подтверждением)", "interrupt a session's turn (asks first)")
             case "session.stop": return tr("завершать сессию (с подтверждением)", "end a session (asks first)")
@@ -576,6 +576,9 @@ public enum Explain {
         "own:no-app", "own:lint", "own:not-found", "own:not-dir", "own:no-plugin", "own:ambiguous", "own:path",
         "own:path-relative", "own:unreadable", "own:no-request", "own:id-changed", "own:no-source",
         "own:path-changed", "own:request-conflict", "own:too-many-requests", "consent:nothing", "peer:diagnostic",
+        "facts:no-terminal", "facts:no-tab", "facts:focus-unsupported", "facts:esc-unsupported", "facts:launch-unsupported",
+        "facts:no-launch-terminal", "facts:terminal-test-mode", "facts:terminal-failed", "facts:tmux-failed", "facts:tmux-timeout",
+        "facts:osascript-failed", "facts:osascript-timeout", "facts:not-installed", "terminal:unsupported",
     ]
 
     /// Whether the code has its own text (not the generic fallback).
@@ -663,8 +666,29 @@ public enum Explain {
             return tr("В папках ~/.claude и самого хаба сессии не запускаются.", "Sessions can't be launched in ~/.claude or the hub's own folder.")
         case "facts:offer-not-allowed":
             return tr("Промпт вводит только человек: плагин не может предложить запуск сессии.", "Only a person can enter a prompt: a plugin can't suggest launching a session.")
-        case "facts:no-surface", "facts:unknown-surface", "facts:workspace-mismatch", "facts:no-cmux-session":
+        case "facts:no-surface", "facts:unknown-surface", "facts:workspace-mismatch", "facts:no-cmux-session", "facts:no-tab":
             return tr("Вкладка закрыта или переместилась.", "The tab was closed or moved.")
+        case "facts:no-terminal":
+            return tr("Хаб не нашёл вкладку этой сессии: её терминал не поддерживается или вкладка закрыта.", "The hub couldn't find this session's tab: its terminal isn't supported or the tab is closed.")
+        case "facts:focus-unsupported":
+            return tr("Терминал этой сессии не умеет переходить во вкладку.", "This session's terminal can't switch to its tab.")
+        case "facts:esc-unsupported":
+            return tr("Терминал этой сессии не умеет нажимать Esc из хаба — прервите ход во вкладке.", "This session's terminal can't press Esc from the hub — interrupt the turn in the tab.")
+        case "facts:launch-unsupported", "facts:no-launch-terminal":
+            return tr("Нет терминала, в котором хаб может открыть новую вкладку (Настройки → Терминал).", "There's no terminal the hub can open a new tab in (Settings → Terminal).")
+        case "facts:terminal-test-mode":
+            return tr("Тестовая копия хаба не трогает настоящие терминалы.", "A test copy of the hub doesn't touch real terminals.")
+        case "facts:tmux-failed", "facts:tmux-timeout":
+            return tr("\(q): tmux не выполнил команду — сервер tmux остановлен или вкладка закрыта.", "\(q): tmux didn't run the command — the tmux server is down or the pane is closed.")
+        case "facts:osascript-failed", "facts:osascript-timeout":
+            return tr("\(q): терминал не ответил на AppleScript — разрешите хабу управлять им: Системные настройки → Конфиденциальность и безопасность → Автоматизация.",
+                      "\(q): the terminal didn't answer AppleScript — allow the hub to control it: System Settings → Privacy & Security → Automation.")
+        case "facts:not-installed":
+            return tr("\(q): терминал не установлен.", "\(q): the terminal isn't installed.")
+        case "facts:terminal-failed":
+            return tr("\(q): терминал не ответил.", "\(q): the terminal didn't respond.")
+        case "terminal:unsupported":
+            return tr("Терминал этой сессии этого не умеет.", "This session's terminal doesn't support that.")
         case "facts:pid-mismatch", "facts:proc-start-mismatch", "facts:session-file-mismatch", "facts:no-session-file", "facts:session-file-unreadable":
             return tr("Сессия перезапустилась или закрылась — обновите список и попробуйте ещё раз.", "The session restarted or closed — refresh and try again.")
         case "facts:bad-url", "facts:scheme", "facts:credentials-in-url":

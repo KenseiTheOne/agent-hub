@@ -102,7 +102,7 @@ runs.
 - `local` — admitted, except those blocklisted as a whole by id; the core cuts effects down to `open.*`;
 - `installed` — only if it is in lock, not disabled, not blocklisted, lives as a folder `Plugins/<id>/`, the hashes of
   all files match lock and the permissions in the metadata are no wider than the agreed ones; effects = declared ∩
-  agreed (the core additionally cuts them down to `open.*`, `session.focus`, `cmux.focus`); `tier` follows the verified
+  agreed (the core additionally cuts them down to `open.*`, `session.focus`, `terminal.focus`, `cmux.focus`); `tier` follows the verified
   catalog at check time: `official` only if the index currently names the id official, the sha256 from lock is signed as
   official — by the current index or by the saved `Registry/attest/<id>` (an earlier index where this version was the
   latest; verified with the same public key, id, version and sha256 are compared) — and the lock files are exactly the

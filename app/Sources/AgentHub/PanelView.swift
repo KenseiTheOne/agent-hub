@@ -175,7 +175,7 @@ struct PanelView: View {
             return p.desc ?? p.statusLabel()
         case .manager: return tr("установленные и каталог реестра", "installed and registry catalog")
         case .journal: return tr("действия хаба", "hub actions")
-        case .settings: return tr("язык, автозапуск, уведомления, подключения, обновления хаба и плагинов, мост cmux, закрепление приложения", "language, launch at login, notifications, connections, hub and plugin updates, cmux bridge, app pinning")
+        case .settings: return tr("язык, автозапуск, уведомления, подключения, обновления хаба и плагинов, терминал, закрепление приложения", "language, launch at login, notifications, connections, hub and plugin updates, terminal, app pinning")
         }
     }
 
@@ -478,6 +478,7 @@ struct SettingsView: View {
         static let hubUpdate = "settings.hub-update"
         static let notifications = "settings.notifications"
         static let connections = "settings.connections"
+        static let terminal = "settings.terminal"
     }
 
     let store: HubStore
@@ -493,6 +494,7 @@ struct SettingsView: View {
                 .onChange(of: store.hubUpdate != nil) { _, _ in scrollToFocus(proxy) }
                 .onChange(of: store.state?.notifications != nil) { _, _ in scrollToFocus(proxy) }
                 .onChange(of: store.state?.connections != nil) { _, _ in scrollToFocus(proxy) }
+                .onChange(of: store.state != nil) { _, _ in scrollToFocus(proxy) }
         }
     }
 
@@ -501,6 +503,7 @@ struct SettingsView: View {
         if id == Anchor.hubUpdate, store.hubUpdate == nil { return }
         if id == Anchor.notifications, store.state?.notifications == nil { return }
         if id == Anchor.connections, store.state?.connections == nil { return }
+        if id == Anchor.terminal, store.state == nil { return }
         // after layout: the "Hub updates" card is third; at the usual window height it's at the bottom edge
         DispatchQueue.main.async {
             withAnimation(.easeOut(duration: 0.2)) { proxy.scrollTo(id, anchor: .top) }
@@ -550,7 +553,7 @@ struct SettingsView: View {
                         }
                     }
                 }
-                card { BridgeSettings(store: store) }
+                card { TerminalSettings(store: store) }.id(Anchor.terminal)
                 card {
                     VStack(alignment: .leading, spacing: 4) {
                         Text(tr("Служба хаба", "Hub service")).font(.system(size: 13, weight: .semibold))
@@ -740,28 +743,119 @@ struct PluginUpdatesSettings: View {
     }
 }
 
-/// "cmux bridge" in settings: whether it's connected (since when, version) or how to start it.
-struct BridgeSettings: View {
+/// "Terminal" in settings: the terminal adapters of the hub — which terminals sessions run in now (detected per session), what
+/// the hub can do in each (capability chips), where a new session opens. The cmux bridge is the cmux adapter's detail and sits
+/// under its row. A daemon before the terminal layer (no `/state.terminals`) — only the bridge, as before.
+struct TerminalSettings: View {
     let store: HubStore
 
     var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(tr("Терминал", "Terminal")).font(.system(size: 13, weight: .semibold))
+            if let ts = store.state?.terminals {
+                Text(tr("Хаб сам определяет терминал каждой сессии и делает в нём только то, что этот терминал умеет.",
+                        "The hub detects each session's terminal and does only what that terminal supports."))
+                    .font(.system(size: 11.5)).foregroundStyle(.white.opacity(0.55)).fixedSize(horizontal: false, vertical: true)
+                VStack(alignment: .leading, spacing: 0) {
+                    ForEach(Array(ts.adapters.enumerated()), id: \.element.id) { i, a in
+                        if i > 0 { Rectangle().fill(Color.white.opacity(0.08)).frame(height: 0.5) }
+                        row(a)
+                    }
+                }
+                .background(RoundedRectangle(cornerRadius: 12).fill(Color.white.opacity(0.04)))
+                .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(Color.white.opacity(0.08), lineWidth: 0.5))
+                launchLine(ts)
+                Text(tr("iTerm2 и Terminal: при первом переходе macOS спросит, можно ли хабу управлять приложением (Конфиденциальность и безопасность → Автоматизация).",
+                        "iTerm2 and Terminal: on the first switch macOS asks whether the hub may control the app (Privacy & Security → Automation)."))
+                    .font(.system(size: 11)).foregroundStyle(.white.opacity(0.45)).fixedSize(horizontal: false, vertical: true)
+            } else {
+                BridgeSettings(store: store)
+            }
+        }
+    }
+
+    private func dot(_ a: TerminalsInfo.Adapter) -> Color {
+        if a.via == "bridge", !store.bridgeOnline, a.installed != false || a.sessions > 0 { return .orange }
+        if a.installed == false, a.sessions == 0 { return .gray }
+        return TerminalText.ready(a, bridgeOnline: store.bridgeOnline) ? .green : .orange
+    }
+
+    @ViewBuilder private func row(_ a: TerminalsInfo.Adapter) -> some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text(tr("Мост cmux", "cmux bridge")).font(.system(size: 13, weight: .semibold))
+            HStack(spacing: 8) {
+                Circle().fill(dot(a)).frame(width: 7, height: 7)
+                Text(a.label).font(.system(size: 12.5, weight: .semibold))
+                Spacer(minLength: 8)
+                Text(TerminalText.status(a, bridgeOnline: store.bridgeOnline)).font(.system(size: 11.5)).foregroundStyle(.white.opacity(0.55))
+            }
+            HStack(spacing: 5) {
+                ForEach(["focus", "read-screen", "send-text", "send-esc", "launch"], id: \.self) { c in
+                    let on = a.supports(c)
+                    Text(TerminalText.capability(c)).font(.system(size: 10.5, weight: .medium))
+                        .strikethrough(!on, color: .white.opacity(0.35))
+                        .foregroundStyle(on ? .white.opacity(0.85) : .white.opacity(0.3))
+                        .padding(.horizontal, 7).padding(.vertical, 2)
+                        .background(Capsule().fill(on ? Color.white.opacity(0.10) : Color.clear))
+                        .overlay(Capsule().strokeBorder(Color.white.opacity(on ? 0 : 0.12), lineWidth: 0.5))
+                        .help(on ? tr("\(a.label): поддерживается", "\(a.label): supported") : TerminalText.unsupported(terminal: a.label, capability: c))
+                }
+            }
+            .padding(.leading, 15)
+            // the cmux bridge — the cmux adapter's detail: its state and how to start it
+            if a.via == "bridge" { BridgeSettings(store: store, compact: true).padding(.leading, 15) }
+        }
+        .padding(.horizontal, 12).padding(.vertical, 9)
+    }
+
+    @ViewBuilder private func launchLine(_ ts: TerminalsInfo) -> some View {
+        HStack(spacing: 6) {
+            Image(systemName: "plus.rectangle.on.rectangle").font(.system(size: 11)).foregroundStyle(.white.opacity(0.6))
+            if let a = ts.launchAdapter {
+                Text(tr("Новые сессии открываются в \(a.label)", "New sessions open in \(a.label)") + (TerminalText.launchWhy(ts.launch?.why).map { " · \($0)" } ?? ""))
+                    .font(.system(size: 12))
+            } else {
+                Text(ActionBlock.noLaunchTerminal.help).font(.system(size: 12)).foregroundStyle(.orange)
+            }
+        }
+        .help(tr("Выбрать терминал: services.terminal.launch в config.json хаба (id терминала или auto).",
+                 "To choose the terminal: services.terminal.launch in the hub's config.json (a terminal id or auto)."))
+    }
+}
+
+/// The cmux bridge: whether it's connected (since when, version) or how to start it. In Settings → Terminal it sits under the
+/// cmux row (`compact`); for a daemon before the terminal layer — on its own.
+struct BridgeSettings: View {
+    let store: HubStore
+    var compact = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            if !compact { Text(tr("Мост cmux", "cmux bridge")).font(.system(size: 13, weight: .semibold)) }
             if let b = store.state?.bridge {
+                // under the cmux row its "bridge not connected" state is already on the right: only the details when connected
+                if !compact || b.online {
                 HStack(spacing: 6) {
                     Circle().fill(b.online ? Color.green : Color.orange).frame(width: 7, height: 7)
-                    Text(b.online ? tr("Подключён", "Connected") + (sinceText(b).map { tr(" · с \($0)", " · since \($0)") } ?? "") + (b.version.map { " · v\($0)" } ?? "")
-                                  : tr("Не подключён — переход во вкладки и запуск сессий недоступны", "Not connected — switching to tabs and launching sessions are unavailable"))
-                        .font(.system(size: 12))
+                    Text((compact ? tr("Мост cmux: ", "cmux bridge: ") : "")
+                         + (b.online ? tr("подключён", "connected") + (sinceText(b).map { tr(" · с \($0)", " · since \($0)") } ?? "") + (b.version.map { " · v\($0)" } ?? "")
+                                     : tr("не подключён — в cmux недоступны переход во вкладки, Esc, чтение и набор, новые вкладки", "not connected — switching to tabs, Esc, reading, typing and new tabs are unavailable in cmux")))
+                        .font(.system(size: compact ? 11.5 : 12)).foregroundStyle(.white.opacity(compact ? 0.7 : 1)).fixedSize(horizontal: false, vertical: true)
                 }
-                if !b.online { BridgeNotice(store: store, place: .settings) }
-                Text(tr("Мост живёт в закреплённой вкладке cmux и выполняет для хаба три операции: перейти во вкладку, Esc, новая вкладка.", "The bridge lives in a pinned cmux tab and runs three operations for the hub: switch to a tab, Esc, new tab."))
-                    .font(.system(size: 11.5)).foregroundStyle(.white.opacity(0.55)).fixedSize(horizontal: false, vertical: true)
+                }
+                if !b.online, !compact || cmuxInUse { BridgeNotice(store: store, place: .settings) }
+                Text(tr("Мост живёт в закреплённой вкладке cmux и выполняет для хаба операции во вкладках cmux.", "The bridge lives in a pinned cmux tab and runs the hub's operations in cmux tabs."))
+                    .font(.system(size: 11)).foregroundStyle(.white.opacity(0.45)).fixedSize(horizontal: false, vertical: true)
             } else {
                 Text(BridgeSettingsText.missing(stateKnown: store.state != nil))
                     .font(.system(size: 12)).foregroundStyle(.white.opacity(0.6))
             }
         }
+    }
+
+    /// cmux is used here: installed or has sessions — only then does the compact block show the start command.
+    private var cmuxInUse: Bool {
+        guard let a = store.state?.terminals?.adapters.first(where: { $0.via == "bridge" }) else { return true }
+        return a.installed != false || a.sessions > 0
     }
 
     private func sinceText(_ b: BridgeInfo) -> String? {
@@ -961,7 +1055,7 @@ struct PluginDetailView: View {
 
     private func effectText(_ e: String) -> String {
         switch e {
-        case "cmux.focus", "session.focus": return tr("перейти во вкладку", "switch to tab")
+        case "terminal.focus", "cmux.focus", "session.focus": return tr("перейти во вкладку", "switch to tab")
         case "session.interrupt": return tr("прервать ход", "interrupt")
         case "session.stop": return tr("остановить сессию", "stop session")
         case "open.url": return tr("открыть ссылку", "open link")
@@ -1405,7 +1499,7 @@ struct BridgeNotice: View {
 
     static func title(_ place: Place) -> String? {
         switch place {
-        case .focus: return tr("Мост cmux не подключён — «Перейти во вкладку» недоступно", "The cmux bridge isn't connected — Go to tab is unavailable")
+        case .focus: return tr("Мост cmux не подключён — «Перейти во вкладку» недоступно для сессий в cmux", "The cmux bridge isn't connected — Go to tab is unavailable for cmux sessions")
         case .launch: return tr("Мост cmux не подключён — запуск сессии недоступен", "The cmux bridge isn't connected — launching a session is unavailable")
         case .settings: return nil
         }
@@ -1490,8 +1584,8 @@ struct SessionsView: View {
                     Notice(color: l.state == .timeout ? .orange : l.state == .registered ? .green : .blue, icon: l.symbol, title: l.text,
                            actionTitle: tr("Скрыть", "Dismiss"), onAction: { store.clearLastLaunch() })
                 }
-                // without the bridge "Go to" is disabled — here you can see how to start it
-                if store.focusPrimitive, !store.bridgeOnline, store.sessions.contains(where: { $0.focusable == true || $0.surfaceId != nil }) || cards.contains(where: { $0.surfaceId != nil }) {
+                // sessions in cmux while its bridge is offline: their "Go to tab" is disabled — here you can see how to start it
+                if store.sessionsWaitingForBridge || (store.focusPrimitive && !store.bridgeOnline && store.state?.terminals == nil && cards.contains(where: { $0.surfaceId != nil })) {
                     BridgeNotice(store: store)
                 }
                 if !cards.isEmpty {
@@ -1562,15 +1656,18 @@ struct SessionRow: View {
     let question: Bool
 
     private func has(_ name: String) -> Bool { store.state?.primitives.contains { $0.name == name } ?? false }
-    /// Why the button won't work: connection, unpinned build (interrupt/stop — app only), pause, bridge.
+    /// Why the button won't work: connection, unpinned build (interrupt/stop — app only), pause.
     private func block(_ primitive: String) -> ActionBlock? { store.gate(primitive: primitive) }
+    /// The same plus the session's terminal: it lacks the capability, or it is cmux and the bridge is offline.
+    private func block(_ primitive: String, _ capability: String) -> ActionBlock? { store.gate(primitive: primitive, session: session, capability: capability) }
+    private var terminal: SessionTerminal? { store.terminal(of: session) }
 
     var body: some View {
         HStack(spacing: 10) {
             glyph
             VStack(alignment: .leading, spacing: 1) {
                 Text(session.displayName).font(.system(size: 13, weight: .semibold)).lineLimit(1)
-                Text([session.stateLabel, session.cwd].compactMap { $0 }.joined(separator: " · ")).font(.system(size: 11.5)).foregroundStyle(.white.opacity(0.55)).lineLimit(1)
+                Text([session.stateLabel, terminal?.label, session.cwd].compactMap { $0 }.joined(separator: " · ")).font(.system(size: 11.5)).foregroundStyle(.white.opacity(0.55)).lineLimit(1)
             }
             Spacer(minLength: 8)
             if session.kind != nil && session.kind != "interactive" {
@@ -1584,15 +1681,16 @@ struct SessionRow: View {
             // buttons in a fixed-width column: effort capsules line up in a column, as in the prototype
             HStack(spacing: 10) {
             if let req = focusRequest {
-                let b = block(req.primitive)
+                let b = block(req.primitive, "focus")
                 Button(tr("Перейти", "Go to tab")) { focus(req) }
                     .buttonStyle(CapsuleStyle(height: 26, expand: false)).disabled(store.busyAction != nil || b != nil)
                     .help(b.map { BridgeText.help($0, primitive: req.primitive, store) } ?? tr("Перейти во вкладку этой сессии", "Switch to this session's tab"))
             }
-            if session.status == "busy", has("session.interrupt") {
+            if session.status == "busy", has("session.interrupt"), terminal != nil {
+                let b = block("session.interrupt", "send-esc")
                 Button { if store.isDemo(session) { demo() } else { Task { await store.perform(id: "session.interrupt", args: ["sessionId": .string(session.sessionId)], label: tr("Прервать ход", "Interrupt")) } } } label: { Image(systemName: "hand.raised.circle") }
-                    .buttonStyle(.plain).foregroundStyle(.white.opacity(0.7)).disabled(store.busyAction != nil || block("session.interrupt") != nil)
-                    .help(block("session.interrupt").map { BridgeText.help($0, primitive: "session.interrupt", store) }
+                    .buttonStyle(.plain).foregroundStyle(.white.opacity(b == nil ? 0.7 : 0.3)).disabled(store.busyAction != nil || b != nil)
+                    .help(b.map { BridgeText.help($0, primitive: "session.interrupt", store) }
                           ?? tr("Прервать ход (как Esc во вкладке) — с подтверждением", "Interrupt the turn (like Esc in the tab) — asks first"))
             }
             if has("session.stop") {
@@ -1613,6 +1711,7 @@ struct SessionRow: View {
     private var details: String {
         var parts: [String] = []
         if let p = session.pid { parts.append(tr("процесс \(p)", "process \(p)")) }
+        if let t = terminal { parts.append(tr("терминал \(t.label)", "terminal \(t.label)")) }
         if let sf = session.surfaceId { parts.append(tr("вкладка \(sf.prefix(8))", "tab \(sf.prefix(8))")) }
         parts.append(session.interactive ? tr("интерактивная", "interactive") : tr("не интерактивная", "not interactive"))
         return parts.joined(separator: " · ")
@@ -1641,7 +1740,7 @@ struct SessionRow: View {
     /// Go to tab: `session.focus` by the core's "tab found" flag. A demo session (screenshots) — a button for
     /// its tab, without sending.
     private var focusRequest: (primitive: String, args: [String: JSONValue])? {
-        if store.isDemo(session) { return session.surfaceId != nil && store.focusPrimitive ? ("session.focus", [:]) : nil }
+        if store.isDemo(session) { return terminal?.focusable == true && store.focusPrimitive ? ("session.focus", [:]) : nil }
         return store.focusRequest(sessionId: session.sessionId)
     }
 

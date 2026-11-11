@@ -1,4 +1,4 @@
-// Shared helpers for the stage 5 primitives (cmux.focus, session.*).
+// Shared helpers for the stage 5 primitives (terminal.focus, session.*) and the cmux terminal adapter.
 // The file starts with `_`, so the primitive loader skips it; the primitives and the actions service import it.
 //
 // Settings: config.actions (merged over ACTION_DEFAULTS). Primitives get them through the "actions.config" fact
@@ -41,6 +41,8 @@ export function actionsConfig(config) {
     launchDir: config?.paths?.home ? join(config.paths.home, "launch") : null,
     logsDir: config?.paths?.logs || null,
     testExecLog: config?.testExecLog || null,
+    // where session.launch opens a new tab: a terminal adapter id or "auto" (lib/terminals/index.mjs launchAdapter)
+    launchTerminal: typeof config?.services?.terminal?.launch === "string" && config.services.terminal.launch ? config.services.terminal.launch : "auto",
   };
 }
 

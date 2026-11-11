@@ -1,11 +1,17 @@
-// session.interrupt primitive: interrupts the session's current turn by sending Esc to its cmux tab via the bridge.
-// Only for a session in the core registry (Claude Code signature verified) and only when agentLifecycle=running
-// in ~/.cmuxterm/claude-hook-sessions.json; otherwise Esc would close someone else's dialog or hit an empty prompt.
+// session.interrupt primitive: interrupts the session's current turn by pressing Esc in its terminal tab (the terminal layer,
+// lib/terminals/: cmux — through the bridge, tmux — send-keys Escape). Only for a session in the core registry (Claude Code
+// signature verified), whose terminal supports Esc (send-esc), and only while a turn is running — according to the terminal
+// if it knows (cmux: agentLifecycle=running in ~/.cmuxterm/claude-hook-sessions.json), otherwise the registry status (busy);
+// otherwise Esc would close someone else's dialog or hit an empty prompt.
 // The check is repeated right before the key press: the turn may have ended while awaiting confirmation.
 // From app only (the core enforces this for session.*).
+//
+// Refusals (facts:<code>): actions-off, unknown-session, no-terminal (no adapter knows the tab), pid-mismatch, esc-unsupported
+// (the session's terminal cannot press Esc), the adapter's code when it is unavailable (bridge-offline), not-running.
 
 import { t } from "../i18n.mjs";
-import { UUID_SRC, bridgeOf, cfgOf, readCmuxSessions } from "./_actions-support.mjs";
+import { availability, locate, supports } from "../terminals/index.mjs";
+import { UUID_SRC, cfgOf } from "./_actions-support.mjs";
 
 export const name = "session.interrupt";
 export const level = "confirm";
@@ -21,15 +27,15 @@ function check(args, facts) {
   const cfg = cfgOf(facts);
   if (!cfg) return { ok: false, reason: "actions-off" };
   const s = facts.session(args.sessionId);
-  if (!s) return { ok: false, reason: "unknown-session" };
-  const ch = bridgeOf(facts);
-  if (!ch?.online()) return { ok: false, reason: "bridge-offline" };
-  const e = readCmuxSessions(cfg)?.get(args.sessionId.toLowerCase());
-  if (!e) return { ok: false, reason: "no-cmux-session" };
-  if (e.pid !== s.pid) return { ok: false, reason: "pid-mismatch" };
-  if (e.agentLifecycle !== "running") return { ok: false, reason: "not-running" };
-  if (!e.surfaceId || !e.workspaceId) return { ok: false, reason: "no-surface" };
-  return { ok: true, s, e, ch };
+  if (!s || !Number.isInteger(s.pid)) return { ok: false, reason: "unknown-session" };
+  const loc = locate(s, facts);
+  if (loc.error) return { ok: false, reason: loc.error === "no-tab" ? "no-terminal" : loc.error };
+  if (!supports(loc.adapter, "send-esc")) return { ok: false, reason: "esc-unsupported", terminal: loc.adapter.id };
+  const av = availability(loc.adapter, facts);
+  if (av.error) return { ok: false, reason: av.error };
+  const running = typeof loc.adapter.running === "function" ? loc.adapter.running(loc.target) : s.status === "busy";
+  if (!running) return { ok: false, reason: "not-running" };
+  return { ok: true, s, adapter: loc.adapter, target: loc.target };
 }
 
 export function verifyFacts(args, facts) {
@@ -46,6 +52,11 @@ export function describe(args, facts, lang = "ru") {
 export async function run(args, ctx) {
   const r = check(args, ctx.facts);
   if (!r.ok) return { ok: false, error: r.reason };
-  const res = await r.ch.call({ op: "send-key", key: "escape", surfaceId: r.e.surfaceId, workspaceId: r.e.workspaceId, sessionId: args.sessionId });
-  return { ok: res.ok, code: res.code ?? null, error: res.error ?? null, pid: r.s.pid };
+  let res;
+  try {
+    res = await r.adapter.sendKey(r.target, "escape", ctx.facts, { sessionId: args.sessionId });
+  } catch {
+    res = { ok: false, error: "terminal-failed" };
+  }
+  return { ok: Boolean(res?.ok), code: res?.code ?? null, error: res?.ok ? null : res?.error || "terminal-failed", pid: r.s.pid, terminal: r.target.terminal };
 }

@@ -574,17 +574,19 @@ let cardsJSON = #"""
 
 @MainActor
 @Test func bridgeEventsToggleFocusAvailability() throws {
-    let state = try JSONDecoder().decode(HubState.self, from: Data(#"{"primitives":[{"name":"cmux.focus","level":"immediate"}],"bridge":{"online":false,"command":"/x/agenthub-bridge","home":"/h","defaultHome":true}}"#.utf8))
+    // a daemon before the terminal layer: a cmux tab, through the bridge
+    let state = try JSONDecoder().decode(HubState.self, from: Data(#"{"primitives":[{"name":"cmux.focus","level":"immediate"}],"bridge":{"online":false,"command":"/x/agenthub-bridge","home":"/h","defaultHome":true},"sessions":[{"sessionId":"a","status":"idle","surfaceId":"S1","workspaceId":"W1"}]}"#.utf8))
     let store = HubStore(client: HubClient(socketPath: "/tmp/none.sock"), preview: state)
-    #expect(store.focusPrimitive && !store.bridgeOnline && !store.canFocusTabs)
+    let s = store.sessions[0]
+    #expect(store.focusPrimitive && !store.bridgeOnline && !store.canFocus(s))
     store.handle(SSEEvent(id: "7", event: "bridge.connected", data: #"{"pid":5}"#))
-    #expect(store.bridgeOnline && store.canFocusTabs)
+    #expect(store.bridgeOnline && store.canFocus(s))
     store.handle(SSEEvent(id: "8", event: "bridge.disconnected", data: #"{"pid":5,"reason":"stale"}"#))
-    #expect(!store.bridgeOnline && !store.canFocusTabs)
+    #expect(!store.bridgeOnline && !store.canFocus(s))
     // demo sessions — for display only
     store.showDemoSessions([SessionInfo(sessionId: "d", status: "idle", effort: "low")])
-    #expect(store.sessions.map(\.sessionId) == ["d"])
-    #expect(store.isDemo(store.sessions[0]))
+    #expect(store.sessions.map(\.sessionId) == ["a", "d"])
+    #expect(store.isDemo(store.sessions[1]))
 }
 
 // MARK: - plugin updates (daemon background check)

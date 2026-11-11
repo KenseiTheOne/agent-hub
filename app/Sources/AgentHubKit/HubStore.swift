@@ -153,9 +153,13 @@ public final class HubStore {
     public func showDemoSessions(_ list: [SessionInfo]) { demoSessions = list }
     public func isDemo(_ s: SessionInfo) -> Bool { demoSessions.contains { $0.sessionId == s.sessionId } }
 
-    /// Whether the daemon can switch to a tab (`session.focus`, on older daemons `cmux.focus`) and whether the bridge is connected —
-    /// without the bridge the "Go to" buttons are disabled.
-    public var focusPrimitive: Bool { sessionFocusPrimitive || (state?.primitives.contains { $0.name == "cmux.focus" } ?? false) }
+    /// Whether the daemon can switch to a tab (`session.focus`, on older daemons `terminal.focus`/`cmux.focus` by the tab id).
+    public var focusPrimitive: Bool { sessionFocusPrimitive || tabFocusPrimitive != nil }
+    /// Switching to a tab by its id: `terminal.focus`, on daemons before the terminal layer `cmux.focus` (its deprecated alias now).
+    public var tabFocusPrimitive: String? {
+        let names = Set(state?.primitives.map(\.name) ?? [])
+        return names.contains("terminal.focus") ? "terminal.focus" : names.contains("cmux.focus") ? "cmux.focus" : nil
+    }
     /// Switching to a session's tab by its id — the core finds the tab (terminal layer), the shell needn't know the terminal.
     public var sessionFocusPrimitive: Bool { state?.primitives.contains { $0.name == "session.focus" } ?? false }
 
@@ -167,13 +171,54 @@ public final class HubStore {
             guard s?.focusable == true else { return nil }
             return ("session.focus", ["sessionId": .string(sessionId)])
         }
-        guard let s, let sf = s.surfaceId, state?.primitives.contains(where: { $0.name == "cmux.focus" }) == true else { return nil }
+        guard let s, let sf = s.surfaceId, let prim = tabFocusPrimitive else { return nil }
         var args: [String: JSONValue] = ["surfaceId": .string(sf)]
         if let ws = s.workspaceId { args["workspaceId"] = .string(ws) }
-        return ("cmux.focus", args)
+        return (prim, args)
     }
     public var bridgeOnline: Bool { state?.bridge?.online ?? false }
-    public var canFocusTabs: Bool { focusPrimitive && bridgeOnline && !estop && connection.isLive }
+
+    /// The session's terminal: what the daemon found (`terminalInfo`). A daemon before the terminal layer (no `/state.terminals`)
+    /// knew only cmux tabs, through the bridge.
+    public func terminal(of s: SessionInfo) -> SessionTerminal? {
+        if let t = s.terminalInfo { return t }
+        guard state?.terminals == nil, s.terminal != nil || s.surfaceId != nil else { return nil }
+        return SessionTerminal(adapter: s.terminal ?? "cmux", label: s.terminal ?? "cmux",
+                               capabilities: ["focus", "read-screen", "send-text", "send-esc", "launch"], via: "bridge")
+    }
+
+    /// Why a session button won't work: the common checks (connection, pinned build, pause), then the session's terminal — it
+    /// doesn't support the capability (`unsupported`, the tooltip names the terminal), it goes through the cmux bridge and the
+    /// bridge is offline (`noBridge`). nil — can be pressed.
+    public func gate(primitive: String, session s: SessionInfo, capability: String) -> ActionBlock? {
+        if let b = gate(primitive: primitive, needsBridge: false) { return b }
+        let t = terminal(of: s)
+        if let t, !t.supports(capability) { return .unsupported(terminal: t.label, capability: capability) }
+        if t?.needsBridge ?? true, ActionBlock.bridgePrimitives.contains(primitive), !bridgeOnline { return .noBridge }
+        return nil
+    }
+
+    /// "Go to tab" will work for this session right now.
+    public func canFocus(_ s: SessionInfo) -> Bool {
+        guard let req = focusRequest(sessionId: s.sessionId) else { return false }
+        return gate(primitive: req.primitive, session: s, capability: "focus") == nil
+    }
+
+    /// Sessions whose terminal goes through the cmux bridge while it is offline — the bridge banner shows only then.
+    public var sessionsWaitingForBridge: Bool {
+        !bridgeOnline && focusPrimitive && sessions.contains { terminal(of: $0)?.needsBridge == true }
+    }
+
+    /// Where a new session opens (`/state.terminals.launch`); nil — no terminal can, or an older daemon (cmux only).
+    public var launchTerminal: TerminalsInfo.Adapter? { state?.terminals?.launchAdapter }
+
+    /// Why "Launch" won't work: the common checks, no terminal can open a tab, the launch terminal waits for the cmux bridge.
+    public func launchGate() -> ActionBlock? {
+        if let b = gate(primitive: "session.launch", needsBridge: false) { return b }
+        guard let ts = state?.terminals else { return bridgeOnline ? nil : .noBridge }
+        guard let a = ts.launchAdapter else { return .noLaunchTerminal }
+        return a.via == "bridge" && !bridgeOnline ? .noBridge : nil
+    }
 
     public var estop: Bool { state?.estop ?? false }
 
@@ -202,9 +247,13 @@ public final class HubStore {
     }
 
     /// Same for a plugin offer: an effect — by its primitive, a declared action — by its level.
+    /// A `session.*` offer names a session the shell can't see from the offer: with the terminal layer the core decides whether
+    /// its terminal needs the bridge; a tab id (`terminal.focus`, `cmux.focus`) is a cmux tab — through the bridge.
     public func gate(offer: Offer) -> ActionBlock? {
-        ActionBlock.check(primitive: offer.kind == "action" ? nil : offer.primitive, level: offer.level, pluginAction: offer.kind == "action",
+        let sessionPrim = offer.primitive?.hasPrefix("session.") == true
+        return ActionBlock.check(primitive: offer.kind == "action" ? nil : offer.primitive, level: offer.level, pluginAction: offer.kind == "action",
                           primitives: state?.primitives ?? [], live: connection.isLive, peer: peer, estop: estop, bridgeOnline: bridgeOnline,
+                          needsBridge: !(sessionPrim && state?.terminals != nil),
                           actionAppOnly: offer.kind == "action" && offer.appOnly)
     }
 
@@ -400,7 +449,7 @@ public final class HubStore {
             if type.hasPrefix("plugins."), managerVisible { Task { await loadRegistry() } }
             // an own plugin request or an own plugin folder changed: the popover shows requests even without the manager
             else if type == "plugins.own-request" || type == "plugins.own" { Task { await loadRegistry() } }
-            // the cmux bridge connected / disconnected (bye or stopped polling) — "Go to" buttons follow it right away
+            // the cmux bridge connected / disconnected (bye or stopped polling) — "Go to tab" buttons of cmux sessions follow it right away
             if type == "bridge.connected" || type == "bridge.disconnected" {
                 let on = type == "bridge.connected"
                 if state?.bridge == nil { state?.bridge = BridgeInfo(online: on) }
@@ -536,7 +585,7 @@ public final class HubStore {
 
     // MARK: - session launch
 
-    /// `session.launch` from the form: the core will require a confirmation with a cost (428), the cmux bridge opens the tab.
+    /// `session.launch` from the form: the core will require a confirmation with a cost (428), the launch terminal opens the tab.
     @discardableResult
     public func launch(_ draft: LaunchDraft) async -> Bool {
         guard busyAction == nil else { return false }

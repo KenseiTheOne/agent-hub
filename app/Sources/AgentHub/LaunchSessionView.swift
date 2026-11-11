@@ -3,8 +3,8 @@ import AppKit
 import SwiftUI
 
 /// The "New Claude session" window (stage 5, `session.launch`) over "Sessions", following the prototype. The folder, name and prompt
-/// are entered only by a human. The core writes the confirmation text with the cost (NSAlert) and checks the folder; the cmux bridge opens
-/// a new tab, the prompt goes through a 0600 file and never reaches the log or the command line.
+/// are entered only by a human. The core writes the confirmation text with the cost (NSAlert) and checks the folder; the launch terminal
+/// (`/state.terminals.launch`) opens a new tab, the prompt goes through a 0600 file and never reaches the log or the command line.
 struct LaunchSessionView: View {
     let store: HubStore
     let close: () -> Void
@@ -48,11 +48,14 @@ struct LaunchSessionView: View {
                 Toggle("", isOn: .constant(true)).toggleStyle(.switch).tint(.green).labelsHidden().disabled(true)
                     .help(tr("Хаб всегда запускает сессии с Remote Control", "The hub always launches sessions with Remote Control"))
             }
-            Text(tr("Вкладка cmux откроется в фоне. Промпт уйдёт файлом 0600 и удалится после чтения.", "The cmux tab opens in the background. The prompt goes as a 0600 file and is deleted after reading."))
+            Text(TerminalText.launchNote(store.state?.terminals == nil ? "cmux" : store.launchTerminal?.label))
                 .font(.system(size: 11.5)).foregroundStyle(.white.opacity(0.5)).fixedSize(horizontal: false, vertical: true)
             if !available {
-                Text(tr("Запуск недоступен: не запущен мост cmux", "Launching is unavailable: the cmux bridge isn't running")).font(.system(size: 11.5)).foregroundStyle(.orange)
-            } else if !store.bridgeOnline {
+                Text(tr("Запуск недоступен: хаб не умеет запускать сессии", "Launching is unavailable: the hub can't launch sessions")).font(.system(size: 11.5)).foregroundStyle(.orange)
+            } else if block == .noLaunchTerminal {
+                Text(ActionBlock.noLaunchTerminal.help).font(.system(size: 11.5)).foregroundStyle(.orange)
+            } else if block == .noBridge {
+                // the launch terminal is cmux: its bridge opens the tab
                 BridgeNotice(store: store, place: .launch)
             }
             status
@@ -80,8 +83,8 @@ struct LaunchSessionView: View {
         .onAppear { store.clearLastLaunch() }
     }
 
-    /// Why "Launch" will not work: connection, unpinned build, pause, bridge.
-    private var block: ActionBlock? { store.gate(primitive: "session.launch") }
+    /// Why "Launch" will not work: connection, unpinned build, pause, no launch terminal, the cmux bridge (launch terminal cmux).
+    private var block: ActionBlock? { store.launchGate() }
 
     private func field<V: View>(_ label: String, @ViewBuilder _ v: () -> V) -> some View {
         VStack(alignment: .leading, spacing: 4) {

@@ -416,7 +416,8 @@ checks the arguments itself; the plugin only proposes.
 | `open.url <url>` | `http(s)` only, no credentials in the URL | everyone (`href=<url>` is the same) |
 | `open.file <path> [reveal=true]` | an absolute or `~/` path; documents and plain folders open, anything executable or unknown is refused — only revealed in Finder with `reveal=true` | everyone |
 | `session.focus <sessionId>` | a session UUID; the hub finds the terminal tab itself | everyone except `local` (contract 3) |
-| `cmux.focus <surfaceId> [workspaceId=…]` | **deprecated**: kept for already installed plugins — use `session.focus` | everyone except `local` |
+| `terminal.focus <surfaceId> [workspaceId=…]` | a terminal tab by its id (the `surfaceId` of a session record) — prefer `session.focus` | everyone except `local` |
+| `cmux.focus <surfaceId> [workspaceId=…]` | **deprecated** former name of `terminal.focus`: accepted until the next contract — use `session.focus` | everyone except `local` |
 | `session.interrupt`, `session.stop`, `session.respond`, `session.launch` | — | built-in plugins only |
 
 Declare what you offer: `<agenthub.effects>open.url,open.file,session.focus</agenthub.effects>` (`open.*` covers both
@@ -430,8 +431,10 @@ Go to the session | effect="session.focus 3f2c9a1e-7b4d-4c8e-9f10-2a3b4c5d6e7f" 
 
 `open.url`, `open.file` and `session.focus` run immediately, without a confirmation, and `open.*` keep working while
 the hub is paused. `session.focus` refuses with `409 facts:<code>` when the session is not in the hub's registry or no
-terminal adapter knows its tab. Your plugin learns session ids from `AGENTHUB_CLAUDE_SESSIONS_FILE` (trusted plugins,
-section 7) or from `~/.claude/sessions/*.json` (with an `fsRead` permission).
+terminal adapter knows its tab. The hub knows the session's terminal itself (cmux, tmux, iTerm2, Terminal.app — see
+[`extension-points.md`](extension-points.md#terminal-adapter-daemonlibterminalsidmjs)), so the same line works in any of them.
+Your plugin learns session ids from `AGENTHUB_CLAUDE_SESSIONS_FILE` (trusted plugins, section 7) or from
+`~/.claude/sessions/*.json` (with an `fsRead` permission).
 
 ### 5.2 Actions — your own commands
 
@@ -497,9 +500,9 @@ The tier comes from **where the plugin was installed and who agreed to it**, nev
 | Tier | How it gets there | Effects | Actions, `push` rules, connections, terminal, hub variables, session registry | Secrets |
 |---|---|---|---|---|
 | `builtin` | ships with the app (`plugins/`) | any | yes | any key except `telegram.*`, `oauth.*` |
-| `official` | from the signed registry, the index marks the id official | `open.*`, `session.focus`, `cmux.focus` | yes | `<id>.*` |
-| `own` | from your own folder, a human confirmed it in the pinned app | `open.*`, `session.focus`, `cmux.focus` | yes | `<id>.*` |
-| `community` | from the signed registry, not official | `open.*`, `session.focus`, `cmux.focus` | no | `<id>.*` |
+| `official` | from the signed registry, the index marks the id official | `open.*`, `session.focus`, `terminal.focus` (`cmux.focus`) | yes | `<id>.*` |
+| `own` | from your own folder, a human confirmed it in the pinned app | `open.*`, `session.focus`, `terminal.focus` (`cmux.focus`) | yes | `<id>.*` |
+| `community` | from the signed registry, not official | `open.*`, `session.focus`, `terminal.focus` (`cmux.focus`) | no | `<id>.*` |
 | `local` | `Plugins/local` | `open.*` | no | none |
 
 "Trusted" in this guide means `builtin`, `official` or `own`. Events of untrusted plugins still notify, but as "Other",
@@ -699,8 +702,9 @@ Rate limits: 60 requests and 12 sends per minute per plugin, 4 sends per minute 
 What to do with refusals: `prompt-not-empty` — the human has a draft (or Claude Code shows a placeholder): show "clear
 the input field"; `prompt-mismatch` — **the line was typed but Enter was not pressed**: tell the human, never retry
 automatically; `session-busy`, `not-foreground`, `prompt-not-found` — try on the next frame; `unverified`,
-`pid-mismatch` — never type into that session; timeouts — check `claude-sessions.json` before retrying. The full list
-is in [`api.md`](api.md), "Terminal". Lines are never journaled, only their length and declared command.
+`pid-mismatch` — never type into that session; `unsupported` — the session's terminal cannot do it (iTerm2 and
+Terminal.app neither read the screen nor type; cmux and tmux do) — the answer names `terminal` and `capability`, do not
+retry; timeouts — check `claude-sessions.json` before retrying. The full list is in [`api.md`](api.md), "Terminal". Lines are never journaled, only their length and declared command.
 
 ## 9. Notifications
 

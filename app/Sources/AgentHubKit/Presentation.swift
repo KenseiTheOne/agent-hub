@@ -837,16 +837,22 @@ public struct SessionsPluginExtras: Sendable, Equatable {
 
 /// Why an action button won't work right now — the same checks in the same order as the core (`POST /actions/:id`,
 /// docs/api.md): connection, peer class (confirmable and app-only — pinned build only), hub pause
-/// (only `open.url`/`open.file` work during it), the cmux bridge (for primitives that go through it).
+/// (only `open.url`/`open.file` work during it), the cmux bridge (for primitives that go through it when the session's terminal is
+/// cmux), the session's terminal (`unsupported`: the adapter doesn't declare the capability).
 /// nil — can be pressed; the core decides anyway, the shell just doesn't offer a certain refusal.
 public enum ActionBlock: Equatable, Sendable {
     case offline, notPinned, paused, noBridge
+    /// The session's terminal can't do it: `terminal` is its label (iTerm2), `capability` — focus, send-esc, launch, …
+    case unsupported(terminal: String, capability: String)
+    /// No terminal can open a new tab (`/state.terminals.launch` is null).
+    case noLaunchTerminal
 
     /// Work even while the hub is paused, if the daemon didn't provide `safeUnderEstop` in `/state.primitives` (daemons before 2026-11-05).
     public static let safeUnderEstop: Set<String> = ["open.url", "open.file"]
-    /// Run through the cmux bridge: without it the core answers `bridge-offline`. `session.focus` goes through the session's terminal
-    /// adapter; currently there's one (cmux, via the bridge).
-    public static let bridgePrimitives: Set<String> = ["cmux.focus", "session.focus", "session.interrupt", "session.launch"]
+    /// May run through the cmux bridge: without it the core answers `bridge-offline` — but only when the terminal is cmux. For a
+    /// session the caller passes `needsBridge` from its terminal (`SessionTerminal.needsBridge`), for a launch — from the launch
+    /// terminal; `terminal.focus`/`cmux.focus` by a cmux tab id always need it.
+    public static let bridgePrimitives: Set<String> = ["terminal.focus", "cmux.focus", "session.focus", "session.interrupt", "session.launch"]
 
     /// - primitive: the primitive (nil for a plugin action); level: the offer's or the primitive's level;
     ///   pluginAction: a declared plugin action (`offer.kind == "action"`) — never works while paused.
@@ -871,6 +877,8 @@ public enum ActionBlock: Equatable, Sendable {
         case .notPinned: return tr("Только закреплённая сборка приложения", "Pinned app build only")
         case .paused: return tr("Хаб на паузе", "Hub is paused")
         case .noBridge: return tr("Мост cmux не подключён", "The cmux bridge isn't connected")
+        case .unsupported(let terminal, let capability): return TerminalText.unsupported(terminal: terminal, capability: capability)
+        case .noLaunchTerminal: return tr("Нет терминала, в котором можно открыть вкладку", "No terminal can open a new tab")
         }
     }
 }
@@ -942,6 +950,70 @@ public final class PinAdvice: @unchecked Sendable {
             : tr("Разработчику: scripts/bundle.sh --pin-live — собрать и закрепить эту копию (обычный bundle.sh не закрепляет).",
                  "For developers: scripts/bundle.sh --pin-live builds and pins this copy (plain bundle.sh doesn't pin).")
     }
+}
+
+// MARK: - terminals
+
+/// Texts of the terminal layer (Settings → Terminal, disabled buttons). Terminal names come from the daemon (`label`); the shell
+/// knows only the capability names, not the terminals.
+public enum TerminalText {
+    /// The capability as a short phrase: "switch to tab".
+    public static func capability(_ c: String) -> String {
+        switch c {
+        case "focus": return tr("переход во вкладку", "switch to tab")
+        case "read-screen": return tr("чтение экрана", "read the screen")
+        case "send-text": return tr("набор строки", "type a line")
+        case "send-esc": return tr("Esc (прервать ход)", "Esc (interrupt)")
+        case "launch": return tr("новая вкладка", "new tab")
+        default: return c
+        }
+    }
+
+    /// The tooltip of a button the session's terminal can't serve.
+    public static func unsupported(terminal: String, capability c: String) -> String {
+        switch c {
+        case "focus": return tr("\(terminal) не умеет переходить во вкладку из хаба", "\(terminal) can't switch to the tab from the hub")
+        case "send-esc": return tr("\(terminal) не умеет нажимать Esc из хаба — прервите ход во вкладке", "\(terminal) can't press Esc from the hub — interrupt the turn in the tab")
+        default: return tr("\(terminal) не умеет: \(capability(c))", "\(terminal) doesn't support: \(capability(c))")
+        }
+    }
+
+    /// The note under the launch form: where the tab opens. nil — no terminal can open one.
+    public static func launchNote(_ label: String?) -> String {
+        guard let label else { return tr("Промпт уйдёт файлом 0600 и удалится после чтения.", "The prompt goes as a 0600 file and is deleted after reading.") }
+        return tr("Новая вкладка \(label) откроется в фоне. Промпт уйдёт файлом 0600 и удалится после чтения.",
+                  "A new \(label) tab opens in the background. The prompt goes as a 0600 file and is deleted after reading.")
+    }
+
+    /// Why a new session opens in this terminal (`/state.terminals.launch.why`).
+    public static func launchWhy(_ why: String?) -> String? {
+        switch why {
+        case "setting": return tr("выбран в настройках хаба", "set in the hub's config")
+        case "sessions": return tr("в нём больше всего сессий", "most sessions run there")
+        case "installed": return tr("первый установленный", "the first one installed")
+        default: return nil
+        }
+    }
+
+    /// The adapter's state line: sessions now, installed, available (a bridge adapter follows `bridgeOnline`).
+    public static func status(_ a: TerminalsInfo.Adapter, bridgeOnline: Bool) -> String {
+        var parts: [String] = []
+        if a.sessions > 0 { parts.append("\(a.sessions) " + plural(a.sessions, ru: ("сессия", "сессии", "сессий"), en: ("session", "sessions"))) }
+        if a.via == "bridge" {
+            parts.append(bridgeOnline ? tr("мост подключён", "bridge connected") : tr("мост не подключён", "bridge not connected"))
+        } else if a.installed == false, a.sessions == 0 {
+            parts.append(tr("не найден", "not found"))
+        } else if a.installed == true {
+            parts.append(tr("установлен", "installed"))
+        }
+        return parts.isEmpty ? "—" : parts.joined(separator: " · ")
+    }
+
+    /// Whether the adapter can run operations now: through the bridge — while it is connected.
+    public static func ready(_ a: TerminalsInfo.Adapter, bridgeOnline: Bool) -> Bool {
+        a.via == "bridge" ? bridgeOnline : a.available
+    }
+
 }
 
 /// "cmux bridge" in Settings when there's no information about the bridge: without a connection to the hub — say so, rather than "the actions

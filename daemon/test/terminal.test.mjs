@@ -347,7 +347,7 @@ test("/terminal/* routes are cli class only (the plugin process is identified by
       ["POST", "/terminal/send-text", ["cli"]],
     ],
   );
-  assert.deepEqual(ADAPTERS.map((a) => a.id), ["cmux"]);
+  assert.deepEqual(ADAPTERS.map((a) => a.id), ["cmux", "tmux", "iterm2", "terminal-app"]);
 });
 
 test("send-text: a trusted plugin with the permission types into a free tab; the journal has no text", async () => {
@@ -542,15 +542,18 @@ test("terminal layer: the first adapter that knows the tab wins; a new terminal 
 test("terminal layer: focus is an optional operation; tabOf is the \"tab found\" sign for the app", async () => {
   const facts = { get: () => undefined };
   const s = { sessionId: SID, pid: 1 };
-  const noFocus = { id: "tmux", locate: () => ({ target: { terminal: "tmux", surfaceId: "%3" } }) };
-  const withFocus = { ...noFocus, id: "kitty", focus: async () => ({ ok: true }) };
+  const noFocus = { id: "tmux", capabilities: ["read-screen"], locate: () => ({ target: { terminal: "tmux", surfaceId: "%3" } }), readScreen: async () => ({ ok: true }) };
+  const withFocus = { ...noFocus, id: "kitty", label: "kitty", capabilities: ["focus", "read-screen"], focus: async () => ({ ok: true }) };
+  // a capability counts only when it is declared and the function exists
+  assert.equal(canFocus({ ...noFocus, focus: async () => ({ ok: true }) }), false, "focus not declared");
+  assert.equal(canFocus({ ...withFocus, focus: undefined }), false, "declared without the function");
   assert.equal(canFocus(noFocus), false);
   assert.equal(canFocus(withFocus), true);
   assert.equal(canFocus(cmuxAdapter), true);
-  assert.deepEqual(tabOf(s, facts, [noFocus]), { terminal: "tmux", focusable: false });
-  assert.deepEqual(tabOf(s, facts, [withFocus]), { terminal: "kitty", focusable: true });
-  assert.deepEqual(tabOf(s, facts, [{ id: "x", locate: () => null }]), { terminal: null, focusable: false });
-  assert.deepEqual(tabOf({ sessionId: SID }, facts, [withFocus]), { terminal: null, focusable: false }, "no pid: no lookup");
+  assert.deepEqual(tabOf(s, facts, [noFocus]), { terminal: "tmux", focusable: false, terminalInfo: { adapter: "tmux", label: "tmux", capabilities: ["read-screen"], focusable: false, via: null } });
+  assert.deepEqual(tabOf(s, facts, [withFocus]), { terminal: "kitty", focusable: true, terminalInfo: { adapter: "kitty", label: "kitty", capabilities: ["focus", "read-screen"], focusable: true, via: null } });
+  assert.deepEqual(tabOf(s, facts, [{ id: "x", locate: () => null }]), { terminal: null, focusable: false, terminalInfo: null });
+  assert.deepEqual(tabOf({ sessionId: SID }, facts, [withFocus]), { terminal: null, focusable: false, terminalInfo: null }, "no pid: no lookup");
   // cmux adapter: jumping is the bridge operation surface.focus on the found tab; bridge offline gives bridge-offline; an older
   // bridge (does not know the operation) gives bridge-outdated
   const target = { terminal: "cmux", surfaceId: "C0FFEE00-1111-4111-8111-111111111111", workspaceId: "DEADBEEF-2222-4222-8222-222222222222" };
@@ -561,10 +564,10 @@ test("terminal layer: focus is an optional operation; tabOf is the \"tab found\"
   assert.deepEqual(cmuxAdapter.available(facts), { error: "bridge-offline" });
   assert.deepEqual(cmuxAdapter.available(withBridge), { ok: true });
   assert.deepEqual(await cmuxAdapter.focus(target, facts), { ok: false, error: "bridge-offline" });
-  assert.deepEqual(await cmuxAdapter.focus(target, withBridge), { ok: true });
+  assert.deepEqual(await cmuxAdapter.focus(target, withBridge), { ok: true, error: null, code: 0 });
   assert.deepEqual(calls, [{ op: "surface.focus", surfaceId: target.surfaceId, workspaceId: target.workspaceId }]);
   answer = { ok: false, error: "not-allowed" };
-  assert.deepEqual(await cmuxAdapter.focus(target, withBridge), { ok: false, error: "bridge-outdated" });
+  assert.deepEqual(await cmuxAdapter.focus(target, withBridge), { ok: false, error: "bridge-outdated", code: null });
   // the operation is on the allowlist of the bridge and the core channel
   assert.ok(OPS.includes("surface.focus"));
   assert.ok(BRIDGE_OPS.includes("surface.focus"));

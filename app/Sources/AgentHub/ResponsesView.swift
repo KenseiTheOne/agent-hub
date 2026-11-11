@@ -84,23 +84,31 @@ struct ResponseCard: View {
         }
     }
 
-    /// Jump to the card's session tab: `session.focus` if the core found the tab; for a daemon without it, `cmux.focus` on
-    /// the card's tab. On a demo card the button is for screenshots (the core will reply that there is no session).
+    /// Jump to the card's session tab: `session.focus` if the core found the tab; for a daemon without it, `terminal.focus`
+    /// (`cmux.focus` on older daemons) on the card's tab. On a demo card the button is for screenshots (the core will reply that
+    /// there is no session).
     private var focusRequest: (primitive: String, args: [String: JSONValue])? {
         if demo, card.surfaceId != nil, store.sessionFocusPrimitive { return ("session.focus", ["sessionId": .string(card.sessionId)]) }
         if let r = store.focusRequest(sessionId: card.sessionId) { return r }
-        guard !store.sessionFocusPrimitive, let sf = card.surfaceId, store.focusPrimitive else { return nil }
-        return ("cmux.focus", ["surfaceId": .string(sf)])
+        guard !store.sessionFocusPrimitive, let sf = card.surfaceId, let prim = store.tabFocusPrimitive else { return nil }
+        return (prim, ["surfaceId": .string(sf)])
+    }
+
+    /// Why the tab link won't work: by the session's terminal when the hub knows the session, otherwise a cmux tab via the bridge.
+    private func block(_ req: (primitive: String, args: [String: JSONValue])) -> ActionBlock? {
+        if let s = store.sessions.first(where: { $0.sessionId == card.sessionId }) { return store.gate(primitive: req.primitive, session: s, capability: "focus") }
+        return store.gate(primitive: req.primitive)
     }
 
     @ViewBuilder private var tabLink: some View {
         if let req = focusRequest {
+            let b = demo ? nil : block(req)
             Button(tr("Открыть вкладку", "Open tab")) {
                 Task { await store.perform(id: req.primitive, args: req.args, label: tr("Перейти во вкладку", "Switch to tab")) }
             }
-            .buttonStyle(.plain).font(.system(size: 12.5)).foregroundStyle(store.bridgeOnline ? hexColor(0x4DA3FF) : .white.opacity(0.35))
-            .disabled(!store.bridgeOnline)
-            .help(store.bridgeOnline ? "" : BridgeText.disabledHelp(store))
+            .buttonStyle(.plain).font(.system(size: 12.5)).foregroundStyle(b == nil ? hexColor(0x4DA3FF) : .white.opacity(0.35))
+            .disabled(b != nil)
+            .help(b.map { BridgeText.help($0, primitive: req.primitive, store) } ?? "")
         }
     }
 
@@ -220,6 +228,13 @@ enum DemoSessions {
         list[0].interactive = true
         list[1].interactive = true
         list[2].interactive = true
+        // one session per terminal: the row shows the terminal, the buttons follow what it supports
+        let all = ["focus", "read-screen", "send-text", "send-esc", "launch"]
+        list[0].terminalInfo = SessionTerminal(adapter: "cmux", label: "cmux", capabilities: all, via: "bridge")
+        list[1].terminalInfo = SessionTerminal(adapter: "iterm2", label: "iTerm2", capabilities: ["focus", "launch"])
+        list[2].terminalInfo = SessionTerminal(adapter: "tmux", label: "tmux", capabilities: all)
+        list[4].terminalInfo = SessionTerminal(adapter: "terminal-app", label: "Terminal", capabilities: ["focus", "launch"])
+        for i in [0, 1, 2, 4] { list[i].terminal = list[i].terminalInfo?.adapter; list[i].focusable = true }
         return list
     }
 }

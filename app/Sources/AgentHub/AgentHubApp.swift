@@ -19,9 +19,10 @@ import SwiftUI
 ///   --settings-focus hub-update  Settings scrolled to the "Hub updates" card (like "Details" from the popover; snapshots)
 ///   --settings-focus notifications  Settings scrolled to the "Notifications" card (snapshots)
 ///   --settings-focus connections    Settings scrolled to the "Connections" card (snapshots)
+///   --settings-focus terminal       Settings scrolled to the "Terminal" card (snapshots)
 ///   --show-popover            show the popover content in a separate window; prints `popover-window-id=<N>`
 ///   --demo-cards              show two synthetic cards in "Answers" (screenshots only; they cannot be answered)
-///   --demo-sessions           add synthetic sessions (effort, ultracode, cmux tab), for screenshots only
+///   --demo-sessions           add synthetic sessions (effort, ultracode, one per terminal), for screenshots only
 ///   --snapshot-menubar <png>  draw the menu bar icon in every state on a light and a dark bar (synthetic,
 ///                             no screen recording permission) and quit
 ///   --print-status-item       print `statusitem-window-id=<N>` and the icon tooltip (`screencapture -l <N>`)
@@ -80,6 +81,7 @@ struct LaunchOptions {
         if let i = a.firstIndex(of: "--settings-focus"), i + 1 < a.count, a[i + 1] == "hub-update" { o.settingsFocus = SettingsView.Anchor.hubUpdate }
         if let i = a.firstIndex(of: "--settings-focus"), i + 1 < a.count, a[i + 1] == "notifications" { o.settingsFocus = SettingsView.Anchor.notifications }
         if let i = a.firstIndex(of: "--settings-focus"), i + 1 < a.count, a[i + 1] == "connections" { o.settingsFocus = SettingsView.Anchor.connections }
+        if let i = a.firstIndex(of: "--settings-focus"), i + 1 < a.count, a[i + 1] == "terminal" { o.settingsFocus = SettingsView.Anchor.terminal }
         if let i = a.firstIndex(of: "--panel-width"), i + 1 < a.count, let w = Double(a[i + 1]) { o.panelWidth = max(PanelMetrics.minWindowWidth, CGFloat(w)) }
         if let i = a.firstIndex(of: "--panel-height"), i + 1 < a.count, let h = Double(a[i + 1]) { o.panelHeight = max(400, min(4000, CGFloat(h))) }
         if let i = a.firstIndex(of: "--panel-section"), i + 1 < a.count {

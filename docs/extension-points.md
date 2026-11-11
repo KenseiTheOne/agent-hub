@@ -159,10 +159,15 @@ Rules the core enforces **regardless of the module**:
 - A level other than `immediate` — only from `app` and only with a confirmation (see [`api.md`](api.md), 428).
 - While the hub is paused (estop) only primitives with `safeUnderEstop: true` work (currently `open.url`, `open.file`);
   everything else gets 423.
-- A third-party plugin can offer only `open.*`, `session.focus` and `cmux.focus` (`Plugins/local` — only `open.*`),
-  whatever its `<agenthub.effects>` says. **New plugins should use `session.focus <sessionId>`** (contract 3): the core
-  terminal layer finds the session tab, so the plugin does not need to know the terminal or read its files.
-  `cmux.focus <surfaceId>` remains for compatibility with already installed plugins.
+- A third-party plugin can offer only `open.*`, `session.focus`, `terminal.focus` and `cmux.focus` (`Plugins/local` —
+  only `open.*`), whatever its `<agenthub.effects>` says. **New plugins should use `session.focus <sessionId>`**
+  (contract 3): the core terminal layer finds the session tab, so the plugin does not need to know the terminal or read
+  its files. `terminal.focus <surfaceId> [workspaceId=…]` switches to a tab by its id (the `surfaceId` a session record
+  carries); **`cmux.focus` is its deprecated former name** — still accepted until the next contract (the same arguments
+  and refusals; `/state.primitives[]` marks it `aliasOf: "terminal.focus", deprecated: true`; the registry linter warns;
+  in `<agenthub.effects>` either name allows the other).
+- A primitive module may export `aliasOf: "<name>"` — a deprecated alias of another primitive (`cmux.focus` →
+  `terminal.focus`); the core accepts both names as one in `<agenthub.effects>` (`PRIMITIVE_ALIASES` in `core.mjs`).
 - `verifyFacts` is called before every run — both for plugin offers and for direct calls from the app.
 
 ## Route (`daemon/lib/routes/<name>.mjs`)
@@ -212,12 +217,73 @@ export async function stop(ctx) { ... }      // remove subscriptions and timers;
   `services.oauth.<id>.resource` doubles on 127.0.0.1 and `services.secrets.securityPath`), `plugins` (the registry),
   `push`, `secrets`, `terminal` (contract 3: "read the tab screen" and "type a line into the tab" of a Claude Code session
   for trusted plugins with the `<agenthub.terminal>` permission, the `/terminal/*` routes, the `terminal.api` fact; the
-  terminal layer `lib/terminals/` — one adapter per terminal, currently cmux via the bridge; `services.terminal` — rate
-  limits), `usage` (the Claude subscription quota → `Cache/usage.json`, the `AGENTHUB_USAGE_FILE` variable for trusted
+  terminal layer `lib/terminals/` — one built-in adapter per terminal, below "Terminal adapter"; `services.terminal` —
+  rate limits and `launch`, the terminal new sessions open in), `usage` (the Claude subscription quota → `Cache/usage.json`, the `AGENTHUB_USAGE_FILE` variable for trusted
   plugins; network — only `api.anthropic.com`; the Claude Code token never leaves the service: not to disk, the journal,
   the bus or plugins; an expired one is not refreshed. In test mode — doubles only: `services.usage.securityPath`,
   `services.usage.credentialsFile`, `services.usage.url` on 127.0.0.1/localhost; `services.usage.live: true` — the real
   keychain and host even in a test directory, for a live check).
+
+## Terminal adapter (`daemon/lib/terminals/<id>.mjs`)
+
+Everything the hub does with the terminal tab of a Claude Code session goes through the terminal layer
+(`daemon/lib/terminals/index.mjs`): switch to the tab (`session.focus`, `terminal.focus`), read the end of the screen and
+type a line (`/terminal/*`), press Esc (`session.interrupt`), open a new tab with a session (`session.launch`). A terminal
+is a **built-in adapter file** in the hub repository — a separate kind of extension, not a plugin: it ships with the hub,
+has no permissions of its own and is never installed from a registry. The core and the shell never name a terminal; the
+shell draws from what `/state` says.
+
+| Adapter | Where the session is | focus | read-screen | send-text | send-esc | launch | How |
+|---|---|---|---|---|---|---|---|
+| `cmux` | `~/.cmuxterm/claude-hook-sessions.json` (cmux hooks), same pid and start time | yes | yes | yes | yes | yes | the cmux bridge (`bridge/`) — the adapter's internal detail; without it every operation answers `bridge-offline` |
+| `tmux` | a tmux server is the nearest terminal among the process's ancestors; the pane by `pane_tty` | yes | yes | yes | yes | yes | the server's own tmux binary (`-L`/`-S` from its argv): `select-window`/`select-pane`/`switch-client` (+ the window of the client's terminal), `capture-pane`, `send-keys -l` with the same field checks as the bridge, `send-keys Escape`, `new-window -d` |
+| `iterm2` | iTerm2 (or its `iTermServer`) is the nearest ancestor; the tab by `tty of session` | yes | — | — | — | yes | `/usr/bin/osascript`, values only in `argv` |
+| `terminal-app` | Terminal.app is the nearest ancestor; the tab by `tty of tab` | yes | — | — | — | yes | `/usr/bin/osascript` (`do script` for a new window) |
+
+iTerm2 and Terminal.app declare no screen, typing or Esc: their AppleScript cannot check the Claude Code input field
+before and after typing (Terminal.app can type only through `do script`, always with Enter, or keystrokes into whatever
+window is in front), so the hub does not offer it. The first AppleScript call asks macOS for the Automation permission.
+Other hosts (Ghostty, kitty, WezTerm, Alacritty, Warp, VS Code) stop the ancestor walk and have no adapter yet: such a
+session has no tab (`terminal: null`).
+
+Detection (`_proc.mjs`) reads only the process table — parent, executable path (`proc_pidpath`), start time — through the
+core facts `processInfo`, `processPath`, `processArgv`; no command runs, and the process environment (`TERM_PROGRAM`,
+`TMUX`) is not read. The controlling terminal (`processTty`, `ps -o tty=`) is asked only when an operation runs. Tools run
+through the `terminalExec` fact (`Core` option `terminalExec`): a test hub without a double gets `refuseExec`
+(`terminal-test-mode`), `AGENTHUB_TEST_EXEC_LOG` only writes the call to the file — a test copy never touches a real
+terminal.
+
+```js
+export const id = "tmux";                    // the adapter id: /state.sessions[].terminal, the journal, the response to a plugin
+export const label = "tmux";                 // what the shell shows
+export const capabilities = ["focus", "read-screen", "send-text", "send-esc", "launch"]; // only these are offered
+export const via = null;                     // "bridge" — operations run through the cmux bridge (the shell shows its state)
+export function locate(session, facts) {}    // → {target: {terminal, tab, …}} | {error} | null; cheap: called on every /state
+export function idle(target) {}              // the session is free according to the terminal (a hint)
+export function running(target) {}           // optional: a turn is running (session.interrupt); none — the registry status
+export function available(facts) {}          // optional: {ok} | {error} — can run right now (cmux: bridge-offline)
+export function installed({ exists }) {}     // optional: on this Mac (Settings → Terminal, picking where to launch)
+export function findTab({ surfaceId, workspaceId }, facts) {} // optional: a tab by its id (terminal.focus)
+export async function focus(target, facts) {}                       // focus
+export async function readScreen(target, facts, { lines }) {}       // read-screen → {ok, promptFound, promptEmpty, busy}
+export async function sendText(target, text, facts) {}              // send-text: only into an empty field, no turn running
+export async function sendKey(target, "escape", facts) {}           // send-esc
+export async function launch({ cwd, name, sessionId, promptFile }, facts) {} // launch: runs bridge/launch.sh in a new tab
+export function registered(sessionId, facts, { workspaceId }) {}   // optional: the launched session appeared (default: the registry)
+```
+
+A capability counts only when it is declared **and** its function exists. What is missing is refused before anything
+runs: `/terminal/*` — `409 terminal:unsupported {terminal, capability}`; primitives — `409 facts:focus-unsupported`,
+`facts:esc-unsupported`, `facts:launch-unsupported`; the shell disables the button with a tooltip naming the terminal.
+A new terminal is a file and a line in `ADAPTERS`: the plugin contract (routes, the `<agenthub.terminal>` permission, error
+codes) does not change.
+
+`/state` exposes the layer: `sessions[].terminal` (the adapter id, contract 3, a string), `focusable`, and
+`terminalInfo {adapter, label, capabilities, focusable, via}` (or `null`); `terminals {adapters: [{id, label,
+capabilities, via, installed, available, reason, sessions}], launch: {adapter, why} | null, prefer}` — Settings →
+Terminal. `session.launch` opens the tab in `services.terminal.launch` (an adapter id) or, with `"auto"` (the default),
+in the terminal most live sessions run in, otherwise in the first installed of cmux, iTerm2, Terminal (tmux only by the
+setting or by its sessions: a new window would land in a detached server).
 
 ## Plugin contract (what the core understands)
 
@@ -338,11 +404,12 @@ newer hub"); a plugin that can live without them may declare 2 and check the var
   tab via the core session registry, and the terminal adapter switches to it (the `focus` operation; for cmux — the bridge
   operation `surface.focus`). Refusals are 409 `facts:<code>`: `unknown-session` (the session is not in the registry),
   `no-terminal` (no adapter knows its tab), `pid-mismatch` (the tab belongs to another process), `focus-unsupported` (the
-  adapter cannot switch), the code of an unavailable adapter (`bridge-offline`); a failure of the switch itself —
+  adapter cannot switch), the code of an unavailable adapter (`bridge-offline` — cmux only); a failure of the switch itself —
   `200 {ok: false, result: {error}}`. The action description is "Go to tab "<session name>"" (otherwise by the start of
   `sessionId`). The plugin learns the `sessionId` from `$AGENTHUB_CLAUDE_SESSIONS_FILE` or `~/.claude/sessions/*.json`.
-  In `/state.sessions[]` the core exposes `terminal` (the adapter that found the tab, or `null`) and `focusable` (the tab
-  was found and the adapter can switch to it) — the shell draws the "Go to" button from them.
+  In `/state.sessions[]` the core exposes `terminal` (the adapter that found the tab, or `null`), `focusable` (the tab
+  was found and the adapter can switch to it) and `terminalInfo` (the adapter, its label and capabilities) — the shell
+  draws the "Go to tab" button from them. Terminals: cmux, tmux, iTerm2, Terminal.app (above, "Terminal adapter").
 - **The hub pause flag** — `AGENTHUB_PAUSED=1|0` in the environment of **every** run (and action), for any plugin tier:
   `1` while `ESTOP` exists ("Pause hub"), otherwise `0`. It is always passed: an explicit `0` tells the plugin that the
   hub is new enough and background work is fine (an older hub does not pass the variable — then better not do background
@@ -398,12 +465,16 @@ newer hub"); a plugin that can live without them may declare 2 and check the var
   pressed — `504 terminal:deadline`). Rates are in `services.terminal` (`requestsPerMin` 60 per plugin, `sendPerMin` 12
   per plugin, `sendPerTabPerMin` 4 per tab; every attempt that reaches the terminal counts).
 
+  The terminal: cmux (through its bridge) and tmux (through its CLI) support both routes; a session in iTerm2 or
+  Terminal.app gets `409 terminal:unsupported {terminal, capability}` — do not retry, it will not change.
+
   Errors: `400 terminal:bad-text`, `args:*`; `403 terminal:not-a-plugin | untrusted | not-declared |
-  text-not-declared`; `409 terminal:unknown-session | unverified | no-tab | pid-mismatch | session-busy |
-  not-foreground | process-unknown | prompt-not-found | prompt-not-empty | prompt-mismatch | bridge-offline`; `423
-  estop`; `429 terminal:rate-limited` (`scope: requests|plugin|tab`, `retryAfterMs`); `501 terminal:bridge-outdated`;
-  `502 terminal:cmux-failed`, `504 terminal:bridge-timeout | bridge-pickup-timeout | cmux-timeout | deadline` — a bridge
-  or terminal failure; `503 terminal:disabled` — the service is off. What the plugin should do:
+  text-not-declared`; `409 terminal:unknown-session | unverified | no-tab | pid-mismatch | unsupported | session-busy |
+  not-foreground | process-unknown | prompt-not-found | prompt-not-empty | prompt-mismatch | bridge-offline |
+  terminal-test-mode`; `423 estop`; `429 terminal:rate-limited` (`scope: requests|plugin|tab`, `retryAfterMs`); `501
+  terminal:bridge-outdated`; `502 terminal:cmux-failed | tmux-failed`, `504 terminal:bridge-timeout |
+  bridge-pickup-timeout | cmux-timeout | tmux-timeout | deadline` — a bridge or terminal failure; `503 terminal:disabled`
+  — the service is off. What the plugin should do:
   - `prompt-not-empty` — the field holds a human draft **or** faint text: the placeholder of a fresh session
     (`Try "…"`) and Claude Code's next-prompt suggestion are indistinguishable from typed text on a text screen (cmux
     returns the screen without colors). The hub does not type into such a field; show "clear the input field" or wait.
@@ -421,9 +492,9 @@ newer hub"); a plugin that can live without them may declare 2 and check the var
   session, tab, terminal, length, `head` — the declared slash command at the start of the line, `sha` — the first 12
   characters of sha256, only together with `head`; for lines under the `*` permission both are `null`; **the whole line
   is never recorded**; duplicated in the audit log) and every refusal (`terminal-denied`). The terminal behind this is the
-  core adapter layer (`daemon/lib/terminals/`): currently cmux (through the bridge in a pinned tab,
-  [`bridge/README.md`](../bridge/README.md)); tmux, kitty, WezTerm, iTerm2 would be added as adapters without changing
-  the plugin contract. Pause: with `AGENTHUB_PAUSED=1`, do not call at all.
+  core adapter layer (`daemon/lib/terminals/`, "Terminal adapter" above): cmux (through the bridge in a pinned tab,
+  [`bridge/README.md`](../bridge/README.md)) and tmux type; iTerm2 and Terminal.app only switch to the tab and open new
+  ones. More terminals are added as adapters without changing the plugin contract. Pause: with `AGENTHUB_PAUSED=1`, do not call at all.
 - **Writing to hijack locations is loud.** `<agenthub.fsWrite>` to places through which Claude Code or the system can be
   hijacked is allowed, but the consent window shows such a permission first, as a red line "Hijack location…" with an
   explanation of what it gives, and the registry linter warns the reviewer. The places (`WRITE_RISKS` in
@@ -594,7 +665,7 @@ The core declares the plugin contract version (`CONTRACT_VERSION` in `daemon/lib
 |---|---|---|
 | 1 | before 2026-11-09 (implicit) | everything above without the version 2 items. Push kinds: `sessions`, `runs`, `night`, `updates`, `problems`, `other`, `security`. One connection and the icons of several plugins were hard-coded in the core and the shell |
 | 2 | 2026-11-09…10 | **Cleaning plugin names out of the core.** `<agenthub.contract>`; `<agenthub.icon>` (tile icon and color instead of a dictionary in the shell); `<agenthub.connection>` (the plugin declares the connection, not the core; the `connections` permission; MCP calls only through its own connection, otherwise `mcp:not-owner`); `kind="plugin"` and `was=` on `<agenthub.push>` — the plugin's own toggle instead of the `runs`/`night` kinds (they are deprecated synonyms with a linter warning; carrying over turned-off ones — [`daemon/lib/push/README.md`](../daemon/lib/push/README.md)); `message=` in action output — refusal text from the plugin (the shell no longer knows plugin codes); the `blocker`, `session-died`, `workflow-*` rules moved from the core table into plugin metadata; the built-in `agents` 1.2.0, `claude-sessions` 0.4.0, `quota` 0.5.0 declare their icon, contract and own push rules (`quota` — `week-80`, `pace-85`, `token-lost`: the `quota-*` rules left the core table, and `services.push.rules` overrides by their old names no longer work — use the plugin key). Review 2026-11-10: the connection id is `<plugin id>.<name>` (not `<id>-…`), starting with a letter, up to 64; connections only for official and own plugins (linter); the address is a host name, not an IP; the daily budget up to 10000 is really enforced; "orphaned" connections; the "requires a newer hub" refusal comes before the linter, for own plugins too; a version that needs a newer hub does not count as an "available update"; an unparseable `contract` in an index entry means "requires a newer hub" for that entry, not a catalog refusal |
-| 3 | since 2026-11-10 | **Sessions, pause, loud permissions** (see "Contract 3" above). `AGENTHUB_CLAUDE_SESSIONS_FILE` — metadata of live Claude Code sessions for trusted plugins (the core `sessions` service, `Cache/claude-sessions.json`: model, effort, where they came from — a turn or a `/model`/`/effort` command, record time, ultracode, tab, `verified`; no conversation text), allowed in `<agenthub.watch>` and `<agenthub.fsRead>`; session line parameters `sessionModel=`, `sessionModelSource=`, `sessionEffortSource=`, `sessionAt=` (in `/state.sessions[]` — `model`, `modelSource`, `effortSource`, `metaAt`); the built-in `claude-sessions` 0.5.0 reads the model and the `/model`, `/effort` commands from the transcript tail and declares contract 3. `AGENTHUB_PAUSED=0\|1` in every plugin run and restarting plugins when the pause is set or lifted (`AGENTHUB_REFRESH_REASON=Paused\|Resumed`). An `fsWrite` permission to a Claude Code or system hijack location — the `risk` field, a red line in the consent window (app and terminal), a registry linter warning. Shell: tooltips with the full text for all truncatable plugin texts (sidebar, header and page lines, cards, strips, popover) — as AppKit tooltips, also in an inactive app. Terminal: `<agenthub.terminal>read-screen|send </commands>|*` (only `builtin`/`official`/`own`; by command — slash commands with ≤ 3 short arguments, `*` — any line except a leading `!`, `#`, `&`; typing is `risk: "terminal"`, a red line in the consent window), the routes `POST /terminal/read-screen` (input field flags, no screen text) and `POST /terminal/send-text` (a line ≤ 200, printable ASCII without `\\`; only a Claude Code session with a verified signature, a known tab and a foreground process, an empty field and no turn running, not while paused, rate-limited, journaled without text) from the plugin's process — a run, streamable or action — through the core terminal layer (the cmux adapter → the bridge operations `read-screen`, `send-text`); `AGENTHUB_HUB_SOCKET` always for trusted plugins. Hijack locations — all of `~/.claude`, a project's `.claude`, `~/.cmuxterm` and terminal configs, global npm packages, shared hub files; `sessionNameSource=` (an auto-title does not go into the sessions file). The `session.focus <sessionId>` effect — switching to the session tab without knowing the terminal (the terminal layer: the adapter's `focus` operation; `/state.sessions[].terminal`/`focusable`), in the harmless effects ceiling of third-party plugins next to `open.*` and `cmux.focus` (`cmux.focus` — for compatibility); the `modelId` field in the sessions file (a model id even when the name comes from `/model`) |
+| 3 | since 2026-11-10 | **Sessions, pause, loud permissions** (see "Contract 3" above). `AGENTHUB_CLAUDE_SESSIONS_FILE` — metadata of live Claude Code sessions for trusted plugins (the core `sessions` service, `Cache/claude-sessions.json`: model, effort, where they came from — a turn or a `/model`/`/effort` command, record time, ultracode, tab, `verified`; no conversation text), allowed in `<agenthub.watch>` and `<agenthub.fsRead>`; session line parameters `sessionModel=`, `sessionModelSource=`, `sessionEffortSource=`, `sessionAt=` (in `/state.sessions[]` — `model`, `modelSource`, `effortSource`, `metaAt`); the built-in `claude-sessions` 0.5.0 reads the model and the `/model`, `/effort` commands from the transcript tail and declares contract 3. `AGENTHUB_PAUSED=0\|1` in every plugin run and restarting plugins when the pause is set or lifted (`AGENTHUB_REFRESH_REASON=Paused\|Resumed`). An `fsWrite` permission to a Claude Code or system hijack location — the `risk` field, a red line in the consent window (app and terminal), a registry linter warning. Shell: tooltips with the full text for all truncatable plugin texts (sidebar, header and page lines, cards, strips, popover) — as AppKit tooltips, also in an inactive app. Terminal: `<agenthub.terminal>read-screen|send </commands>|*` (only `builtin`/`official`/`own`; by command — slash commands with ≤ 3 short arguments, `*` — any line except a leading `!`, `#`, `&`; typing is `risk: "terminal"`, a red line in the consent window), the routes `POST /terminal/read-screen` (input field flags, no screen text) and `POST /terminal/send-text` (a line ≤ 200, printable ASCII without `\\`; only a Claude Code session with a verified signature, a known tab and a foreground process, an empty field and no turn running, not while paused, rate-limited, journaled without text) from the plugin's process — a run, streamable or action — through the core terminal layer (the cmux adapter → the bridge operations `read-screen`, `send-text`); `AGENTHUB_HUB_SOCKET` always for trusted plugins. Hijack locations — all of `~/.claude`, a project's `.claude`, `~/.cmuxterm` and terminal configs, global npm packages, shared hub files; `sessionNameSource=` (an auto-title does not go into the sessions file). The `session.focus <sessionId>` effect — switching to the session tab without knowing the terminal (the terminal layer: the adapter's `focus` operation; `/state.sessions[].terminal`/`focusable`), in the harmless effects ceiling of third-party plugins next to `open.*` and `cmux.focus` (`cmux.focus` — for compatibility); the `modelId` field in the sessions file (a model id even when the name comes from `/model`). **Terminal layer (AH-33, within contract 3):** built-in terminal adapters cmux, tmux, iTerm2, Terminal.app with declared capabilities; `terminal.focus` (the generic name of `cmux.focus`, which stays a deprecated alias until contract 4); `/state.sessions[].terminalInfo` and `/state.terminals` (additive: `terminal` stays a string, `focusable` stays); `409 terminal:unsupported`, `facts:esc-unsupported`, `facts:launch-unsupported`, `facts:no-launch-terminal` |
 
 **Controls within contract 3 (hub 0.1.1).** `segment=`, `select=`, `toggle=`, `table=` and their companion keys
 (`selected`, `columns`, `cells`, `cellColors`, `icon`, `group`, `header`) are plain params: the core passes them as is and

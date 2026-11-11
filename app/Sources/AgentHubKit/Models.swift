@@ -348,10 +348,13 @@ public struct SessionInfo: Codable, Sendable, Hashable, Identifiable {
     public var effort: String?
     /// ⚡ultracode from the last marker in the transcript; nil if there are no markers.
     public var ultracode: Bool?
-    /// The core terminal layer found the session's tab (`terminal` is its adapter, for example "cmux") and the adapter can
-    /// jump to it: the "Go to" button via `session.focus`. nil means an older daemon (no field).
+    /// The core terminal layer found the session's tab (`terminal` is its adapter id, for example "tmux") and the adapter can
+    /// jump to it: the "Go to tab" button via `session.focus`. nil means an older daemon (no field).
     public var terminal: String?
     public var focusable: Bool?
+    /// The session's terminal with what it supports (`terminalInfo`, since the terminal layer has several adapters). nil means
+    /// no adapter knows the tab, or an older daemon.
+    public var terminalInfo: SessionTerminal?
 
     public var id: String { sessionId }
 
@@ -385,6 +388,7 @@ public struct SessionInfo: Codable, Sendable, Hashable, Identifiable {
         ultracode = try? c.decodeIfPresent(Bool.self, forKey: .ultracode)
         terminal = try? c.decodeIfPresent(String.self, forKey: .terminal)
         focusable = try? c.decodeIfPresent(Bool.self, forKey: .focusable)
+        terminalInfo = try? c.decodeIfPresent(SessionTerminal.self, forKey: .terminalInfo)
     }
 
     public var isWaiting: Bool { status == "waiting" }
@@ -397,6 +401,8 @@ public struct PrimitiveInfo: Codable, Sendable, Hashable {
     public var appOnly: Bool
     /// Works while the hub is paused (the daemon sends the field since 2026-11-05; nil means an old daemon, and the app uses its own list).
     public var safeUnderEstop: Bool?
+    /// A deprecated alias of another primitive (`cmux.focus` → `terminal.focus`); nil for a regular primitive.
+    public var aliasOf: String?
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -405,6 +411,7 @@ public struct PrimitiveInfo: Codable, Sendable, Hashable {
         remoteAllowed = (try? c.decode(Bool.self, forKey: .remoteAllowed)) ?? false
         appOnly = (try? c.decode(Bool.self, forKey: .appOnly)) ?? false
         safeUnderEstop = try? c.decodeIfPresent(Bool.self, forKey: .safeUnderEstop)
+        aliasOf = try? c.decodeIfPresent(String.self, forKey: .aliasOf)
     }
 }
 
@@ -499,8 +506,12 @@ public struct HubState: Codable, Sendable, Hashable {
     public var lang: LangInfo?
     /// Where the hub lives: directory, whether it is a test one, where built-in plugins come from (`GET /state.hub`).
     public var hub: HubInfo?
-    /// The cmux bridge (`GET /state.bridge`): whether it is connected and how to start it. nil means the daemon has no actions service.
+    /// The cmux bridge (`GET /state.bridge`): whether it is connected and how to start it — the cmux terminal adapter's detail.
+    /// nil means the daemon has no actions service.
     public var bridge: BridgeInfo?
+    /// Terminal adapters (`GET /state.terminals`): what each supports, whether it can run now, where a new session opens.
+    /// nil means an older daemon (one terminal, cmux).
+    public var terminals: TerminalsInfo?
     /// Available registry plugin updates (`GET /state.pluginUpdates`, event `plugins.updates`). nil means the daemon
     /// has no plugins service (or is old).
     public var pluginUpdates: PluginUpdates?
@@ -525,7 +536,7 @@ public struct HubState: Codable, Sendable, Hashable {
 
     public init(plugins: [PluginState] = [], sessions: [SessionInfo] = [], estop: Bool = false, seq: Int = 0) {
         self.version = nil; self.contract = nil; self.now = nil; self.pid = nil; self.seq = seq; self.estop = estop
-        self.plugins = plugins; self.sessions = sessions; self.primitives = []; self.peer = nil; self.appPin = nil; self.lang = nil; self.hub = nil; self.bridge = nil; self.pluginUpdates = nil
+        self.plugins = plugins; self.sessions = sessions; self.primitives = []; self.peer = nil; self.appPin = nil; self.lang = nil; self.hub = nil; self.bridge = nil; self.terminals = nil; self.pluginUpdates = nil
         self.hubUpdate = nil
         self.launchAtLogin = nil
         self.notifications = nil
@@ -552,6 +563,7 @@ public struct HubState: Codable, Sendable, Hashable {
         lang = try? c.decodeIfPresent(LangInfo.self, forKey: .lang)
         hub = try? c.decodeIfPresent(HubInfo.self, forKey: .hub)
         bridge = try? c.decodeIfPresent(BridgeInfo.self, forKey: .bridge)
+        terminals = try? c.decodeIfPresent(TerminalsInfo.self, forKey: .terminals)
         pluginUpdates = try? c.decodeIfPresent(PluginUpdates.self, forKey: .pluginUpdates)
         hubUpdate = try? c.decodeIfPresent(HubUpdateInfo.self, forKey: .hubUpdate)
         launchAtLogin = try? c.decodeIfPresent(LaunchAtLoginInfo.self, forKey: .launchAtLogin)
@@ -571,6 +583,99 @@ public struct HubState: Codable, Sendable, Hashable {
             }
             .map(\.element)
     }
+}
+
+/// `sessions[].terminalInfo` in `/state`: the terminal the core found the session's tab in. `capabilities` — what the hub can do
+/// there: focus, read-screen, send-text, send-esc, launch. `via == "bridge"` — operations run through the cmux bridge, so they
+/// wait for it (`/state.bridge.online`).
+public struct SessionTerminal: Codable, Sendable, Hashable {
+    public var adapter: String
+    public var label: String
+    public var capabilities: [String]
+    public var focusable: Bool
+    public var via: String?
+
+    public init(adapter: String, label: String? = nil, capabilities: [String], focusable: Bool? = nil, via: String? = nil) {
+        self.adapter = adapter; self.label = label ?? adapter; self.capabilities = capabilities
+        self.focusable = focusable ?? capabilities.contains("focus"); self.via = via
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        adapter = try c.decode(String.self, forKey: .adapter)
+        label = (try? c.decodeIfPresent(String.self, forKey: .label)) ?? adapter
+        capabilities = (try? c.decode([String].self, forKey: .capabilities)) ?? []
+        focusable = (try? c.decode(Bool.self, forKey: .focusable)) ?? capabilities.contains("focus")
+        via = try? c.decodeIfPresent(String.self, forKey: .via)
+    }
+
+    enum CodingKeys: String, CodingKey { case adapter, label, capabilities, focusable, via }
+
+    public func supports(_ capability: String) -> Bool { capabilities.contains(capability) }
+    public var needsBridge: Bool { via == "bridge" }
+}
+
+/// `terminals` in `/state`: Settings → Terminal. `launch` — where `session.launch` opens a new tab right now and why
+/// (`setting` — services.terminal.launch, `sessions` — most live sessions run there, `installed` — the first installed);
+/// nil — no terminal can open one.
+public struct TerminalsInfo: Codable, Sendable, Hashable {
+    public struct Adapter: Codable, Sendable, Hashable, Identifiable {
+        public var id: String
+        public var label: String
+        public var capabilities: [String]
+        public var via: String?
+        public var installed: Bool?
+        public var available: Bool
+        public var reason: String?
+        public var sessions: Int
+
+        public init(id: String, label: String? = nil, capabilities: [String], via: String? = nil, installed: Bool? = nil, available: Bool = true, reason: String? = nil, sessions: Int = 0) {
+            self.id = id; self.label = label ?? id; self.capabilities = capabilities; self.via = via; self.installed = installed
+            self.available = available; self.reason = reason; self.sessions = sessions
+        }
+
+        public init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            id = try c.decode(String.self, forKey: .id)
+            label = (try? c.decodeIfPresent(String.self, forKey: .label)) ?? id
+            capabilities = (try? c.decode([String].self, forKey: .capabilities)) ?? []
+            via = try? c.decodeIfPresent(String.self, forKey: .via)
+            installed = try? c.decodeIfPresent(Bool.self, forKey: .installed)
+            available = (try? c.decode(Bool.self, forKey: .available)) ?? true
+            reason = try? c.decodeIfPresent(String.self, forKey: .reason)
+            sessions = (try? c.decode(Int.self, forKey: .sessions)) ?? 0
+        }
+
+        enum CodingKeys: String, CodingKey { case id, label, capabilities, via, installed, available, reason, sessions }
+
+        public func supports(_ capability: String) -> Bool { capabilities.contains(capability) }
+    }
+
+    public struct Launch: Codable, Sendable, Hashable {
+        public var adapter: String
+        public var why: String?
+        public init(adapter: String, why: String? = nil) { self.adapter = adapter; self.why = why }
+    }
+
+    public var adapters: [Adapter]
+    public var launch: Launch?
+    public var prefer: String?
+
+    public init(adapters: [Adapter], launch: Launch? = nil, prefer: String? = "auto") {
+        self.adapters = adapters; self.launch = launch; self.prefer = prefer
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        adapters = (try? c.decode([Adapter].self, forKey: .adapters)) ?? []
+        launch = try? c.decodeIfPresent(Launch.self, forKey: .launch)
+        prefer = try? c.decodeIfPresent(String.self, forKey: .prefer)
+    }
+
+    enum CodingKeys: String, CodingKey { case adapters, launch, prefer }
+
+    public func adapter(_ id: String?) -> Adapter? { id.flatMap { i in adapters.first { $0.id == i } } }
+    public var launchAdapter: Adapter? { adapter(launch?.adapter) }
 }
 
 /// `bridge` in `/state`: the cmux bridge. `command` is the path to the bridge script; `home`/`defaultHome` say whether the command

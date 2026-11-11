@@ -119,8 +119,17 @@ Snapshot:
   "sessions": [{"sessionId":"…","pid":2220,"startSec":1792600000,"status":"waiting","waitingFor":"permission prompt",
                 "name":"…","cwd":"~/…","surfaceId":"…","workspaceId":"…","sources":["plugin:claude-sessions"],"interactive":false,"updatedAt":0,
                 "effort":"high","ultracode":false,"model":"claude-opus-5-5","modelSource":"turn","effortSource":"command",
-                "metaAt":"2026-11-10T12:00:00.000Z","terminal":"cmux","focusable":true}],
-  "primitives": [{"name":"open.url","level":"immediate","remoteAllowed":false,"appOnly":false,"safeUnderEstop":true}],
+                "metaAt":"2026-11-10T12:00:00.000Z","terminal":"tmux","focusable":true,
+                "terminalInfo":{"adapter":"tmux","label":"tmux","capabilities":["focus","read-screen","send-text","send-esc","launch"],
+                                "focusable":true,"via":null}}],
+  "primitives": [{"name":"open.url","level":"immediate","remoteAllowed":false,"appOnly":false,"safeUnderEstop":true},
+                 {"name":"cmux.focus","level":"immediate","remoteAllowed":false,"appOnly":false,"safeUnderEstop":false,
+                  "aliasOf":"terminal.focus","deprecated":true}],
+  "terminals": {"adapters":[{"id":"cmux","label":"cmux","capabilities":["focus","read-screen","send-text","send-esc","launch"],
+                             "via":"bridge","installed":true,"available":false,"reason":"bridge-offline","sessions":0},
+                            {"id":"iterm2","label":"iTerm2","capabilities":["focus","launch"],"via":null,"installed":true,
+                             "available":true,"reason":null,"sessions":2}],
+                "launch":{"adapter":"iterm2","why":"sessions"},"prefer":"auto"},
   "appPin": {"kind":"cdhash","fingerprint":"cdhash:<40 hex>","changedAt":"2026-11-05T09:53:53.645Z","by":"agenthub pin-app",
              "under":"terminal","source":"check","old":"none","path":"/…/agent-hub/app/build/AgentHub.app","generation":1},
   "lang": {"setting":"system","effective":"en","system":"en"},
@@ -235,15 +244,25 @@ parameters: `sessionModel=`, `sessionModelSource=`, `sessionEffortSource=`, `ses
 composed from the conversation, `derived` — from the folder and branch): `/state` shows the name as is, but an `auto`
 name is not put into `Cache/claude-sessions.json` (`name: null`). These fields and the `Cache/claude-sessions.json` file
 (below, "Other files") are metadata only. `terminal` and `focusable` (contract 3) are computed by the core on every
-response and are not stored in the registry: `terminal` — the terminal layer adapter (`lib/terminals/`) that found the
-session tab (`cmux`), otherwise `null`; `focusable` — the tab was found and the adapter can switch to it
-(`session.focus`). The adapter's availability (the cmux bridge) is not included — see `bridge`.
+response and are not stored in the registry: `terminal` — the id of the terminal layer adapter (`lib/terminals/`) that
+found the session tab (`cmux`, `tmux`, `iterm2`, `terminal-app`; a string, as in contract 3), otherwise `null`;
+`focusable` — the tab was found and the adapter can switch to it (`session.focus`); `terminalInfo` — `{adapter, label,
+capabilities, focusable, via}` or `null`: what the hub can do in that terminal (`focus`, `read-screen`, `send-text`,
+`send-esc`, `launch`), `via: "bridge"` — through the cmux bridge. The adapter's availability (the cmux bridge) is not
+included — see `bridge` and `terminals`.
+`terminals` — Settings → Terminal ([`extension-points.md`](extension-points.md#terminal-adapter-daemonlibterminalsidmjs)):
+`adapters[]` — every built-in terminal adapter with its `capabilities`, `via`, `installed` (the app or binary is on this
+Mac; `null` — unknown), `available`/`reason` (can run operations now; cmux without the bridge — `false`,
+`bridge-offline`), `sessions` (live sessions detected in it); `launch` — where `session.launch` opens a new tab
+(`{adapter, why}`: `setting` — `services.terminal.launch`, `sessions` — most live sessions run there, `installed` — the
+first installed of cmux, iTerm2, Terminal) or `null` — no terminal can; `prefer` — the setting (`auto` by default).
 `bridge` — the cmux bridge (the actions service; `null` if there is no such service): `online` — connected and polling
 (stopped polling for more than 40 s — `false` and the `bridge.disconnected` event with `reason: "stale"`),
 `since`/`version` — since when and which version, `command` — the bridge script path (the first of
-`peer.bridgePaths`), `home`/`defaultHome` — whether the start command needs `AGENTHUB_HOME=…`. Without the bridge the
-shell disables "Go to tab" and shows the command with "Copy" (`AGENTHUB_HOME=<dir> <command>` if the directory is not the
-default).
+`peer.bridgePaths`), `home`/`defaultHome` — whether the start command needs `AGENTHUB_HOME=…`. The bridge is the cmux
+adapter's detail: without it the shell disables "Go to tab" and Esc only for sessions in cmux and shows the command with
+"Copy" (`AGENTHUB_HOME=<dir> <command>` if the directory is not the default) — in the session list when such sessions
+exist, and in Settings → Terminal under the cmux row.
 `appPin` — what is pinned in `requirements.app` (`kind`: `cdhash` | `cert` | `other` | `none`) and when that requirement
 appeared; `by`/`under` — as stated by whoever wrote it (`agenthub pin-app`), not a verified fact. `by` is a code or a
 command: `agenthub pin-app`, `manual` (config.json changed bypassing pin-app), `unknown`; the human-readable text is
@@ -369,7 +388,8 @@ Contract 3: every plugin run gets `AGENTHUB_PAUSED=1` while paused and `0` other
 turn, with `AGENTHUB_REFRESH_REASON=Paused|Resumed`. This way a plugin with deferred background work (for example,
 typing a command into a tab once the session is free) holds it back while paused.
 While paused: all actions except `open.url`/`open.file` (`safeUnderEstop`) → 423 — answering sessions from the hub,
-launching, interrupting and stopping sessions, switching to tabs (`session.focus`; `cmux.focus` — for compatibility),
+launching, interrupting and stopping sessions, switching to tabs (`session.focus`, `terminal.focus`; `cmux.focus` — its
+deprecated alias),
 plugin action buttons, installing and updating plugins; `/hook` → `{}` (sessions ask in the terminal as usual; handlers
 still receive `SessionStart`, `SessionEnd` and `Stop` while paused — the interactive session registry stays in sync with
 Claude). Statuses, plugin polling, notifications, opening links and files, and removing plugins keep working.
@@ -567,8 +587,9 @@ variable — the hub socket path.
 ### Terminal — `POST /terminal/read-screen`, `POST /terminal/send-text` (a trusted plugin process, contract 3)
 
 "Read the tab screen" and "type a line into the tab" of a Claude Code session (the `terminal` service,
-`daemon/lib/services/terminal.mjs`; routes — `lib/routes/terminal.mjs`; the terminal layer — `lib/terminals/`, the cmux
-adapter runs operations through the bridge, [`bridge/README.md`](../bridge/README.md)). Class `cli`, but only the
+`daemon/lib/services/terminal.mjs`; routes — `lib/routes/terminal.mjs`; the terminal layer — `lib/terminals/`: the cmux
+adapter runs operations through the bridge, [`bridge/README.md`](../bridge/README.md), the tmux adapter through the tmux
+CLI; iTerm2 and Terminal.app do not support these routes — `409 terminal:unsupported {terminal, capability}`). Class `cli`, but only the
 plugin's own process is admitted — a running run, a streamable process or a running action (the fact
 `pluginByPid(pid, {actions: true})`: the peer pid from the kernel) — of a trusted plugin (builtin/official/own) that
 declared `<agenthub.terminal>`: `read-screen` for the first route, `send </commands>|*` for the second (by command — a
@@ -587,16 +608,17 @@ request rate (`429`, `scope: requests`), the pause (`423 estop`), the body (`400
 `args:<field>:unknown`, `args:text:too-long`, `terminal:bad-text` — not printable ASCII, `\`, leading/trailing spaces),
 the line against the permission (`403 terminal:text-not-declared`), the session in the registry
 (`409 terminal:unknown-session`), the Claude Code signature now and the same start time (`409 terminal:unverified`), the
-terminal knows the tab and it belongs to the same pid and start time (`409 terminal:no-tab|pid-mismatch`), for typing —
+terminal knows the tab and it belongs to the same pid and start time (`409 terminal:no-tab|pid-mismatch`), the terminal
+supports the operation (`409 terminal:unsupported`, with `terminal` and `capability`), for typing —
 the session is free (`409 terminal:session-busy`: the registry status, without it — the terminal's), the process is not
 stopped and is in the foreground of its terminal (`409 terminal:not-foreground|process-unknown`) and the typing rate per
 plugin and per tab (`429`, `scope: plugin|tab`). Then the terminal:
-`409 terminal:bridge-offline|prompt-not-found|prompt-not-empty|session-busy|prompt-mismatch`,
-`501 terminal:bridge-outdated` (a bridge without these operations), `502 terminal:cmux-failed`,
-`504 terminal:bridge-timeout|bridge-pickup-timeout|cmux-timeout|deadline` (Enter only before the `enterBy` deadline the
+`409 terminal:bridge-offline|no-tab|prompt-not-found|prompt-not-empty|session-busy|prompt-mismatch|terminal-test-mode`,
+`501 terminal:bridge-outdated` (a bridge without these operations), `502 terminal:cmux-failed|tmux-failed`,
+`504 terminal:bridge-timeout|bridge-pickup-timeout|cmux-timeout|tmux-timeout|deadline` (Enter only before the `enterBy` deadline the
 daemon puts into the operation; a late bridge answer is `bridge-op-late` in the journal). No service —
-`503 terminal:disabled`. Journal: `terminal-send {plugin, sessionId, surfaceId, workspaceId, terminal, len, sha, head,
-ok, error}` (head — the declared slash command at the start of the line, sha — 12 characters of the line's sha256, only
+`503 terminal:disabled`. Journal: `terminal-send {plugin, sessionId, surfaceId, workspaceId, terminal, tab, len, sha, head,
+ok, error}` (`surfaceId`/`workspaceId` — cmux only, `tab` — the adapter's tab key) (head — the declared slash command at the start of the line, sha — 12 characters of the line's sha256, only
 together with head; for a line under the `*` permission both are `null`; duplicated in the audit log),
 `bridge-op-late {op, opId, sessionId, surfaceId, ok, error, lateMs}` (also in the audit log) and
 `terminal-denied {plugin, op, sessionId, error}` (a refusal by the overall rate — at most once a minute per plugin); bus —
@@ -781,9 +803,10 @@ still `{}`). The journal gets `hook_event_name`, `session_id`, `claudePid`, `han
 |---|---|---|---|
 | `open.url`, `open.file` | immediate, also work while the hub is paused | `url` / `path` | `daemon/lib/primitives/` |
 | `session.focus` | immediate (for cli and third-party plugins too) | `sessionId` | below |
-| `cmux.focus` | immediate; kept for compatibility — new plugins use `session.focus` | `surfaceId`, `workspaceId?` | [`bridge/README.md`](../bridge/README.md) |
-| `session.interrupt`, `session.stop` | confirmation, app only | `sessionId` | [`bridge/README.md`](../bridge/README.md) |
-| `session.launch` | priced confirmation, app only, only from the form | `cwd`, `name`, `prompt` | [`bridge/README.md`](../bridge/README.md) |
+| `terminal.focus` | immediate (for cli and third-party plugins too) | `surfaceId`, `workspaceId?` | below |
+| `cmux.focus` | **deprecated** alias of `terminal.focus` until the next contract — new plugins use `session.focus` | `surfaceId`, `workspaceId?` | below |
+| `session.interrupt`, `session.stop` | confirmation, app only | `sessionId` | below, [`bridge/README.md`](../bridge/README.md) |
+| `session.launch` | priced confirmation, app only, only from the form | `cwd`, `name`, `prompt` | below, [`bridge/README.md`](../bridge/README.md) |
 | `session.respond` | immediate, app only (the card itself is the consent) | `requestId`, `decision`, `answers?` | [`hook.md`](hook.md) |
 
 `session.focus <sessionId>` (contract 3) — switch to the tab of a Claude Code session from the core registry. The
@@ -792,8 +815,26 @@ bridge operation `surface.focus`). `remoteAllowed: false`. Refusals before switc
 in the registry), `facts:no-terminal` (no adapter knows the tab), `facts:pid-mismatch` (the terminal tab belongs to
 another process), `facts:focus-unsupported` (the adapter cannot switch), `facts:bridge-offline` (the cmux adapter
 without the bridge); a switch failure — 200 `{ok: false, result: {error, terminal}}` with the adapter code
-(`bridge-outdated`, `bridge-timeout`, …). The action text: "Go to tab "<session name>"" (a conversation-based auto-title
-is not shown), otherwise "…session <first 8 characters of the id>…".
+(`bridge-outdated`, `bridge-timeout`, `tmux-failed`, `osascript-failed` — macOS did not allow controlling the terminal,
+`terminal-test-mode` — a test hub never touches real terminals, …). The action text: "Go to tab "<session name>"" (a
+conversation-based auto-title is not shown), otherwise "…session <first 8 characters of the id>…".
+
+`terminal.focus <surfaceId> [workspaceId=…]` — switch to a terminal tab by its id (the `surfaceId` of a session record):
+the first adapter that knows the id (`findTab`; today cmux, through the bridge). Refusals — 409 `facts:actions-off`,
+`facts:bridge-offline`, `facts:unknown-surface`, `facts:workspace-mismatch`, `facts:focus-unsupported`. `cmux.focus` is
+the same primitive under its former name: accepted until the next contract, `/state.primitives[]` marks it
+`aliasOf: "terminal.focus", deprecated: true`, and in `<agenthub.effects>` either name allows the other.
+
+`session.interrupt <sessionId>` — Esc in the session's tab through its terminal adapter, only while a turn is running
+(cmux: `agentLifecycle: running`; terminals without their own turn state, tmux: the registry status `busy`). Refusals —
+409 `facts:unknown-session`, `facts:no-terminal`, `facts:pid-mismatch`, `facts:esc-unsupported` (iTerm2, Terminal.app),
+`facts:bridge-offline` (cmux), `facts:not-running`.
+
+`session.launch` — a new tab in the launch terminal (`/state.terminals.launch`: `services.terminal.launch` or auto).
+Refusals besides the folder and name checks — `facts:no-launch-terminal` (no terminal can open a tab),
+`facts:launch-unsupported`, `facts:bridge-offline` (cmux). The confirmation text names the terminal ("new iTerm2 tab").
+The launch is tracked until the session appears (cmux — its session file, other terminals — the core registry):
+events `bridge.launch.registered` / `bridge.launch.timeout` (names kept for compatibility) now carry `terminal`.
 
 `open.file` opens only document types (text, Markdown, JSON/YAML, PDF, office files, images, audio, video — `OPEN_EXT`
 in `open.file.mjs`) and regular folders (without an extension). A file with the x bit — `409 facts:executable`, other

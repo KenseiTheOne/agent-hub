@@ -54,7 +54,8 @@ async function makeHub({ actions = {}, procs = null, builtin = null, services = 
         cmuxHookSessions: cmuxFile,
         launch: { registerTimeoutMs: 3000, pollMs: 50 },
       },
-      services: { actions: { pickupMs: 300, resultMs: 1000 } },
+      // session.launch opens the tab in cmux whatever is installed on the test machine
+      services: { actions: { pickupMs: 300, resultMs: 1000 }, terminal: { launch: "cmux" } },
     },
   });
   // 2220, 3330 — interactive Claude (terminal, no -p); 5560 — a nightly `claude -p` under launchd (no terminal)
@@ -144,6 +145,7 @@ test("stage 5 primitives are registered with levels, app-only and remoteAllowed"
   try {
     const prims = Object.fromEntries(h.core.snapshot().primitives.map((p) => [p.name, p]));
     const want = {
+      "terminal.focus": ["immediate", false, false],
       "cmux.focus": ["immediate", false, false],
       "session.focus": ["immediate", false, false],
       "session.interrupt": ["confirm", true, true],
@@ -157,7 +159,11 @@ test("stage 5 primitives are registered with levels, app-only and remoteAllowed"
     // while the hub is paused only open.url/open.file work — this is visible in the snapshot (the shell disables the other buttons)
     for (const n of Object.keys(prims)) assert.equal(prims[n].safeUnderEstop, n === "open.url" || n === "open.file", n);
     // the core knows nothing about external agents: controlling them is done via plugins' declared actions
-    for (const n of Object.keys(prims)) assert.match(n, /^(open|cmux|session)\./, n);
+    for (const n of Object.keys(prims)) assert.match(n, /^(open|terminal|cmux|session)\./, n);
+    // cmux.focus is a deprecated alias of terminal.focus (until the next contract)
+    assert.equal(prims["cmux.focus"].aliasOf, "terminal.focus");
+    assert.equal(prims["cmux.focus"].deprecated, true);
+    assert.equal(prims["terminal.focus"].aliasOf, undefined);
     // journal without load-error
     assert.ok(!h.journal().includes("load-error"));
   } finally {
@@ -325,7 +331,7 @@ test("session.interrupt: app only, only with agentLifecycle=running, Esc to the 
     assert.equal(r.body.error, "facts:unknown-session");
     assert.deepEqual(await h.core.sessions.register(SID, { pid: 2220, source: "plugin:test", name: "Работа" }), { verified: true });
     r = await h.core.invoke({ id: "session.interrupt", args: { sessionId: SID }, peer: APP });
-    assert.equal(r.body.error, "facts:no-cmux-session");
+    assert.equal(r.body.error, "facts:no-terminal");
     cmuxSessions(h, [{ sessionId: SID, pid: 2220, surfaceId: SURF, workspaceId: WS, agentLifecycle: "idle" }]);
     r = await h.core.invoke({ id: "session.interrupt", args: { sessionId: SID }, peer: APP });
     assert.equal(r.body.error, "facts:not-running");

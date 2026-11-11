@@ -129,7 +129,22 @@ export function defaultSys() {
     readJson: (p) => JSON.parse(readFileSync(p, "utf8")),
     writeJson: (p, v) => writeFileSync(p, JSON.stringify(v) + "\n", { mode: 0o600 }),
     procState,
+    ttyName,
   };
+}
+
+// The controlling terminal of a process ("ttys004") — for the terminal layer, which finds a session's tab by it (tmux,
+// iTerm2, Terminal.app). Asked only when an operation runs. → string | null (no process, no terminal, no ps).
+export function ttyName(pid, { exec = (cmd, args) => execFileSync(cmd, args, { encoding: "utf8", timeout: 3000, stdio: ["ignore", "pipe", "ignore"] }) } = {}) {
+  const ps = psCommand();
+  if (!ps || !Number.isInteger(pid) || pid <= 0) return null;
+  let out;
+  try {
+    out = String(exec(ps, ["-o", "tty=", "-p", String(pid)])).trim();
+  } catch {
+    return null;
+  }
+  return /^tty[A-Za-z0-9]{1,12}$/.test(out) ? out : null;
 }
 
 // Process state for typing into a tab (contract 3): whether it is stopped (Ctrl+Z, "T") and in the foreground group

@@ -294,9 +294,9 @@ struct PopoverView: View {
         }
         let carded = Set(store.visibleCards.map(\.sessionId))
         for s in store.sessions where s.isWaiting && !carded.contains(s.sessionId) {
-            // without the cmux bridge "Go to" won't work — then "Show": the panel shows how to start the bridge
+            // "Go to tab" only if it works now (the terminal can switch, its bridge is up) — otherwise "Show": the panel says why
             let focusReq = store.isDemo(s) ? nil : store.focusRequest(sessionId: s.sessionId)
-            let canFocus = focusReq != nil && store.canFocusTabs
+            let canFocus = focusReq != nil && store.canFocus(s)
             let lines = s.attentionLines
             out.append(Need(id: "s:\(s.sessionId)", status: .wait,
                             title: lines.title,

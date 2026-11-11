@@ -26,6 +26,13 @@ const MAC_ONLY = new Set([
   "lib/services/actions.mjs",
   "lib/primitives/_actions-support.mjs",
   "lib/primitives/cmux.focus.mjs",
+  "lib/primitives/terminal.focus.mjs",
+  // terminal adapters: tmux, iTerm2 and Terminal.app (AppleScript) — macOS terminals and paths
+  "lib/terminals/cmux.mjs",
+  "lib/terminals/tmux.mjs",
+  "lib/terminals/iterm2.mjs",
+  "lib/terminals/terminal-app.mjs",
+  "lib/terminals/_proc.mjs",
   "lib/primitives/session.interrupt.mjs",
   "lib/primitives/session.launch.mjs",
   // hub updates: building AgentHub.app (swift, codesign) and launchctl are macOS-only (docs/hub-updates.md)
