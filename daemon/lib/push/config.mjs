@@ -5,12 +5,14 @@ import { parseHM, systemTimeZone, validTimeZone } from "./clock.mjs";
 export const PUSH_DEFAULTS = Object.freeze({
   // IANA time zone; null — the system one.
   timezone: null,
-  // Quiet hours: only exceptions go to Telegram (what the plugin marked quiet="true", the tampering marker), the rest goes into a digest.
+  // Quiet hours while the human is away: only urgent banners show right away (quietException: what a plugin marked
+  // quiet="true", the tampering signals), the rest are held and merged into one digest banner when they end.
   quietStart: "23:00",
   quietEnd: "08:00",
   // From this hour until quiet hours an evening blocker (hold="evening") is sent right away; during the day it waits for this hour.
   eveningAt: "21:00",
-  // HID idle below the threshold — the human is at the Mac (macOS notification), above — away (Telegram).
+  // HID idle below the threshold — the human is at the Mac, above — away (quiet hours hold banners for the digest,
+  // a waiting session's banner waits for the human to come back).
   idleThresholdMs: 10 * 60_000,
   // How long to wait for the shell to confirm it displayed the notification before showing a banner via osascript.
   ackTimeoutMs: 3000,
@@ -29,14 +31,6 @@ export const PUSH_DEFAULTS = Object.freeze({
   // How many records (event keys) the engine keeps per plugin; beyond that the ones cleared longest ago are evicted.
   maxEntriesPerPlugin: 500,
   maxEntriesPerUntrusted: 100,
-  telegram: {
-    // Enabled only by the user (after setting up the bot and the keychain entries).
-    enabled: false,
-    keychainService: "agent-hub.telegram",
-    // No more than this many messages per 10 minutes; the excess goes as a macOS notification.
-    maxPer10Min: 10,
-    timeoutMs: 10_000,
-  },
   // Overrides and additions to the event table: { "<name>": {label, hold, awayDelayMs, …} }.
   rules: {},
 });
@@ -45,9 +39,16 @@ function num(v, d, min = 0) {
   return Number.isFinite(v) && v >= min ? v : d;
 }
 
+// Keys of services.push the service reads; anything else (for example a channel removed from the hub) is ignored —
+// the push service writes one push-config-ignored line to the journal at startup (ignoredKeys).
+export const PUSH_KEYS = Object.freeze([...Object.keys(PUSH_DEFAULTS), "enabled"]);
+export function ignoredKeys(raw) {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return [];
+  return Object.keys(raw).filter((k) => !PUSH_KEYS.includes(k)).slice(0, 20);
+}
+
 export function resolvePushConfig(raw = {}) {
   const r = raw && typeof raw === "object" ? raw : {};
-  const tg = r.telegram && typeof r.telegram === "object" ? r.telegram : {};
   const D = PUSH_DEFAULTS;
   const hm = (v, d) => parseHM(v) ?? parseHM(d);
   const tz = validTimeZone(r.timezone) ? r.timezone : systemTimeZone();
@@ -67,12 +68,6 @@ export function resolvePushConfig(raw = {}) {
     maxPerUntrustedPerMin: num(r.maxPerUntrustedPerMin, D.maxPerUntrustedPerMin, 1),
     maxEntriesPerPlugin: num(r.maxEntriesPerPlugin, D.maxEntriesPerPlugin, 10),
     maxEntriesPerUntrusted: num(r.maxEntriesPerUntrusted, D.maxEntriesPerUntrusted, 10),
-    telegram: {
-      enabled: tg.enabled === true,
-      keychainService: typeof tg.keychainService === "string" && /^[\w.-]{1,64}$/.test(tg.keychainService) ? tg.keychainService : D.telegram.keychainService,
-      maxPer10Min: num(tg.maxPer10Min, D.telegram.maxPer10Min, 1),
-      timeoutMs: num(tg.timeoutMs, D.telegram.timeoutMs, 1000),
-    },
     rules: r.rules && typeof r.rules === "object" ? r.rules : {},
   };
 }

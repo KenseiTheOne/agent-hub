@@ -16,8 +16,8 @@ public enum NotificationsText {
         switch kind {
         case "sessions": return tr("Сессия ждёт ответа или разрешения; ответы из хаба приостановлены лимитом одобрений",
                                    "A session needs an answer or a permission; hub replies paused by the approval limit")
-        case "updates": return tr("Новая версия, собрана и ждёт перезапуска, установлена, не удалась",
-                                  "A new version, built and waiting for a restart, installed, failed")
+        case "updates": return tr("Новая версия, собрана и ждёт перезапуска, установлена, не удалась; свой плагин обновлён из папки",
+                                  "A new version, built and waiting for a restart, installed, failed; an own plugin updated from its folder")
         case "problems": return tr("Плагин не может прочитать данные или перестал работать, сервис не принял токен, квота",
                                    "A plugin can't read its data or stopped working, a service rejected a token, quota warnings")
         default: return tr("События без вида и всё от плагинов сообщества",
@@ -44,8 +44,8 @@ public enum NotificationsText {
 
     /// What "off" means, as one line under the toggles.
     public static var mutedExplain: String {
-        tr("Выключенный вид не приходит никак — ни баннером, ни в Telegram, ни утренней сводкой. Событие по-прежнему видно в поповере и в журнале. Менять настройки может только закреплённая сборка приложения.",
-           "A kind that's off never reaches you — no banner, no Telegram, no morning digest. The event still shows in the popover and in the log. Only the pinned app build can change these settings.")
+        tr("Выключенный вид не приходит никак — ни баннером, ни утренней сводкой. Событие по-прежнему видно в поповере и в журнале. Менять настройки может только закреплённая сборка приложения.",
+           "A kind that's off never reaches you — no banner, no morning digest. The event still shows in the popover and in the log. Only the pinned app build can change these settings.")
     }
 
     /// A security exception row: hub events in their own words, plugin rules as "Plugin: label".
@@ -72,12 +72,12 @@ public enum NotificationsText {
            "Delivered whatever the switches here say, even with notifications off, and config.json can't override them. They warn about a possible substitution (of the app, its path, a release — and what a plugin declares as a tamper signal) and about the hub giving up on restarting the app. A substituted build would flip such a switch first — so there isn't one. They stay silent only if the notification service is off in config.json — this section then shows a warning.")
     }
 
-    /// What goes to Telegram during quiet hours, per the daemon rules (quietException): an app pin or pin path change,
+    /// What shows right away during quiet hours, per the daemon rules (quietException): an app pin or pin path change,
     /// a moved release tag and an update stopped on suspected substitution, a hub update failure, and whatever a plugin
     /// marked urgent (quiet="true"). "Agent Hub keeps crashing" is not one of them: it goes into the digest.
     public static var quietExplain: String {
-        tr("Когда вы отошли от Mac, в тихие часы в Telegram уходят только срочные: смена закрепления приложения или его пути, признаки подмены релиза, сбой обновления хаба и то, что плагин пометил срочным. Остальное, в том числе «Agent Hub падает», — одной сводкой после конца. У Mac баннеры приходят как обычно.",
-           "While you're away from the Mac, during quiet hours only urgent ones go to Telegram: an app pin or path change, signs of a substituted release, a failed hub update, and what a plugin marks urgent. Everything else, including \"Agent Hub keeps crashing\", arrives as one digest when they end. At the Mac, banners show as usual.")
+        tr("Когда вы отошли от Mac, в тихие часы баннеры придерживаются и приходят одной сводкой после конца. Сразу показываются только срочные: смена закрепления приложения или его пути, признаки подмены релиза, сбой обновления хаба и то, что плагин пометил срочным; «Agent Hub падает» — тоже в сводку. У Mac баннеры приходят как обычно.",
+           "While you're away from the Mac, during quiet hours banners are held and arrive as one digest when they end. Only urgent ones show right away: an app pin or path change, signs of a substituted release, a failed hub update, and what a plugin marks urgent; \"Agent Hub keeps crashing\" goes into the digest too. At the Mac, banners show as usual.")
     }
 
     /// The quiet hours time zone if it differs from the Mac's current one (services.push.timezone in config.json); nil if they match.
@@ -96,15 +96,15 @@ public enum NotificationsText {
         }
     }
 
-    /// Where notifications go: whether Telegram is on (config.json).
+    /// How notifications arrive: macOS banners only; when the person counts as away (idle threshold from the daemon).
     public static func channels(_ n: NotificationsInfo) -> String {
-        guard n.telegram else { return tr("Баннеры macOS. Telegram выключен (config.json).", "macOS banners. Telegram is off (config.json).") }
         // the "away" threshold comes from the daemon (services.push.idleThresholdMs); an older daemon gives no number
         if let ms = n.awayAfterMs, ms > 0 {
             let min = max(1, Int((Double(ms) / 60_000).rounded()))
-            return tr("У Mac — баннер; отошли больше чем на \(min) мин — Telegram.", "At the Mac — a banner; away for more than \(min) min — Telegram.")
+            return tr("Баннеры macOS. Без клавиатуры и мыши дольше \(min) мин — вы отошли от Mac: в тихие часы баннеры ждут сводки, а баннер сессии, которая ждёт ответа, придёт, когда вы вернётесь (или через несколько минут).",
+                      "macOS banners. No keyboard or mouse for more than \(min) min means you're away from the Mac: during quiet hours banners wait for the digest, and a waiting session's banner comes when you're back (or after a few minutes).")
         }
-        return tr("У Mac — баннер; отошли от Mac — Telegram.", "At the Mac — a banner; away from the Mac — Telegram.")
+        return tr("Баннеры macOS.", "macOS banners.")
     }
 
     /// Time options for quiet hours: every 30 minutes, plus the current value if it falls between them.

@@ -1,9 +1,8 @@
-// The push service (stage 4): plugin `event=` events → a macOS or Telegram notification.
+// The push service (stage 4): plugin `event=` events → a macOS notification (the shell's banner or osascript).
 // Logic — lib/push/engine.mjs, event table — lib/push/rules.mjs, contract — lib/push/README.md.
 //
-// Settings — services.push in <home>/config.json (lib/push/config.mjs). Telegram is off until
-// the user enables services.push.telegram.enabled and creates entries in the keychain.
-// In test mode (AGENTHUB_HOME) Telegram is always off: nothing leaves the machine from tests.
+// Settings — services.push in <home>/config.json (lib/push/config.mjs). Keys the service doesn't know (a channel
+// removed from the hub, a typo) are ignored: one push-config-ignored line in the journal at startup.
 //
 // Switches and quiet hours — "Settings → Notifications" (settings.json → notifications, written only by app;
 // lib/push/prefs.mjs). Quiet hours from config.json (quietStart/quietEnd) apply until they're set in "Settings".
@@ -14,14 +13,13 @@ import { readInstall } from "../hub-update/trial.mjs";
 import { t } from "../i18n.mjs";
 import { managerFor } from "../plugins.mjs";
 import { clearAcks, waitAck } from "../push/acks.mjs";
-import { resolvePushConfig } from "../push/config.mjs";
+import { ignoredKeys, resolvePushConfig } from "../push/config.mjs";
 import { systemTimeZone, validTimeZone } from "../push/clock.mjs";
 import { effectiveQuiet } from "../push/prefs.mjs";
 import { PushEngine } from "../push/engine.mjs";
 import { createPresence } from "../push/idle.mjs";
 import { createMacNotifier } from "../push/macos.mjs";
 import { createStore } from "../push/store.mjs";
-import { createTelegram } from "../push/telegram.mjs";
 import { samePath } from "../platform.mjs";
 import { isLabel } from "../version.mjs";
 
@@ -30,6 +28,8 @@ export const name = "push";
 let engine = null;
 let timer = null;
 let unsubscribe = null;
+// id → {from, version} of the last automatic own plugin update (the notification text says whether the version changed)
+const ownUpdates = new Map();
 
 // Plugin state → what's needed for the event text (only metadata from the header/body).
 // Events of the hub itself (not plugins) go under this id. "@" in a plugin id is impossible: registry — ID_RE, built-in and
@@ -47,6 +47,14 @@ export function hubDetail(ctx, bare) {
   if (up) return `${updateTitle(ctx, up[1])} ${up[2]}`;
   const ou = /^plugin-own-unexpected:([a-z0-9][a-z0-9-]{0,63})$/.exec(bare);
   if (ou) return t(ctx.lang?.() || "ru", "own.unexpected.detail", { title: ownTitle(ctx, ou[1]) });
+  // "Mail updated to 0.4.0" (or "updated from its folder" when the version stayed the same): the previous version is from
+  // the last plugins.own-updated event of this id
+  const ow = /^plugin-own-updated:([a-z0-9][a-z0-9-]{0,63}):(.{1,64})$/.exec(bare);
+  if (ow) {
+    const from = ownUpdates.get(ow[1]);
+    const same = from?.version === ow[2] && from.from === ow[2];
+    return t(ctx.lang?.() || "ru", "own.updated.detail", { title: ownTitle(ctx, ow[1]), version: ow[2], same });
+  }
   const hu = hubUpdateDetail(ctx, bare);
   if (hu !== undefined) return hu;
   if (bare === "app-restart-stopped") {
@@ -218,18 +226,12 @@ export async function start(ctx) {
   const cfg = resolvePushConfig(ctx.config.services?.push);
   const initial = readPrefs(ctx);
   const journal = (entry) => ctx.journal.write(entry);
-  const telegramEnabled = cfg.telegram.enabled && !ctx.config.testMode;
-  const telegram = createTelegram({
-    exec: ctx.exec,
-    enabled: telegramEnabled,
-    service: cfg.telegram.keychainService,
-    timeoutMs: cfg.telegram.timeoutMs,
-  });
+  const ignored = ignoredKeys(ctx.config.services?.push);
+  if (ignored.length) journal({ type: "push-config-ignored", keys: ignored.map((k) => `services.push.${String(k).slice(0, 64)}`) });
   engine = new PushEngine({
     config: cfg,
     presence: createPresence({ exec: ctx.exec }),
     mac: createMacNotifier({ emit: (ev) => ctx.emit(ev), waitAck, exec: ctx.exec, ackTimeoutMs: cfg.ackTimeoutMs, journal }),
-    telegram,
     lookup: makeLookup(ctx),
     store: createStore(join(ctx.paths.home, "push-state.json")),
     journal,
@@ -340,6 +342,17 @@ export async function start(ctx) {
     engine?.cleared({ plugin: HUB_SOURCE, key });
   };
   ctx.on("plugins.own-unexpected", onOwnUnexpected);
+  // An own plugin was updated from its folder without a consent window (same permissions): "Plugin updated — Mail updated
+  // to 0.4.0", kind "updates". Raise and clear right away: every automatic update is announced once.
+  const onOwnUpdated = (ev) => {
+    if (typeof ev?.plugin !== "string" || !/^[a-z0-9][a-z0-9-]{0,63}$/.test(ev.plugin) || typeof ev.version !== "string" || !ev.version || ev.version.length > 64) return;
+    ownUpdates.set(ev.plugin, { from: typeof ev.from === "string" ? ev.from : null, version: ev.version });
+    if (ownUpdates.size > 200) ownUpdates.delete(ownUpdates.keys().next().value);
+    const key = `${HUB_SOURCE}:plugin-own-updated:${ev.plugin}:${ev.version}`;
+    engine?.raised({ plugin: HUB_SOURCE, key, status: "ok" });
+    engine?.cleared({ plugin: HUB_SOURCE, key });
+  };
+  ctx.on("plugins.own-updated", onOwnUpdated);
   // The app keeps crashing and supervision (app service) stopped restarting it: raise and clear right away, like a pin.
   const crashKey = `${HUB_SOURCE}:app-restart-stopped`;
   const onCrash = () => {
@@ -357,6 +370,7 @@ export async function start(ctx) {
     ctx.off("app.restart-stopped", onCrash);
     ctx.off("plugins.update-available", onUpdate);
     ctx.off("plugins.own-unexpected", onOwnUnexpected);
+    ctx.off("plugins.own-updated", onOwnUpdated);
     ctx.off("event.raised", onRaised);
     ctx.off("event.cleared", onCleared);
     ctx.off("hook.paused", onPaused);
@@ -377,7 +391,7 @@ export async function start(ctx) {
     engine?.tick();
   }, cfg.tickMs);
   timer.unref();
-  ctx.journal.write({ type: "push-start", telegram: telegramEnabled, timezone: cfg.timezone, enabled: engine.prefs.enabled, quiet: initial.quiet.enabled ? `${initial.quiet.start}-${initial.quiet.end}` : "off" });
+  ctx.journal.write({ type: "push-start", timezone: cfg.timezone, enabled: engine.prefs.enabled, quiet: initial.quiet.enabled ? `${initial.quiet.start}-${initial.quiet.end}` : "off" });
 }
 
 export async function stop() {

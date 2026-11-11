@@ -7,7 +7,7 @@
 // The user creates the entries (`security add-generic-password -s agent-hub.example -a token -w`).
 //
 // Who gets what:
-//   builtin   — any keys except the hub's reserved services (telegram: the push bot reads it itself);
+//   builtin   — any keys except the hub's reserved services (oauth: connection logins; telegram: a leftover bot token);
 //   installed — only `<plugin id>.<account>` (secret permissions are agreed at install time, and the manager
 //               blocks permission growth);
 //   local     — nothing ("unverified").
@@ -19,7 +19,7 @@
 // Connection store (decision 2026-11-09, oauth service): the `secrets.store` fact does get/set/delete of entries of the
 // `agent-hub.oauth` keychain service (client registration and OAuth tokens; the value is JSON in base64url). Writes go
 // via the stdin of `security -i` (lib/keychain.mjs), not argv. These entries are never given to plugins: the `oauth`
-// service is reserved, like `telegram`. In test mode without a `security` double there is no store (get → null,
+// service is reserved. In test mode without a `security` double there is no store (get → null,
 // set → no-keychain error).
 //
 // get: null means no entry; a keychain failure (timeout, keychain locked) throws StoreError (code) instead of null:
@@ -34,6 +34,8 @@ import { msg } from "../i18n.mjs";
 
 export const name = "secrets";
 
+// "telegram" stays reserved after the Telegram channel was removed (2026-11-11): an old bot token may still sit in
+// the keychain, and no plugin, built-in included, should be able to read it.
 export const RESERVED_SERVICES = new Set(["telegram", "oauth"]);
 export const STORE_SERVICE = "agent-hub.oauth";
 // "<connection id>.client|token": the id follows the same rule as the declaration (lib/meta.mjs CONNECTION_ID_RE: a plugin

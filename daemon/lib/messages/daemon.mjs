@@ -146,11 +146,6 @@ export const DAEMON_MESSAGES = {
     "hub.watch.confirmed": "сторож: {label} подтверждена",
     "hub.watch.expired": "сторож: {label} не подтверждена к сроку — откат",
     "hub.watch.kickstart": "сторож: демон не поднялся — kickstart",
-    // the manual Telegram check (lib/push/send-test.mjs)
-    "push.test.confirm": "Отправит одно сообщение в Telegram. Повторите с --yes.",
-    "push.test.noKeys": "Нет записей {service} (token, chat_id) в связке ключей или они в неверном формате.",
-    "push.test.text": "Agent Hub · проверка связи",
-    "push.test.failed": (p) => `ошибка: ${p.reason}${p.code ? ` (${p.code})` : ""}`,
   },
   en: {
     "journal.hidden": "[hidden]",
@@ -294,10 +289,5 @@ export const DAEMON_MESSAGES = {
     "hub.watch.confirmed": "watchdog: {label} confirmed",
     "hub.watch.expired": "watchdog: {label} not confirmed in time — rolling back",
     "hub.watch.kickstart": "watchdog: the daemon didn't come up — kickstart",
-    // the manual Telegram check (lib/push/send-test.mjs)
-    "push.test.confirm": "Sends one message to Telegram. Repeat with --yes.",
-    "push.test.noKeys": "No {service} entries (token, chat_id) in the keychain, or they're malformed.",
-    "push.test.text": "Agent Hub · connection check",
-    "push.test.failed": (p) => `error: ${p.reason}${p.code ? ` (${p.code})` : ""}`,
   },
 };

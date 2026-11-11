@@ -267,10 +267,25 @@ extension ConsentSource {
 
     /// Who can change the folder and what follows from that.
     public var writableNote: String {
-        writableMine
+        if writableMine, !groupWritable.isEmpty {
+            return tr("Менять папку могут процессы под вашим пользователем — и ваша группа (см. предупреждение ниже). Правки с тем же набором прав хаб поставит сам; новые права, откат версии и громкие уведомления — снова через это окно или кнопку «Обновить».",
+                      "Processes running as your user can change the folder — and so can your group (see the warning below). Edits with the same permissions install by themselves; new permissions, an older version and loud notifications come back through this window or the Update button.")
+        }
+        return writableMine
             ? tr("Менять папку могут только процессы под вашим пользователем — в том числе агенты, которые работают в этом репозитории. Правки с тем же набором прав хаб поставит сам; новые права, откат версии и громкие уведомления — снова через это окно или кнопку «Обновить».",
                  "Only processes running as your user can change the folder — including agents working in this repository. Edits with the same permissions install by themselves; new permissions, an older version and loud notifications come back through this window or the Update button.")
             : tr("Папку может менять не только вы — хаб такой папке не доверяет.", "Others can change the folder — the hub doesn't trust such a folder.")
+    }
+
+    /// The loud line of the consent window for the source folder itself: writable by your group (umask 002). The install is
+    /// allowed (decision 2026-11-11), but the human must see who else can change the plugin. nil — nothing to warn about.
+    public var riskWarning: (title: String, text: String)? {
+        guard isOwn, risk == "group-writable" else { return nil }
+        let files = groupWritable.prefix(3).joined(separator: ", ") + (groupWritable.count > 3 ? "…" : "")
+        let which = files.isEmpty ? "" : tr(" (запись для группы: \(files))", " (group write: \(files))")
+        return (tr("Папку плагина может менять ваша группа, а не только вы", "Your group can change the plugin folder, not only you"),
+                tr("Права папки допускают запись для группы\(which) — так бывает при umask 002. На Mac это обычно группа staff, то есть все учётные записи этого компьютера. Правки с тем же набором прав хаб ставит сам, без этого окна, — чужая правка получит доверие вашего плагина. Надёжнее убрать запись для группы: chmod -R g-w \(shownPath)",
+                   "The folder permissions allow group write\(which) — that's what umask 002 does. On a Mac that's usually the staff group, i.e. every account on this computer. The hub installs edits with the same permissions by itself, without this window — someone else's edit would get your plugin's trust. Safer to remove group write: chmod -R g-w \(shownPath)"))
     }
 }
 

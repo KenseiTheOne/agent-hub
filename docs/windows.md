@@ -59,7 +59,8 @@ together with the shell.
 - **A1. `posixTool`: `/usr/bin/xattr|security|osascript|codesign`, `/usr/sbin/ioreg`.** On Windows a root path without
   a drive letter resolves to `<cwd drive>:\usr\bin\*.exe`, which any user can create (RCE, reproduced). In the patch
   such paths are `null` on Windows: `platform.mjs` `posixTool`, `app-sign.mjs` (`codesignCommand`), `peer.mjs`
-  (codesign — fail closed, not open), `push/idle.mjs`, `push/telegram.mjs`, `services/secrets.mjs`, `meta.mjs`.
+  (codesign — fail closed, not open), `push/idle.mjs`, `services/secrets.mjs`, `meta.mjs` (the chat-bot module the patch also touched was removed on
+  2026-11-11).
   **Required before running the daemon on Windows at all.**
   The same class of bug in code added after the audit — the patch did not see it; close it together with A1 when
   porting:
@@ -124,8 +125,8 @@ moved over.
 - **A20.** The push engine without its own banner (`mac.local === false`): `pendingAt`, `afterApp`, `afterDigestApp`,
   `push-undelivered`, `push-sent` only on actual delivery (`push/engine.mjs`). In the patch no platform enables this
   path; `engine.mjs` changed a lot after the audit (+160 lines) — rewrite it from scratch.
-- **A21.** Telegram and secrets without a keychain: `keychainCommand()` → `null`, the bot is off, a warning in
-  send-test (`push/telegram.mjs`, `push/send-test.mjs`, `services/push.mjs`). Part of A1.
+- **A21.** Secrets without a keychain: `keychainCommand()` → `null` (`services/secrets.mjs`). Part of A1. (The patch
+  also covered the chat-bot channel of the push service; that channel was removed on 2026-11-11.)
 
 ### The built-in agents plugin
 

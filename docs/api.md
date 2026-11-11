@@ -140,7 +140,7 @@ Snapshot:
                     "quiet":{"enabled":true,"start":"23:00","end":"08:00","from":"config"},
                     "security":[{"key":"app-pin-changed","plugin":"@hub","label":"Agent Hub re-pinned"},
                                 {"key":"tamper","plugin":"builder","pluginTitle":"Builder","label":"Tampering marker"}],
-                    "service":true,"telegram":false},
+                    "service":true,"awayAfterMs":600000},
   "connections": [{"id":"tix","title":"Tix","note":"tickets assigned to you","plugin":"tix","host":"mcp.example.com",
                    "tools":["get_user","filter_tasks"],"state":"connected","scope":"read",
                    "intervalMs":900000,"dailyBudget":100,"calls24h":12,"nextAt":"2026-11-09T12:15:00.000Z","why":null,"error":null}],
@@ -320,7 +320,7 @@ always below the new instance's start, so after a daemon restart the client gets
 | `hub-update.restarting` | `{label, op}` — the hub is switching to another version: the app quits by itself **without** `POST /shutdown` |
 | `hub-update.installed` | `{label, from, op, cdhash}` — the new version is confirmed (its app opened the stream); push "Agent Hub updated" |
 | `hub-update.failed` | `{label, from, op, error, log}` — the installation or rollback failed; push "The Agent Hub update failed" |
-| `hub-update.ready` | `{label, op, waiting, notify}` — the version is built and verified, but cards are waiting: restart only via `POST /hub-update/switch`. `notify: true` — the first time for this version (`HubUpdate/check.json → readyNotified`, only `op: install`): push "A new Agent Hub version is built — waiting for restart" (`@hub:hub-update-ready:<label>`, macOS only) |
+| `hub-update.ready` | `{label, op, waiting, notify}` — the version is built and verified, but cards are waiting: restart only via `POST /hub-update/switch`. `notify: true` — the first time for this version (`HubUpdate/check.json → readyNotified`, only `op: install`): push "A new Agent Hub version is built — waiting for restart" (`@hub:hub-update-ready:<label>`) |
 | `hub-update.tag-moved` | `{version, tag, old, new}` — the tag of the version the hub would offer moved to another commit; push "Agent Hub release tag moved" (immediately, during quiet hours, banner bypassing the shell) |
 | `connections.changed` | `{connections: <as in /state>}` — an OAuth connection changed state: sign-in started, completed, cancelled, expired, "Disconnect", a new MCP call (`calls24h`, `nextAt`, `why`); no tokens (section "Connections") |
 | `idle.verdict` | `{idle: <as in /state>}` — the "can I shut down" verdict, its lines or "checked" changed (the idle service; recomputed on any bus event, at most once per tick) |
@@ -328,9 +328,9 @@ always below the new instance's start, so after a daemon restart the client gets
 | `plugins.busy` | `{busy: [{id, op: "install"\|"update", title, version, since}]}` — a plugin installation / update started or ended (downloading and checking the archive, writing files) |
 | `plugins.own-request` | `{requestId, plugin, version}` — a new own-plugin request; `{requestId, plugin, done: installed\|declined}` — the request is gone. The shell re-reads `/registry/installed` |
 | `plugins.own` | `{plugin, status}` — the state of an own plugin's folder changed (`ok`, `update`, `paused`, `missing`, `broken`) |
-| `plugins.own-updated` | `{plugin, version, from}` — an own plugin's folder changed without new permissions, and the hub installed the new copy by itself (quietly: no notification) |
+| `plugins.own-updated` | `{plugin, version, from, files}` — an own plugin's folder changed without new permissions, and the hub installed the new copy by itself (no consent window); the push service shows "Plugin updated — "<title>" updated to <version>" (`@hub:plugin-own-updated:<id>:<version>`, kind `updates`) |
 | `plugins.updates` | `{pluginUpdates: <as in /state>}` — something in `pluginUpdates` changed: the list of available updates, a check error, the next check time (including a retry after the same error), the switch or the hub language (titles) |
-| `plugins.update-available` | `{plugin, title, installed, version, permissionsGrow}` — a new version of an installed plugin, **once** per "id@version" (also across restarts: `Registry/updates.json`); the push service → a macOS notification "Update available: Builder 0.4.1" — the title from the verified catalog in the hub language, as in the popover (`@hub:plugin-update:<id>:<version>`, macOS only, no flap window) |
+| `plugins.update-available` | `{plugin, title, installed, version, permissionsGrow}` — a new version of an installed plugin, **once** per "id@version" (also across restarts: `Registry/updates.json`); the push service → a macOS notification "Update available: Builder 0.4.1" — the title from the verified catalog in the hub language, as in the popover (`@hub:plugin-update:<id>:<version>`, no flap window) |
 | `bridge.connected` / `bridge.disconnected` / `bridge.op` / `bridge.launch.registered` / `bridge.launch.timeout` | the cmux bridge and session launches ([`bridge/README.md`](../bridge/README.md)); `bridge.disconnected` with `reason: "stale"` — the bridge stopped polling without `bye`, `bridge.connected` with `reason: "resumed"` — it is polling again |
 | `usage.updated` | `{ok, error}` — the usage service refreshed the quota cache (`error` — a code or `null`; no rows and no token) |
 | `plugins.catalog` / `plugins.installed` / `plugins.removed` / `plugins.blocked` / `plugins.quarantined` | the plugin manager ([`plugins-registry.md`](plugins-registry.md)) |
@@ -448,11 +448,12 @@ the push service applies it right away. `GET /settings` and `/state` return `not
 `plugins`, `quiet` with `from` (`settings` — set here; `config` — `services.push.quietStart/quietEnd` from config.json
 while nothing is set here; equal start and end there mean "no quiet hours", `enabled: false`; `default` — 23:00–08:00)
 and `timezone` (the zone in which the daemon computes quiet hours: `services.push.timezone` or the system one),
-`awayAfterMs` (the idle threshold after which Telegram is used, `services.push.idleThresholdMs`), `security` — the list
-of what cannot be turned off (hub events and trusted plugins' rules with `kind="security"`: `key`, `plugin`,
-`pluginTitle?`, `label` in the hub language), `service` (the push service is not turned off in config.json), `telegram`
-(turned on in config.json; in a test directory — `false`). A turned-off kind does not arrive at all — no `push.notify`,
-no osascript, no Telegram, no digest; it stays in the plugin's `/state` and in the journal (`push-muted`).
+`awayAfterMs` (the idle threshold after which the human counts as away from the Mac, `services.push.idleThresholdMs`:
+quiet hours then hold banners for the digest), `security` — the list of what cannot be turned off (hub events and trusted
+plugins' rules with `kind="security"`: `key`, `plugin`, `pluginTitle?`, `label` in the hub language), `service` (the push
+service is not turned off in config.json). macOS banners are the only channel (a daemon before 2026-11-11 also sent a
+flag for a second channel; the app ignores unknown keys). A turned-off kind does not arrive at all — no `push.notify`, no osascript, no
+digest; it stays in the plugin's `/state` and in the journal (`push-muted`).
 
 ### Connections — `GET /connections` (app, cli), `POST /connections/:id/connect|cancel|disconnect` (app only), `POST /connections/:id/mcp` (a plugin process)
 The hub signs into external services via OAuth 2.1 and calls their MCP servers on behalf of plugins (the `oauth`
@@ -841,6 +842,8 @@ in `open.file.mjs`) and regular folders (without an extension). A file with the 
 types — `facts:risky-type`, a directory with an extension (`.app`, `.sparsebundle`, `.playground`…) or with the
 "package" flag — `facts:bundle`, a Finder alias under any name — `facts:alias`, a file with its own opening program
 (`com.apple.LaunchServices.OpenWith`) — `facts:open-with`; all of these can only be revealed in Finder (`reveal: true`).
+An ordinary folder with a dot in its name (`site.com`, `notes.d`) is treated as a package too and only revealed: this is
+deliberate (decision 2026-11-11) — the extension is what `open` would act on.
 The type is checked once more before running `open`. This narrows the link-swap window but does not close it: `open`
 gets a path, not a descriptor, and a swap a fraction of a second before it runs will get through — the primitive is meant
 for files that no foreign process swaps.

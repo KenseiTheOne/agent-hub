@@ -598,10 +598,15 @@ public struct ConsentSource: Decodable, Sendable, Hashable {
     public var fingerprint: String?
     /// Only the owner — you — writes to the folder (otherwise the request can't be accepted).
     public var writableMine: Bool
+    /// Files the group can write to (umask 002): accepted, but with the loud `risk` line.
+    public var groupWritable: [String]
+    /// "group-writable" — the folder is writable by your group (decision 2026-11-11); nil — nothing to warn about.
+    public var risk: String?
     public var warnings: [String]
 
-    public init(kind: String, path: String? = nil, pathShort: String? = nil, fingerprint: String? = nil, writableMine: Bool = true, warnings: [String] = []) {
-        self.kind = kind; self.path = path; self.pathShort = pathShort; self.fingerprint = fingerprint; self.writableMine = writableMine; self.warnings = warnings
+    public init(kind: String, path: String? = nil, pathShort: String? = nil, fingerprint: String? = nil, writableMine: Bool = true, groupWritable: [String] = [], risk: String? = nil, warnings: [String] = []) {
+        self.kind = kind; self.path = path; self.pathShort = pathShort; self.fingerprint = fingerprint; self.writableMine = writableMine
+        self.groupWritable = groupWritable; self.risk = risk; self.warnings = warnings
     }
 
     public init(from decoder: Decoder) throws {
@@ -610,12 +615,15 @@ public struct ConsentSource: Decodable, Sendable, Hashable {
         path = try? c.decodeIfPresent(String.self, forKey: .path)
         pathShort = try? c.decodeIfPresent(String.self, forKey: .pathShort)
         fingerprint = try? c.decodeIfPresent(String.self, forKey: .fingerprint)
-        struct W: Decodable { var mine: Bool? }
-        writableMine = ((try? c.decodeIfPresent(W.self, forKey: .writable))??.mine) ?? true
+        struct W: Decodable { var mine: Bool?; var group: [String]? }
+        let w = (try? c.decodeIfPresent(W.self, forKey: .writable)) ?? nil
+        writableMine = w?.mine ?? true
+        groupWritable = w?.group ?? []
+        risk = (try? c.decodeIfPresent(String.self, forKey: .risk)).flatMap { $0.isEmpty ? nil : $0 }
         warnings = (try? c.decode([String].self, forKey: .warnings)) ?? []
     }
 
-    enum CodingKeys: String, CodingKey { case kind, path, pathShort, fingerprint, writable, warnings }
+    enum CodingKeys: String, CodingKey { case kind, path, pathShort, fingerprint, writable, risk, warnings }
 
     public var isOwn: Bool { kind == "own" }
     public var shownPath: String { pathShort ?? path ?? "?" }

@@ -4,7 +4,7 @@ Releases are git tags `vX.Y.Z` (also published as GitHub releases); the current 
 The plugin contract has its own version history in
 [`docs/extension-points.md`](docs/extension-points.md#contract-versions).
 
-## Unreleased
+## 0.1.2 — 2026-11-11
 
 ### Terminal layer: cmux is one terminal among several (AH-33)
 
@@ -30,6 +30,53 @@ The plugin contract has its own version history in
   status and start command moved under the cmux row; where new sessions open). Session rows show the terminal, and
   "Go to tab" / Esc are disabled with a tooltip naming the terminal when it can't; the bridge banner appears only for
   sessions in cmux. Texts say "terminal tab" instead of "cmux tab".
+
+### Notifications: macOS banners only (the chat-bot channel is removed)
+
+- The Telegram channel is gone from the hub: the bot module and its manual check (`daemon/lib/push/telegram.mjs`,
+  `send-test.mjs`), the `services.push.telegram.*` settings, the reserved `telegram` keychain service for secrets and
+  the `agent-hub.telegram` entry in `agenthub uninstall`'s keychain list, the `telegram` flag in
+  `/state.notifications`, and the Settings line "Telegram is off (config.json)". An existing bot entry in the keychain
+  is not touched; delete it yourself if you set one up.
+- Old keys in `config.json` are ignored without errors: any key of `services.push` the service doesn't know gives one
+  `push-config-ignored {keys}` journal line at startup.
+- What quiet hours do now: while you are away from the Mac (no keyboard or mouse for `idleThresholdMs`, 10 min), banners
+  are held and arrive as one digest banner ("Overnight: N") when quiet hours end; urgent ones (`quietException`: pin and
+  build path changes, a moved release tag, an update stopped for tampering, a failed hub update, a plugin's
+  `quiet="true"`) show right away. At the Mac, banners show as usual. A waiting session's banner (`awayDelayMs`, a
+  plugin's `away=`) shows at once at the Mac; while you are away it waits until you are back or the delay has passed.
+- `macOnly` (plugin tag and `services.push.rules` field) no longer means anything and is ignored; plugins that declare
+  it still parse cleanly. Update notices (`plugin-update`, `hub-update`, `hub-update-ready`) used to skip the digest
+  because they were "macOS only"; now they wait for it like other non-urgent banners.
+- Settings → Notifications: the "how" line says "macOS banners" and when you count as away; the quiet hours
+  explanation describes the digest.
+
+### Own plugins
+
+- An own plugin updated from its folder automatically (same permissions, no consent window) now shows a banner "Plugin
+  updated — "<title>" updated to <version>" (or "updated from its folder (version …)" when the version stayed), key
+  `@hub:plugin-own-updated:<id>:<version>`, kind `updates`: the "Hub and plugin updates" switch turns it off. The
+  journal record `plugin-own-updated` is unchanged.
+- A plugin folder writable by your group (umask 002) is no longer refused: the request and the consent window carry
+  `risk: "group-writable"`, the CLI prints a `!!! WARNING` line under "Request created", the app shows a red risk line
+  in the consent window (`chmod -R g-w <folder>` fixes it), and the journal gets `risk` in `plugin-own-requested` and a
+  `plugin-own-risk` line on every install from such a folder, automatic updates included. A world-writable folder, a
+  foreign owner or a foreign ACL is still a refusal.
+
+### Registry: official means "in the signed catalog right now"
+
+- An installed official plugin that a newer verified index no longer lists (or lists as community) runs as community
+  from the next policy check — as before — and now the transition is journaled once: `plugin-tier-lowered {reason:
+  "not-in-catalog"|"community"|"archive"}`, and `plugin-tier-restored` if it comes back. `Registry/tiers.json` keeps the
+  mark across restarts. The UI shows only the tier it has now.
+- A catalog pair on disk that fails verification (half-written by another process, damaged) no longer drops the
+  verified catalog already in memory, so official plugins are not demoted by a transient read; download and signature
+  failures already kept the last verified catalog.
+
+### Docs
+
+- `open.file`: a folder with a dot in its name (`site.com`, `notes.d`) is treated as a package and only revealed in
+  Finder — kept on purpose (decision 2026-11-11), now stated in `api.md`, `extension-points.md` and `writing-plugins.md`.
 
 ## 0.1.1 — 2026-11-10
 

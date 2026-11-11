@@ -27,13 +27,22 @@
 // variables). If the registry owner lowered the tier or lock was written bypassing the manager, the plugin runs as community
 // (without actions and its own push rules).
 //
+// "Official" is only what the signed catalog lists as official right now (decision 2026-11-11): a plugin installed as official
+// whose id the current verified index no longer lists (or lists as community — official.json in the registry) is community
+// from the next policy check on — permission ceiling, effects, actions and consent rules as for community, and the UI simply
+// shows the tier it has now. The transition is journaled once (plugin-tier-lowered, and plugin-tier-restored if the catalog
+// lists it as official again); Registry/tiers.json remembers the lowered ids across restarts. Only a verified catalog moves the
+// tier: a failed download or a rejected signature keeps the last verified index on disk and in memory (fetchCatalog throws before
+// replacing anything), so a network error never demotes a plugin.
+//
 // Own sources (decision 2026-11-09, lib/registry/own-source.mjs): a plugin from a local folder (convention — agenthub/<id>/ in
 // the repository). An install request (POST /registry/own/request, `agenthub plugins install --from <folder>`) can be
 // created by any local process, but only a human in the pinned app can install it (POST /registry/own/approve
 // → 428 with the consent window → token). The copy goes to Plugins/<id> (the copy runs, not the repository folder), lock entry:
 // tier "own", sha256 — content fingerprint, own.path — the folder's realpath. Tier own: trusted like official.
 // The manager watches the folder (fs.watch + reconciliation once a minute): content changed, same permissions — the new copy
-// is installed automatically (log plugin-own-updated, quiet event plugins.own-updated); permissions grew — "Update
+// is installed automatically without a window (log plugin-own-updated, event plugins.own-updated → the push service's "Plugin
+// updated" banner, kind "updates", decision 2026-11-11); permissions grew — "Update
 // available" and the consent window; folder gone or broken — the plugin runs on the last copy, the UI shows
 // a warning. An own plugin never becomes official: it has no archive or registry attestation, and switching from
 // an installed registry plugin to an own one with the same id goes only through the consent window marked as a switch.
@@ -355,7 +364,9 @@ export class PluginManager {
       index: join(this.dirs.registry, "index.json"),
       sig: join(this.dirs.registry, "index.json.minisig"),
       state: join(this.dirs.registry, "state.json"),
+      tiers: join(this.dirs.registry, "tiers.json"),
     };
+    this.lowered = null; // id → {version, sha256, reason, at}: installed as official, the catalog no longer says so (tiers.json)
     this.catalog = null; // { generatedAt, plugins: Map, blocklist, fetchedAt }
     this.catalogError = null;
     this.catalogStamp = null; // size and mtime of index.json/.minisig on disk from which this.catalog was loaded
@@ -614,7 +625,9 @@ export class PluginManager {
     }
   }
 
-  // Re-read the catalog from disk if it was changed outside this process. An older index (rollback) is not taken.
+  // Re-read the catalog from disk if it was changed outside this process. An older index (rollback) is not taken. Files that
+  // don't verify (a half-written pair from another process — index.json is replaced before its signature — or a damaged file) don't
+  // replace the last verified catalog in memory: tiers keep following it until a pair on disk verifies again.
   refreshCatalog() {
     const stamp = this.diskStamp();
     if (stamp === this.catalogStamp) return;
@@ -624,6 +637,7 @@ export class PluginManager {
       this.log({ type: "registry-rejected", error: "registry:rollback" });
       this.catalog = prev;
     }
+    if (prev && !this.catalog && this.catalogError) this.catalog = prev;
     this.noteUpdates();
   }
 
@@ -810,7 +824,10 @@ export class PluginManager {
     if (v.entry.tier === "own") {
       tier = this.ownTrusted(pl.id, v.entry) ? "own" : "community";
       if (tier !== "own") this.noteUnexpectedOwn(pl.id, v.entry);
-    } else tier = this.officialNow(pl.id, v.entry) ? "official" : "community";
+    } else {
+      tier = this.officialNow(pl.id, v.entry) ? "official" : "community";
+      this.noteTier(pl.id, v.entry, tier === "official");
+    }
     return { allowed: true, effects: (defaults?.effects || []).filter((e) => granted.has(e)), tier, official: tier === "official" };
   }
 
@@ -829,6 +846,58 @@ export class PluginManager {
     if (ce.sha256 !== e.sha256 && !this.attestedOfficial(id, e)) return false;
     const files = this.archiveFiles(id, e.sha256);
     return Boolean(files) && sameFiles(files, e.files);
+  }
+
+  // ---------- official → community and back (decision 2026-11-11) ----------
+  loweredMap() {
+    if (this.lowered) return this.lowered;
+    const j = readJsonOr(this.files.tiers, null);
+    const out = new Map();
+    if (j && j.version === 1 && j.lowered && typeof j.lowered === "object" && !Array.isArray(j.lowered)) {
+      for (const [id, v] of Object.entries(j.lowered).slice(0, 500)) if (ID_RE.test(id) && v && typeof v === "object") out.set(id, v);
+    }
+    this.lowered = out;
+    return out;
+  }
+  saveLowered() {
+    try {
+      atomicWrite(this.files.tiers, JSON.stringify({ version: 1, lowered: Object.fromEntries(this.loweredMap()) }, null, 2) + "\n");
+    } catch (e) {
+      this.log({ type: "warning", detail: msg("warn.fileNotWritten", { file: "tiers.json", why: e.code || e.message }) });
+    }
+  }
+  // Why an installed official plugin is not official now: the id is gone from the catalog, the catalog lists it as community,
+  // or the installed archive is not the signed one (no attestation, files differ from the saved archive).
+  lowerReason(id, e) {
+    const ce = this.catalog?.plugins.get(id);
+    if (!ce) return "not-in-catalog";
+    if (ce.tier !== "official") return "community";
+    return "archive";
+  }
+  // Called by the policy for every installed registry plugin: a plugin installed as official (lock tier) that the verified
+  // catalog doesn't call official now is journaled once; back to official — once more. Without a verified catalog (never
+  // fetched, the cache on disk failed its signature) nothing is journaled: there is nothing to compare with.
+  noteTier(id, e, official) {
+    if (entryTier(e) !== "official" || !this.catalog) return;
+    const map = this.loweredMap();
+    const mark = map.get(id);
+    const same = mark && mark.sha256 === e.sha256;
+    if (!official && !same) {
+      const reason = this.lowerReason(id, e);
+      map.set(id, { version: e.version, sha256: e.sha256, reason, at: new Date().toISOString() });
+      this.saveLowered();
+      this.log({ type: "plugin-tier-lowered", plugin: id, version: e.version, from: "official", to: "community", reason, generatedAt: this.catalog.generatedAt });
+    } else if (official && mark) {
+      map.delete(id);
+      this.saveLowered();
+      if (same) this.log({ type: "plugin-tier-restored", plugin: id, version: e.version, from: "community", to: "official", generatedAt: this.catalog.generatedAt });
+    }
+  }
+  // The plugin was installed again or removed: the previous mark is about another install.
+  clearLowered(id) {
+    if (!this.loweredMap().has(id)) return;
+    this.lowered.delete(id);
+    this.saveLowered();
   }
 
   attestFiles(id) {
@@ -1278,6 +1347,7 @@ export class PluginManager {
         expiresAt: r.expiresAt,
         by: isStr(r.by, 16) ? r.by : null,
         ...(r.reason === "unexpected" ? { reason: "unexpected" } : {}),
+        ...(r.risk === "group-writable" ? { risk: r.risk } : {}),
       });
     }
   }
@@ -1352,10 +1422,11 @@ export class PluginManager {
       expiresAt: new Date(now + OWN_REQUEST_TTL_MS).toISOString(),
       by: peer?.class || null,
       ...(reason === "unexpected" ? { reason } : {}),
+      ...(ownRisk(src.writable) ? { risk: ownRisk(src.writable) } : {}),
     };
     this.ownRequests.set(rq.requestId, rq);
     this.saveRequests();
-    this.log({ type: "plugin-own-requested", plugin: src.id, version: src.version, by: rq.by, pid: peer?.pid, ...(migrate ? { migrate: migrate.from } : {}), ...(reason ? { reason } : {}) });
+    this.log({ type: "plugin-own-requested", plugin: src.id, version: src.version, by: rq.by, pid: peer?.pid, ...(migrate ? { migrate: migrate.from } : {}), ...(reason ? { reason } : {}), ...(rq.risk ? { risk: rq.risk } : {}) });
     this.emit({ type: "plugins.own-request", requestId: rq.requestId, plugin: src.id, version: src.version });
     return { ok: true, pending: true, ...this.requestView(rq) };
   }
@@ -1377,6 +1448,8 @@ export class PluginManager {
       by: r.by,
       reason: r.reason || null,
       icon: r.icon || null,
+      // the folder is writable by the group (allowed with a warning): the CLI prints the loud line, the window shows it again
+      risk: r.risk || null,
     };
   }
 
@@ -1646,6 +1719,7 @@ export class PluginManager {
       throw new RegistryError(500, "registry:install", { detail: e.code || "rename" });
     }
     rmSync(old, { recursive: true, force: true });
+    this.clearLowered(id);
     // the previous version's attestation is no longer needed: the current catalog signs the new one
     for (const f of Object.values(this.attestFiles(id))) rmSync(f, { force: true });
     // Archive of this version — for the officialness check (officialNow). If it fails to write, the plugin runs as community.
@@ -1657,7 +1731,8 @@ export class PluginManager {
       this.log({ type: "warning", plugin: id, detail: msg("warn.archiveNotSaved", { why: e.code || e.message }) });
     }
     if (auto) {
-      // quiet update of the own copy: same permissions, the human already consented to them; which files changed goes to the log
+      // automatic update of the own copy: same permissions, the human already consented to them; which files changed goes to the
+      // log, the event becomes a "Plugin updated" notification (push service)
       const prevFiles = before?.files || {};
       const changedFiles = [...new Set([...Object.keys(prevFiles), ...Object.keys(hashes)])].filter((f) => prevFiles[f] !== hashes[f]).sort().slice(0, 20);
       this.log({ type: "plugin-own-updated", plugin: id, from: before?.version || null, version: entry.version, sha256: entry.sha256, files: changedFiles });
@@ -1666,6 +1741,10 @@ export class PluginManager {
       this.log({ type: "plugin-installed", plugin: id, version: entry.version, sha256: entry.sha256, update: Boolean(before), pid: peer?.pid, ...(own ? { source: "own" } : {}), ...(prep.migrate ? { migrate: prep.migrate.from } : {}) });
       this.emit({ type: "plugins.installed", plugin: id, version: entry.version, update: Boolean(before), ...(own ? { source: "own" } : {}) });
     }
+    // the source folder is writable by the group (allowed with a warning, decision 2026-11-11): a separate journal line on every
+    // install from such a folder, including automatic updates
+    const risk = own ? ownRisk(prep.source?.writable) : null;
+    if (risk) this.log({ type: "plugin-own-risk", plugin: id, version: entry.version, risk, path: prep.source.path, files: prep.source.writable.group.slice(0, 10), auto: Boolean(auto) });
     if (own) this.ownState.set(id, { status: "ok", checkedAt: now, version: entry.version, fingerprint: entry.sha256 });
     else this.ownState.delete(id);
     this.syncOwnWatch();
@@ -1695,6 +1774,7 @@ export class PluginManager {
     const wasOwn = lock.plugins[id]?.tier === "own";
     delete lock.plugins[id];
     this.saveLock(lock);
+    this.clearLowered(id);
     this.writeApprovals({ [id]: null });
     this.ownState.delete(id);
     this.ownUnexpected.delete(id);
@@ -1982,7 +2062,8 @@ function mergeI18n(a = {}, b = {}) {
 }
 
 // Source in the consent window: real folder path and the same for display (with "~"), content fingerprint, who can write
-// to the folder (only you — otherwise the request can't be accepted), linter warnings (immediate actions) and push rule
+// to the folder (only you; your group too — accepted with the "group-writable" risk line; anyone else — the request can't be
+// accepted), linter warnings (immediate actions) and push rule
 // warnings (kind="security", core keys) — for an own plugin the reviewer is the human themselves.
 function ownSourceView(src) {
   return {
@@ -1990,9 +2071,16 @@ function ownSourceView(src) {
     path: src.path,
     pathShort: shortPath(src.path),
     fingerprint: src.fingerprint,
-    writable: { mine: src.writable?.mine !== false, others: src.writable?.others || [], parentOpen: Boolean(src.writable?.parentOpen), acl: src.writable?.acl || [] },
+    writable: { mine: src.writable?.mine !== false, others: src.writable?.others || [], group: src.writable?.group || [], parentOpen: Boolean(src.writable?.parentOpen), acl: src.writable?.acl || [] },
+    // a loud line in the window (the WRITE_RISK_TEXT kind): the folder is writable by the group — allowed, but the human must see it
+    risk: ownRisk(src.writable),
     warnings: src.warnings || [],
   };
+}
+
+// The risk of an own plugin folder that is still accepted: writable by the group (umask 002), not by everyone. → "group-writable" | null
+export function ownRisk(writable) {
+  return Array.isArray(writable?.group) && writable.group.length > 0 ? "group-writable" : null;
 }
 
 // Permissions in the hub language: "why" from translations (for actions — the title-xx title), otherwise as the author wrote it.

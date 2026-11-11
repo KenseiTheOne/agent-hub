@@ -1,20 +1,21 @@
 // Push logic: plugin events → deciding "to whom, when and how many times".
 //
 // Input — bus events `event.raised` / `event.cleared` (key `<pluginId>:<key>`) and the timer tick.
-// Output — a macOS notification (shell or osascript), a Telegram message or a morning digest item.
+// Output — a macOS notification (shell or osascript) or a morning digest item. macOS banners are the only channel.
 //
 // Rules (design section 6):
 //   - one state, one message: while the key is raised there are no repeats; after it's cleared a repeat within
 //     the rule's cooldownMs is suppressed (debounce; for quota — a week);
-//   - routing by HID idle time: less than idleThresholdMs (10 min) or "don't know" — macOS; more — Telegram;
-//     Telegram off/unavailable/failed/rate-limited — macOS;
-//   - quiet hours (23:00–08:00): to Telegram only rules with quietException, the rest go to the digest,
-//     which is sent as one message on the first tick after quiet hours end; at the Mac — macOS as usual;
+//   - presence by HID idle time: less than idleThresholdMs (10 min) or "don't know" — the human is at the Mac;
+//   - quiet hours (23:00–08:00) while the human is away: only rules with quietException (urgent) show a banner right
+//     away, the rest are held and merged into one digest banner on the first tick after quiet hours end; at the Mac —
+//     banners as usual;
 //   - hold="evening" (a plugin's evening blocker): during the day waits for 21:00, from 21:00 — immediately; repeats once per "night's day";
-//   - awayDelayMs (a session is waiting): at the Mac — macOS right away; away and pending longer than awayDelayMs — Telegram, once;
-//   - third-party plugin events — macOS only and without the plugin's text;
+//   - awayDelayMs (a session is waiting): at the Mac — a banner right away; away — a banner once the human is back at the
+//     Mac or the event has been pending longer than awayDelayMs, whichever comes first (during quiet hours — the digest);
+//   - third-party plugin events — without the plugin's text;
 //   - Settings toggles (lib/push/prefs.mjs): an event of a disabled kind goes nowhere — not macOS,
-//     osascript, Telegram or the digest; the journal gets push-muted. Decided on raise and before every send
+//     osascript or the digest; the journal gets push-muted. Decided on raise and before every send
 //     (evening blocker, waiting session, digest): disabled at send time — not sent (enabled before sending —
 //     sent as usual); raised while the kind was disabled — not delivered even after it's enabled. The "security" kind
 //     (security exceptions) can't be disabled; the "plugin" kind is the plugin's own toggle (prefs.pluginToggle).
@@ -63,7 +64,7 @@ export function saysSame(label, detail) {
 export class PushEngine {
   // prefs — Settings toggles (settings.json → notifications); quiet — the effective quiet hours
   // {enabled, start, end} (lib/push/prefs.mjs effectiveQuiet); absent — quiet hours from config (quietStart/quietEnd).
-  constructor({ config, now = Date.now, presence = async () => null, mac, telegram = null, lookup = () => ({}), store = null, journal = () => {}, lang = () => "ru", prefs = null, quiet = null }) {
+  constructor({ config, now = Date.now, presence = async () => null, mac, lookup = () => ({}), store = null, journal = () => {}, lang = () => "ru", prefs = null, quiet = null }) {
     this.cfg = config;
     this.lang = () => {
       try {
@@ -78,13 +79,11 @@ export class PushEngine {
     this.rules = buildRules(config.rules);
     this.presence = presence;
     this.mac = mac;
-    this.telegram = telegram;
     this.lookup = lookup;
     this.store = store;
     this.journal = journal;
     this.entries = new Map(); // key → entry
     this.digest = []; // [{key, subtitle, body, at}]
-    this.tgTimes = [];
     this.lastDigestAt = null;
     this.startedAt = now();
     this.chain = Promise.resolve();
@@ -178,7 +177,9 @@ export class PushEngine {
       if (!e || typeof e.key !== "string") continue;
       // Entries active before the restart wait to be raised again: plugins will restart and raise them again.
       if (typeof e.plugin !== "string") continue;
-      this.setEntry({ ...e, stale: Boolean(e.active) });
+      // sentTg — a file from a build that still had a second channel: that state was already delivered
+      const { sentTg, ...rest } = e;
+      this.setEntry({ ...rest, sentMac: Boolean(e.sentMac || sentTg), stale: Boolean(e.active) });
     }
     this.digest = Array.isArray(s.digest) ? s.digest.slice(-500) : [];
     this.lastDigestAt = s.lastDigestAt ?? null;
@@ -289,7 +290,7 @@ export class PushEngine {
   // config.json (neither hold, awayDelayMs, cooldownMs, label nor someone else's alias can silence it); for a plugin event
   // with the same key — without the kind, the banner bypassing the shell, quiet hours and the hub label.
   ruleFor(bare, trusted, own = null, plugin = null) {
-    if (!trusted) return { name: "untrusted", label: null, macOnly: true, cooldownMs: this.cfg.flapCooldownMs };
+    if (!trusted) return { name: "untrusted", label: null, cooldownMs: this.cfg.flapCooldownMs };
     const core = matchRule(DEFAULT_RULES, bare);
     if (plugin === HUB && core.kind === SECURITY) return { ...core, aliases: [...(core.aliases || [])] };
     const mine = own?.length ? matchRule(pluginRules(own), bare) : null;
@@ -389,7 +390,6 @@ export class PushEngine {
       bucket: e?.bucket ?? null, // for hold="evening": the "night's day" already notified about
       held: false,
       sentMac: false,
-      sentTg: false,
       queued: false,
       silenced: false,
       msg: this.compose(rule, { ...info, trusted }, plugin, bare),
@@ -454,42 +454,31 @@ export class PushEngine {
       await this.deliver(e, rule, t, quiet);
       return;
     }
+    if (e.sentMac || e.queued) return;
     if (rule.awayDelayMs) {
-      if (rule.macOnly || (await this.present())) {
-        if (!e.sentMac && !e.sentTg && !e.queued) this.sendMac(e, rule, t);
-        return;
-      }
-      if (!e.sentTg && !e.queued && t - e.raisedAt >= rule.awayDelayMs) {
-        e.sentTg = true; // one attempt per state, even if it went to the digest or macOS
-        await this.deliverAway(e, rule, t, quiet);
-      }
+      // away: the banner waits until the human is back at the Mac (checked on every tick) or awayDelayMs has passed
+      if (await this.present()) this.sendMac(e, rule, t);
+      else if (t - e.raisedAt >= rule.awayDelayMs) this.deliverAway(e, rule, t, quiet);
       return;
     }
-    if (e.sentMac || e.sentTg || e.queued) return;
     await this.deliver(e, rule, t, quiet);
   }
 
   async deliver(e, rule, t, quiet) {
-    if (rule.macOnly || (await this.present())) return this.sendMac(e, rule, t);
+    if (await this.present()) return this.sendMac(e, rule, t);
     return this.deliverAway(e, rule, t, quiet);
   }
 
-  async deliverAway(e, rule, t, quiet) {
+  // The human is away: during quiet hours a non-urgent banner is held for the morning digest, otherwise it shows right away
+  // (it waits in Notification Center).
+  deliverAway(e, rule, t, quiet) {
     if (quiet && !rule.quietException) {
       e.queued = true;
       this.digest.push({ key: e.key, subtitle: e.msg.subtitle, body: e.msg.body, at: t, kind: this.kindOf(rule, e) });
       this.journal({ type: "push-deferred", key: e.key, rule: rule.name });
       return;
     }
-    const r = await this.sendTelegram(e.msg.subtitle ? `Agent Hub · ${e.msg.subtitle}\n${e.msg.body}` : `Agent Hub\n${e.msg.body}`);
-    if (r.ok) {
-      e.sentTg = true;
-      e.lastSentAt = t;
-      this.journal({ type: "push-sent", key: e.key, channel: "telegram", rule: rule.name });
-      return;
-    }
-    this.journal({ type: "push-fallback", key: e.key, reason: r.reason, rule: rule.name });
-    if (!e.sentMac) this.sendMac(e, rule, t);
+    this.sendMac(e, rule, t);
   }
 
   sendMac(e, rule, t) {
@@ -499,21 +488,6 @@ export class PushEngine {
     e.sentMac = true;
     e.lastSentAt = t;
     this.journal({ type: "push-sent", key: e.key, channel: "mac", rule: rule.name });
-  }
-
-  async sendTelegram(text) {
-    if (!this.telegram) return { ok: false, reason: "disabled" };
-    const t = this.now();
-    this.tgTimes = this.tgTimes.filter((x) => t - x < 10 * 60_000);
-    if (this.tgTimes.length >= this.cfg.telegram.maxPer10Min) return { ok: false, reason: "local-limit" };
-    let r;
-    try {
-      r = await this.telegram.send(text);
-    } catch {
-      r = { ok: false, reason: "internal" };
-    }
-    if (r.ok) this.tgTimes.push(t);
-    return r;
   }
 
   // ---------- tick ----------
@@ -535,12 +509,13 @@ export class PushEngine {
       const rule = this.ruleFor(e.bare, e.trusted !== false, this.ownRules(e), e.plugin);
       if (rule.hold === "evening" || rule.awayDelayMs) await this.process(e, rule, t);
     }
-    if (this.digest.length && !this.clock.isQuiet(t)) await this.sendDigest(t);
+    if (this.digest.length && !this.clock.isQuiet(t)) this.sendDigest(t);
     this.gc(t);
     this.save();
   }
 
-  async sendDigest(t) {
+  // One banner for everything held overnight: "Overnight: N" and the bodies in a row.
+  sendDigest(t) {
     // the kind was disabled overnight — its items don't go out in the morning either (an item without a kind is from a file older than 2026-11-09: "other")
     const all = this.digest.splice(0);
     const items = all.filter((it) => {
@@ -552,31 +527,15 @@ export class PushEngine {
       this.lastDigestAt = t;
       return;
     }
-    const max = this.cfg.digestMaxItems;
-    const lines = items.slice(0, max).map((it) => {
-      const e = this.entries.get(it.key);
-      const done = !e || !e.active ? tr(this.lang(), "push.digest.resolved") : "";
-      return `• ${it.subtitle ? `${it.subtitle}: ` : ""}${it.body}${done}`;
-    });
-    if (items.length > max) lines.push(tr(this.lang(), "push.digest.more", { n: items.length - max }));
-    const text = `${tr(this.lang(), "push.digest", { n: items.length })}\n${lines.join("\n")}`;
     this.lastDigestAt = t;
-    let channel = "mac";
-    if (!(await this.present())) {
-      const r = await this.sendTelegram(text);
-      if (r.ok) channel = "telegram";
-      else this.journal({ type: "push-fallback", key: "digest", reason: r.reason, rule: "digest" });
-    }
-    if (channel === "mac") {
-      const body = clean(items.map((it) => it.body).join("; "), 240);
-      const { done } = this.mac.notify({ title: "Agent Hub", subtitle: tr(this.lang(), "push.digest.subtitle", { n: items.length }), body, plugin: null, key: "push:digest", digest: true });
-      this.macPending.push(done);
-    }
+    const body = clean(items.slice(0, this.cfg.digestMaxItems).map((it) => it.body).join("; "), 240);
+    const { done } = this.mac.notify({ title: "Agent Hub", subtitle: tr(this.lang(), "push.digest.subtitle", { n: items.length }), body, plugin: null, key: "push:digest", digest: true });
+    this.macPending.push(done);
     for (const it of items) {
       const e = this.entries.get(it.key);
       if (e) e.lastSentAt = t;
     }
-    this.journal({ type: "push-digest", count: items.length, channel });
+    this.journal({ type: "push-digest", count: items.length, channel: "mac" });
   }
 
   gc(t) {

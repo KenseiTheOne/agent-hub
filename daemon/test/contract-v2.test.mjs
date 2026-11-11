@@ -142,12 +142,12 @@ test("agenthub uninstall: keychain entries come from installed plugins' declarat
   const { join } = await import("node:path");
   const home = tempHome("ah-kc-");
   try {
-    assert.deepEqual(keychainServices(home), ["agent-hub.telegram", "agent-hub.oauth"], "no plugins — only core services (push and connection sign-ins)");
+    assert.deepEqual(keychainServices(home), ["agent-hub.oauth"], "no plugins — only the core's own service (connection sign-ins)");
     mkdirSync(join(home, "Plugins", "tix"), { recursive: true });
     writePlugin(join(home, "Plugins", "tix"), "tix.1h.sh", `#!/bin/sh\n${BASE}# <agenthub.secrets>tix.token — запасной путь</agenthub.secrets>\n# <agenthub.connection url="https://mcp.example.com/mcp" tools="a">x</agenthub.connection>\n`);
     mkdirSync(join(home, "Plugins", "plain"), { recursive: true });
     writePlugin(join(home, "Plugins", "plain"), "plain.sh", "#!/bin/sh\n# <agenthub.title>P</agenthub.title>\n");
-    assert.deepEqual(keychainServices(home).sort(), ["agent-hub.oauth", "agent-hub.telegram", "agent-hub.tix"]);
+    assert.deepEqual(keychainServices(home).sort(), ["agent-hub.oauth", "agent-hub.tix"]);
   } finally {
     cleanup(home);
   }

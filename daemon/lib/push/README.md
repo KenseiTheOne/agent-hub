@@ -1,20 +1,20 @@
 # Push (stage 4)
 
 The `lib/services/push.mjs` service listens on the bus for `event.raised` / `event.cleared` (key `<pluginId>:<key>` from
-`event=<key>` in plugin output, plus `plugin-error` from the core) and decides where and when to call the human.
+`event=<key>` in plugin output, plus `plugin-error` from the core) and decides when to call the human. The only channel is a
+macOS banner (the shell's, or `osascript` without it); quiet hours hold banners for a morning digest.
 
 | Module | What |
 |---|---|
-| `engine.mjs` | dedup, quiet hours, digest, evening blocker, escalation of a waiting session, routing |
+| `engine.mjs` | dedup, quiet hours, digest, evening blocker, a waiting session's delayed banner, presence |
 | `rules.mjs` | the event table (design section 6), the kind of every rule (`kind`, `kindOf`) |
 | `prefs.mjs` | "Settings → Notifications": kinds, the master switch, quiet hours from `settings.json`, edits via `PUT /settings/notifications` |
 | `clock.mjs` | local time in a given time zone (Intl), quiet hours, the "night day" |
 | `idle.mjs` | HID idle time: `ioreg -c IOHIDSystem -d 4` → `HIDIdleTime` |
 | `macos.mjs` | `push.notify` on the bus → the shell; without an acknowledgement — `osascript display notification` |
 | `acks.mjs` | waiting for `POST /push/ack` (route `lib/routes/push.mjs`) |
-| `telegram.mjs` | `sendMessage` only; token and chat_id from the keychain |
 | `store.mjs` | `<home>/push-state.json` (0600): what was sent, the digest queue |
-| `send-test.mjs` | manual bot check (run by the user) |
+| `config.mjs` | `services.push` from `config.json` over the defaults; unknown keys are ignored (`push-config-ignored`) |
 
 ## Event keys for plugins
 
@@ -31,12 +31,14 @@ must contain metadata only**: a task name, a tab, a reason; no conversation text
 ```
 # <agenthub.push key="build-blocked" hold="evening" cooldown="0s" kind="plugin">Сборка не запустится</agenthub.push>
 # <agenthub.push key="crashed" quiet="true" kind="plugin">Упало</agenthub.push>
-# <agenthub.push key="service-silent" macOnly="true" away="5m" kind="plugin" was="runs">Молчит</agenthub.push>
+# <agenthub.push key="service-silent" away="5m" kind="plugin" was="runs">Молчит</agenthub.push>
 # <agenthub.push key="service-silent" lang="en">Silent</agenthub.push>
 ```
 
-`hold="evening"`, `quiet="true"` (goes through during quiet hours), `macOnly="true"`, `cooldown=<interval>`,
-`away=<interval>` (Telegram if the human is away and the event stays raised longer), `kind=<kind>` (the switch in
+`hold="evening"`, `quiet="true"` (urgent: shown right away during quiet hours too, not held for the digest),
+`cooldown=<interval>`, `away=<interval>` (at the Mac — right away; away — the banner waits until the human is back or the
+event stays raised that long), `macOnly="true"` (accepted from older plugins and ignored: banners are the only channel),
+`kind=<kind>` (the switch in
 "Settings": a shared core kind `sessions`, `updates`, `problems`, `other`; `plugin` — **the plugin's own toggle** (a
 line with the plugin name in "Settings → Notifications"); `security` — a security exception, cannot be turned off; an
 unknown value is a parse warning and the rule is dropped), `was=runs|night` (only with `kind="plugin"`: the former
@@ -58,18 +60,20 @@ week, `token-lost` — immediately; all of them "failures and warnings")):
 
 | Key | When it is sent |
 |---|---|
-| `session-waiting` (`waiting:<sessionId>` in claude-sessions) | at the Mac — macOS immediately; away and waiting > 5 min — Telegram once; no flap window |
+| `session-waiting` (`waiting:<sessionId>` in claude-sessions) | at the Mac — a banner immediately; away — once the human is back or after 5 min, whichever comes first (during quiet hours — the digest); no flap window |
 | `auth-failed` | immediately |
 | `source-broken`, `plugin-error` | once until recovery |
 | `approvals-paused` (source `@hub`) | immediately |
 | `app-pin-changed` (source `@hub`) | immediately and during quiet hours, on every change of `requirements.app` (no flap window); at the Mac — always `osascript`, without `push.notify` and `/push/ack` (`bannerAlways`); the text says where the pin came from (`из Claude Code` — capitalized at the start) |
 | `app-pin-path-changed` (source `@hub`) | immediately and during quiet hours, on every change of `appPin.path` with the same requirement (the bundle the daemon launches); at the Mac — always `osascript` (`bannerAlways`); "The path of the pinned Agent Hub build changed — the daemon now launches <path>. If it wasn't you, open the journal" |
+| `plugin-update:<id>:<version>` (source `@hub`) | a new version of an installed plugin in the signed catalog, once per version ("Update available: Mail 0.4.0") |
+| `plugin-own-updated:<id>:<version>` (source `@hub`) | an own plugin was updated from its folder automatically (same permissions, no consent window): "Plugin updated — "Mail" updated to 0.4.0" (or "updated from its folder (version …)" when the version stayed); every such update, no flap window; kind `updates` |
 | `app-restart-stopped` (source `@hub`) | immediately, once per episode of the supervisor stopping (app service: the app crashed 3 times in 10 min or 3 checks in a row could not launch it — `why`); again only after the app has opened the event stream and the stop is cleared; at the Mac — always `osascript` (`bannerAlways`: there is no app to acknowledge); "Agent Hub keeps crashing — restarts stopped: 3 restarts in 10 min. Open Agent Hub yourself; details — agenthub logs" (with `why` — "Cannot launch Agent Hub (<why>)…") |
 | anything else | immediately, labeled "Event "key"" |
 
 In general: while a key is raised there is one message; cleared and raised again within 10 min after sending — it is
-suppressed (flapping). Events of **third-party** plugins (`trusted: false`) go to macOS only, without their text and
-without their rules.
+suppressed (flapping). Events of **third-party** plugins (`trusted: false`) arrive without their text and without their
+rules.
 
 Limits (protecting the daemon from an event flood): at most `maxPerPluginPerMin` (20) new notifications per minute from
 one trusted plugin and `maxPerUntrustedPerMin` (5) from a third-party one; the first one over the limit produces a
@@ -90,7 +94,7 @@ written only by the app class (the pinned build) via `PUT /settings/notification
 | Kind | Core rules | Plugins (`kind=` in the tag) |
 |---|---|---|
 | `sessions` — waiting for an answer / session questions | `session-waiting`, `approvals-paused` | — |
-| `updates` — hub and plugin updates | `plugin-update`, `hub-update`, `hub-update-ready`, `hub-update-installed`, `hub-update-failed` | — |
+| `updates` — hub and plugin updates | `plugin-update`, `plugin-own-updated`, `hub-update`, `hub-update-ready`, `hub-update-installed`, `hub-update-failed` | — |
 | `problems` — plugin failures and warnings | `source-broken`, `plugin-error`, `auth-failed` (and plugin rules with `kind="problems"`, for example quota) | a rule with `kind="problems"` or a key from the table (`auth-failed`) |
 | `other` — everything else from plugins | a key without a rule; **all** events of third-party plugins | a rule without `kind` and without a match in the table |
 | `plugin:<id>` — **the plugin's own toggle** | — | rules with `kind="plugin"` (and the deprecated `kind="runs"`/`"night"`): a line in "Settings" with the plugin name, only while the plugin is installed |
@@ -142,8 +146,7 @@ registry linter warns about such a tag and about core keys).
 hijacks a core key. The only way to silence them is to turn off the whole service (`services.push.enabled = false`),
 and "Settings → Notifications" warns about that.
 
-- **A turned-off kind goes nowhere**: no `push.notify` to the shell, no fallback `osascript`, no Telegram, no digest
-  item; the journal gets `push-muted {key, rule, kind, reason: "kind"|"all"}` without text. The event stays in the
+- **A turned-off kind goes nowhere**: no `push.notify` to the shell, no fallback `osascript`, no digest item; the journal gets `push-muted {key, rule, kind, reason: "kind"|"all"}` without text. The event stays in the
   plugin state (popover, plugin page) and in the journal. Raising it does not consume the plugin rate limit and does not
   produce "notifications muted".
 - The decision is made when the event is raised and before every deferred send: the evening blocker waited for 21:00, a
@@ -160,7 +163,7 @@ and "Settings → Notifications" warns about that.
 - **Quiet hours** — `quiet` in settings; until it is set, `services.push.quietStart/quietEnd` from `config.json` apply
   (as before 2026-11-09), and without them 23:00–08:00 (`/state.notifications.quiet.from`: `settings` | `config` |
   `default`). The first edit in "Settings" starts from the effective values. `quiet.enabled: false` — at night everything
-  takes the normal route (Telegram immediately, no digest); the evening blocker and the "night day" are computed from the
+  takes the normal route (a banner immediately, no digest); the evening blocker and the "night day" are computed from the
   same bounds. `quietStart == quietEnd` in `config.json` (formerly "no quiet hours") is shown as quiet hours turned off
   with bounds 23:00–08:00. The blocker's evening window runs from `eveningAt` to the start of quiet hours, only if that
   is in the evening (no longer than 12 h): quiet hours from 20:00 with `eveningAt` 21:00 give no window, and the blocker
@@ -176,11 +179,15 @@ and "Settings → Notifications" warns about that.
   and `app-restart-stopped`; this field can be neither set nor cleared through `config.json` or plugins): `osascript`
   right away, nothing goes to the shell. Acknowledgements are accepted from the app class, and right after a re-pin, app
   is the very build the pin notification is about.
-- Idle ≥ 10 min — Telegram; off, no credentials, failure or more than 10 messages in 10 min — macOS.
-- Quiet hours (23:00–08:00 by default, "Settings") while idle: only `quietException` goes to Telegram (pin and path
-  changes, a moved tag, `hub-update-suspect`, `hub-update-failed`, and for plugins `quiet="true"`), the rest goes into
-  the digest, including `app-restart-stopped`; the digest is sent as one message on the first tick after 08:00 (at the
-  Mac — as one banner).
+- Idle ≥ 10 min (`idleThresholdMs`) — the human is away. Outside quiet hours a banner still shows right away (it waits in
+  Notification Center); a rule with `awayDelayMs` (`session-waiting`, a plugin's `away=`) waits until the human is back
+  at the Mac (checked on every tick) or the delay has passed, then shows one banner.
+- Quiet hours (23:00–08:00 by default, "Settings") while away: only `quietException` shows right away (pin and path
+  changes, a moved tag, `hub-update-suspect`, `hub-update-failed`, and for plugins `quiet="true"`); everything else is
+  held (`push-deferred`), including `app-restart-stopped` and update notices, and goes out as **one digest banner**
+  ("Overnight: N", the bodies in a row) on the first tick after quiet hours end. At the Mac during quiet hours banners
+  show as usual. There is no other channel: before 2026-11-11 the hub could also send to a chat bot; that is removed, and
+  its old `services.push.*` keys in `config.json` are ignored (one `push-config-ignored {keys}` journal line at startup).
 - Time is in the `services.push.timezone` zone (the system one by default: the service checks it on every tick and
   writes `push-timezone` to the journal when it changes); DST transitions follow wall-clock time. The zone is exposed
   in `/state.notifications.quiet.timezone`, the idle threshold in `awayAfterMs`.
@@ -194,25 +201,15 @@ and "Settings → Notifications" warns about that.
 (above), `eveningAt` ("21:00"), `idleThresholdMs` (600000),
 `ackTimeoutMs` (3000), `acceptCliAck` (false), `tickMs` (30000), `flapCooldownMs` (600000),
 `staleGraceMs` (600000), `digestMaxItems` (30), `maxPerPluginPerMin` (20), `maxPerUntrustedPerMin` (5),
-`maxEntriesPerPlugin` (500), `maxEntriesPerUntrusted` (100), `telegram.enabled` (**false**), `telegram.keychainService`
-("agent-hub.telegram"), `telegram.maxPer10Min` (10), `rules` — overrides/additions to the table:
-`{"my-key": {"label": "…", "macOnly": true}}`. Plugin rules from `<agenthub.push>` go ahead of this table, but user
-overrides apply to them too: `{"service-silent": {"macOnly": false}}` (by rule name) or
-`{"<plugin>:service-silent": {…}}` (for that plugin only) — the fields are layered over the plugin rule.
-`enabled: false` — the service does not start.
+`maxEntriesPerPlugin` (500), `maxEntriesPerUntrusted` (100), `rules` — overrides/additions to the table:
+`{"my-key": {"label": "…", "hold": "evening"}}` (fields `label`, `hold`, `awayDelayMs`, `quietException`, `cooldownMs`,
+`aliases`). Plugin rules from `<agenthub.push>` go ahead of this table, but user overrides apply to them too:
+`{"service-silent": {"awayDelayMs": 0}}` (by rule name) or `{"<plugin>:service-silent": {…}}` (for that plugin only) —
+the fields are layered over the plugin rule. `enabled: false` — the service does not start. Any other key is ignored
+(journal `push-config-ignored {keys}` once at startup).
 
-## Telegram (done by the user)
+## Journal
 
-1. Create a bot via BotFather and find the chat_id of your chat with the bot.
-2. Entries in the `login` keychain (the token value is entered at the prompt and does not end up in shell history):
-   ```
-   security add-generic-password -s agent-hub.telegram -a token   -T /usr/bin/security -w
-   security add-generic-password -s agent-hub.telegram -a chat_id -T /usr/bin/security -w
-   ```
-3. `"services": {"push": {"telegram": {"enabled": true}}}` in `~/Library/Application Support/AgentHub/config.json`.
-4. Check: `env -u NODE_OPTIONS node daemon/lib/push/send-test.mjs --yes`.
-
-In test mode (`AGENTHUB_HOME`) Telegram is always off. The token, chat_id and message text are never written to the
-journal: only `push-sent {key, channel, rule}`, `push-held`, `push-deferred`, `push-suppressed`,
-`push-fallback {key, reason}`, `push-digest {count, channel}`, `push-error {channel, code}`, `push-muted {key, rule,
-kind, reason}`.
+Message text never reaches the journal: only `push-start`, `push-sent {key, channel: "mac", rule}`, `push-held`,
+`push-deferred`, `push-suppressed`, `push-digest {count, channel: "mac"}`, `push-error {channel, code}`,
+`push-muted {key, rule, kind, reason}`, `push-throttled`, `push-dropped`, `push-timezone`, `push-config-ignored {keys}`.

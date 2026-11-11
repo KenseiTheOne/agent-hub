@@ -74,7 +74,8 @@ import { daemonLocation } from "../lib/launchd.mjs";
 import { hubCli, uninstallCli } from "../lib/hub-update/cli.mjs";
 import { brewDirOf } from "../lib/hub-update/brew.mjs";
 import { currentLabel, versionPlugins } from "../lib/hub-update/layout.mjs";
-import { LANGS, errText, has as hasMsg, msg, setLangSource } from "../lib/i18n.mjs";
+import { LANGS, currentLang, errText, has as hasMsg, msg, setLangSource } from "../lib/i18n.mjs";
+import { writeRiskText } from "../lib/registry/perms.mjs";
 import { langForHome } from "../lib/settings.mjs";
 
 const args = process.argv.slice(2);
@@ -593,6 +594,8 @@ async function pluginsFrom(dirArg) {
           ? msg("cli.own.was.catalog", { id: b.id, title: m.title || b.id, tier: msg(m.tier === "official" ? "cli.tier.official" : "cli.tier.community") })
           : msg("cli.own.was.registry", { id: b.id, version: m.version, tier: msg(m.from === "official" ? "cli.tier.official" : "cli.tier.community") });
     console.log(msg("cli.own.created", { title: b.title, version: b.version, id: b.id, path: b.pathShort || b.path, fp: String(b.fingerprint).slice(0, 16), permissions: b.permissions, was }));
+    // the folder is writable by the group: accepted, but loudly (the consent window shows the same line)
+    if (b.risk) console.log(msg("cli.own.risk", { text: writeRiskText(b.risk, currentLang()) || b.risk }));
     return;
   }
   const params = { path: b.path ?? path, ids: (b.ids || []).join(", "), id: b.id ?? "", pending: b.pending?.pathShort || b.pending?.path || "?", max: b.max ?? 10 };

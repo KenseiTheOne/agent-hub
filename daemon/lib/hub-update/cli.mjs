@@ -1017,13 +1017,13 @@ export function purgeable(home, isLiveHome) {
   return { ok: true };
 }
 
-// Keychain services the hub and its plugins may have created: Telegram (push service), connection logins
-// (agent-hub.oauth, if a plugin has <agenthub.connection>) and `agent-hub.<service>` from the plugins' <agenthub.secrets> in
-// <home>/Plugins. → ["agent-hub.telegram", …]
+// Keychain services the hub and its plugins may have created: connection logins (agent-hub.oauth, if a plugin has
+// <agenthub.connection>) and `agent-hub.<service>` from the plugins' <agenthub.secrets> in <home>/Plugins.
+// → ["agent-hub.oauth", …]
 export function keychainServices(home) {
-  // telegram (push bot) and oauth (connection logins, lib/services/secrets.mjs STORE_SERVICE) are the core's own services:
-  // a connection login outlives plugin removal, so oauth is always listed
-  const out = new Set(["agent-hub.telegram", "agent-hub.oauth"]);
+  // oauth (connection logins, lib/services/secrets.mjs STORE_SERVICE) is the core's own service:
+  // a connection login outlives plugin removal, so it is always listed
+  const out = new Set(["agent-hub.oauth"]);
   const dir = join(home, "Plugins");
   let ids = [];
   try {

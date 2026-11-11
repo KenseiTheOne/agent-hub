@@ -87,6 +87,7 @@ export const CLI_MESSAGES = {
 Отпечаток содержимого: ${p.fp}…  права: ${p.permissions}${p.was}
 Эта команда его не ставит: подтвердите установку в приложении Agent Hub — Плагины → Ждут подтверждения →
 Проверить и установить (окно согласия с правами). Заявка действует сутки (и переживает перезапуск хаба).`,
+    "cli.own.risk": (p) => `!!! ВНИМАНИЕ: ${p.text}`,
     "cli.own.err.own:no-app": "Нет закреплённого приложения Agent Hub. Свой плагин человек ставит в приложении, а подтвердить заявку сейчас некому.\nСоберите и закрепите приложение (scripts/bundle.sh сам вызывает agenthub pin-app), затем повторите.",
     "cli.own.err.own:not-found": (p) => `Нет такой папки: ${p.path}`,
     "cli.own.err.own:not-dir": (p) => `Это не папка: ${p.path}`,
@@ -393,6 +394,7 @@ export const CLI_MESSAGES = {
 Content fingerprint: ${p.fp}…  permissions: ${p.permissions}${p.was}
 This command does not install it: confirm the install in the Agent Hub app — Plugins → Awaiting confirmation →
 Review and install (the consent window with permissions). The request is valid for a day (and survives a hub restart).`,
+    "cli.own.risk": (p) => `!!! WARNING: ${p.text}`,
     "cli.own.err.own:no-app": "No pinned Agent Hub app. A person installs their own plugin in the app, and there is no one to confirm the request right now.\nBuild and pin the app (scripts/bundle.sh calls agenthub pin-app itself), then try again.",
     "cli.own.err.own:not-found": (p) => `No such folder: ${p.path}`,
     "cli.own.err.own:not-dir": (p) => `Not a folder: ${p.path}`,

@@ -84,15 +84,16 @@ export function parseActionArg(text) {
 export const CONTRACT_VERSION = 3;
 
 // Push rule for a plugin event key:
-//   <agenthub.push key="build-blocked" hold="evening" quiet="true" macOnly="true" cooldown="7d" away="5m" kind="plugin">Label</agenthub.push>
+//   <agenthub.push key="build-blocked" hold="evening" quiet="true" cooldown="7d" away="5m" kind="plugin">Label</agenthub.push>
 // The core and the push service take such rules only from built-in, official and own plugins (tier from the manager's
 // policy: a signed index or consent for an own one); for the rest they are ignored. kind — the notification kind for
 // the toggles in Settings (PUSH_KINDS): a general core kind, "plugin" — the plugin's own toggle (a line with the
 // plugin name in Settings → Notifications), "security" — a security exception that cannot be turned off.
 // Legacy contract 1 kinds ("runs", "night") are accepted as "plugin" (the linter warns) and remembered in
 // legacyKind: a legacy kind the user turned off also silences the plugin's own toggle (lib/push/prefs.mjs). The same
-// migration for a rule with a new kind — the was="runs|night" attribute. → { key, label, hold?, quietException?, macOnly?,
-// cooldownMs?, awayDelayMs?, kind?, legacyKind? } | error text
+// migration for a rule with a new kind — the was="runs|night" attribute. macOnly="true|false" is still parsed (older plugins
+// declare it) but has no effect: macOS banners are the hub's only channel (lib/push/rules.mjs ignores the field).
+// → { key, label, hold?, quietException?, macOnly?, cooldownMs?, awayDelayMs?, kind?, legacyKind? } | error text
 export const PUSH_KINDS = ["sessions", "updates", "problems", "other", "security", "plugin"];
 export const LEGACY_PUSH_KINDS = ["runs", "night"];
 export function parsePushRule(attrs, label) {

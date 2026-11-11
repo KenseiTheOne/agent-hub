@@ -1,5 +1,5 @@
-// Push: dedup, quiet hours, digest, evening blocker, waiting session, idle-based routing, all on doubles
-// for time, idleness, senders and storage. Nothing goes out.
+// Push: dedup, quiet hours, digest, evening blocker, waiting session, presence (idle time), all on doubles
+// for time, idleness, the macOS sender and storage. Nothing goes out.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -33,15 +33,15 @@ const OWN_RULES = {
     { key: "runner-crashed", label: "Раннер упал", quietException: true },
     { key: "tamper-marker", label: "Маркер подмены", quietException: true },
   ],
-  hermes: [{ key: "hermes-gateway-silent", label: "Hermes: gateway молчит", macOnly: true }],
+  // an older plugin still declares macOnly (from when the hub had a second channel): accepted and ignored
+  gateway: [{ key: "gateway-silent", label: "Gateway молчит", macOnly: true }],
 };
 
-function harness({ start = "2026-11-04T14:00", idleMin = 0, tg = true, tgFail = false, cfg = {}, plugins = {}, store = memoryStore() } = {}) {
+function harness({ start = "2026-11-04T14:00", idleMin = 0, cfg = {}, plugins = {}, store = memoryStore() } = {}) {
   const h = {
     t: at(start),
     idle: idleMin == null ? null : idleMin * MIN,
     mac: [],
-    tg: [],
     journal: [],
     store,
   };
@@ -51,9 +51,6 @@ function harness({ start = "2026-11-04T14:00", idleMin = 0, tg = true, tgFail = 
     now: () => h.t,
     presence: async () => h.idle,
     mac: { notify: (m) => (h.mac.push(m), { notifyId: String(h.mac.length), done: Promise.resolve({ ok: true }) }) },
-    telegram: tg
-      ? { send: async (text) => (tgFail ? { ok: false, reason: "http-500", code: 500 } : (h.tg.push(text), { ok: true })) }
-      : null,
     lookup: (plugin, bare) =>
       plugins[plugin] ?? { pluginTitle: plugin === "my-runner" ? "Прогоны" : plugin, itemTitle: `пункт ${bare}`, trusted: true, rules: OWN_RULES[plugin] || null },
     store,
@@ -63,7 +60,7 @@ function harness({ start = "2026-11-04T14:00", idleMin = 0, tg = true, tgFail = 
   h.raise = (plugin, key) => h.engine.raised({ plugin, key: `${plugin}:${key}` });
   h.clear = (plugin, key) => h.engine.cleared({ plugin, key: `${plugin}:${key}` });
   h.tick = () => h.engine.tick();
-  h.sent = () => h.mac.length + h.tg.length;
+  h.sent = () => h.mac.length;
   return h;
 }
 
@@ -90,63 +87,52 @@ test("dedup: one state, one message; bouncing is suppressed; after the window, a
   assert.equal(h.mac.length, 3);
 });
 
-test("idle routing: at the Mac → macOS, away → Telegram, Telegram failure or missing → macOS, unknown → macOS", async () => {
+test("presence: banners are the only channel — at the Mac, away (outside quiet hours) and unknown, all a banner right away", async () => {
   let h = harness({ idleMin: 3 });
-  await h.raise("agents", "workflow-failed:wf1");
-  assert.deepEqual([h.mac.length, h.tg.length], [1, 0]);
-
-  h = harness({ idleMin: 30 });
-  await h.raise("agents", "workflow-failed:wf1");
-  assert.deepEqual([h.mac.length, h.tg.length], [0, 1]);
-  assert.equal(h.tg[0], "Agent Hub · agents · Фоновый прогон упал\nпункт workflow-failed:wf1");
-
-  h = harness({ idleMin: 30, tgFail: true });
-  await h.raise("agents", "workflow-failed:wf1");
-  assert.equal(h.mac.length, 1, "Telegram did not answer: macOS notification");
-  assert.ok(h.journal.some((e) => e.type === "push-fallback" && e.reason === "http-500"));
-
-  h = harness({ idleMin: 30, tg: false });
   await h.raise("agents", "workflow-failed:wf1");
   assert.equal(h.mac.length, 1);
 
+  h = harness({ idleMin: 30 });
+  await h.raise("agents", "workflow-failed:wf1");
+  assert.equal(h.mac.length, 1, "away during the day: the banner waits in Notification Center");
+  assert.deepEqual([h.mac[0].subtitle, h.mac[0].body], ["agents · Фоновый прогон упал", "пункт workflow-failed:wf1"]);
+  assert.ok(h.journal.some((e) => e.type === "push-sent" && e.channel === "mac"));
+  assert.ok(!h.journal.some((e) => e.type === "push-fallback"), "no second channel — no fallback");
+
   h = harness({ idleMin: null });
   await h.raise("agents", "workflow-failed:wf1");
-  assert.deepEqual([h.mac.length, h.tg.length], [1, 0], "idleness unknown: nothing goes out");
-
-  // threshold 10 min: exactly 10 already counts as away
-  h = harness({ idleMin: 10 });
-  await h.raise("agents", "workflow-failed:wf1");
-  assert.equal(h.tg.length, 1);
+  assert.equal(h.mac.length, 1, "idleness unknown: counts as at the Mac");
 });
 
-test("quiet hours: only the runner crash and the tamper marker go to Telegram, the rest in the morning digest", async () => {
+test("quiet hours, the person away: only urgent ones (quietException) show right away, the rest — one digest banner after quiet hours", async () => {
   const h = harness({ start: "2026-11-05T01:00", idleMin: 120 });
   await h.raise("my-runner", "runner-crashed");
   await h.raise("my-runner", "tamper-marker");
   await h.raise("my-runner", "run-done:20261105");
   await h.raise("quota", "token-lost");
   await h.raise("claude-sessions", "session-died:x");
-  assert.equal(h.tg.length, 2);
-  assert.match(h.tg[0], /Раннер упал/);
-  assert.match(h.tg[1], /Маркер подмены/);
-  assert.equal(h.mac.length, 0);
+  assert.equal(h.mac.length, 2);
+  assert.match(h.mac[0].subtitle, /Раннер упал/);
+  assert.match(h.mac[1].subtitle, /Маркер подмены/);
+  assert.equal(h.engine.digest.length, 3);
+  assert.equal(h.journal.filter((e) => e.type === "push-deferred").length, 3);
   await h.clear("claude-sessions", "session-died:x");
   h.set("2026-11-05T07:59");
   await h.tick();
-  assert.equal(h.tg.length, 2, "no digest before 08:00");
+  assert.equal(h.mac.length, 2, "no digest before 08:00");
   h.set("2026-11-05T08:00");
   await h.tick();
-  assert.equal(h.tg.length, 3, "the digest is one message");
-  const d = h.tg[2];
-  assert.match(d, /^Agent Hub — за ночь \(3\):/);
-  assert.match(d, /Прогоны закончились/);
-  assert.match(d, /Квота не обновляется: нужен вход в Claude/);
-  assert.match(d, /Сессия оборвалась посреди работы: .* \(уже прошло\)/);
+  assert.equal(h.mac.length, 3, "the digest is one banner");
+  const d = h.mac[2];
+  assert.equal(d.subtitle, "За ночь: 3");
+  assert.equal(d.digest, true);
+  assert.equal(d.body, "пункт run-done:20261105; пункт token-lost; пункт session-died:x");
+  assert.ok(h.journal.some((e) => e.type === "push-digest" && e.count === 3 && e.channel === "mac"));
   await h.tick();
-  assert.equal(h.tg.length, 3, "the digest does not repeat");
+  assert.equal(h.mac.length, 3, "the digest does not repeat");
   // raised at night and still active in the morning: not sent again
   await h.raise("quota", "token-lost");
-  assert.equal(h.tg.length, 3);
+  assert.equal(h.mac.length, 3);
 });
 
 test("quiet hours but the person is at the Mac: macOS right away; the digest at the Mac is one macOS notification", async () => {
@@ -162,7 +148,6 @@ test("quiet hours but the person is at the Mac: macOS right away; the digest at 
   assert.equal(h.mac.length, 2);
   assert.equal(h.mac[1].subtitle, "За ночь: 1");
   assert.equal(h.mac[1].digest, true);
-  assert.equal(h.tg.length, 0);
 });
 
 test("evening blocker: during the day waits for 21:00, in the evening right away, repeats once per night, cleared before 21:00 is not sent", async () => {
@@ -175,19 +160,19 @@ test("evening blocker: during the day waits for 21:00, in the evening right away
   assert.equal(h.sent(), 0);
   h.set("2026-11-04T21:00");
   await h.tick();
-  assert.equal(h.tg.length, 1);
-  assert.match(h.tg[0], /^Agent Hub · Прогоны не запустятся\nпункт run-blocker:unity$/);
+  assert.equal(h.mac.length, 1);
+  assert.deepEqual([h.mac[0].subtitle, h.mac[0].body], ["Прогоны не запустятся", "пункт run-blocker:unity"]);
   h.set("2026-11-04T22:30");
   await h.tick();
   h.set("2026-11-05T02:00");
   await h.tick();
   h.set("2026-11-05T12:00");
   await h.tick();
-  assert.equal(h.tg.length, 1, "the same night and the next day before 21:00: no repeats");
+  assert.equal(h.mac.length, 1, "the same night and the next day before 21:00: no repeats");
   assert.equal(h.engine.digest.length, 0);
   h.set("2026-11-05T21:00");
   await h.tick();
-  assert.equal(h.tg.length, 2, "the next evening the blocker is still there: a reminder");
+  assert.equal(h.mac.length, 2, "the next evening the blocker is still there: a reminder");
 
   // cleared before 21:00: stay silent
   const h2 = harness({ start: "2026-11-04T10:00", idleMin: 30 });
@@ -215,41 +200,39 @@ test("evening blocker: during the day waits for 21:00, in the evening right away
   assert.equal(h4.engine.digest.length, 1);
   h4.set("2026-11-05T08:00");
   await h4.tick();
-  assert.equal(h4.tg.length, 1);
+  assert.equal(h4.mac.length, 1);
+  assert.equal(h4.mac[0].digest, true);
   h4.set("2026-11-05T21:00");
   await h4.tick();
-  assert.equal(h4.tg.length, 2);
+  assert.equal(h4.mac.length, 2);
 });
 
-test("session waiting: at the Mac → macOS right away; away and waiting > 5 min → Telegram once", async () => {
+test("session waiting: at the Mac → a banner right away; away → a banner once back at the Mac or after 5 min, once", async () => {
   const h = harness({ idleMin: 30 });
   await h.raise("claude-sessions", "session-waiting:s1");
-  assert.equal(h.sent(), 0, "away: wait 5 minutes first");
+  assert.equal(h.sent(), 0, "away: wait first");
   h.t += 4 * MIN;
   await h.tick();
   assert.equal(h.sent(), 0);
   h.t += 1 * MIN;
   await h.tick();
-  assert.equal(h.tg.length, 1);
-  assert.match(h.tg[0], /Сессия ждёт вас/);
+  assert.equal(h.mac.length, 1, "still away after 5 min: the banner goes anyway");
+  assert.match(h.mac[0].subtitle, /Сессия ждёт вас/);
   h.t += 10 * MIN;
   await h.tick();
   assert.equal(h.sent(), 1);
 
-  // at the Mac: macOS right away; then away: escalate to Telegram once
+  // at the Mac: a banner right away; stepping away later adds nothing
   const h2 = harness({ idleMin: 1 });
   await h2.raise("claude-sessions", "session-waiting:s2");
   assert.equal(h2.mac.length, 1);
   h2.t += 6 * MIN;
-  await h2.tick();
-  assert.equal(h2.tg.length, 0, "idle 1 min: the person is nearby");
   h2.idle = 12 * MIN;
   await h2.tick();
-  assert.equal(h2.tg.length, 1);
   await h2.tick();
-  assert.equal(h2.tg.length, 1);
+  assert.equal(h2.mac.length, 1);
 
-  // away but back within 5 minutes: macOS, no Telegram needed
+  // away but back within 5 minutes: the banner when the person is back, once
   const h3 = harness({ idleMin: 30 });
   await h3.raise("claude-sessions", "session-waiting:s3");
   h3.t += 3 * MIN;
@@ -258,7 +241,7 @@ test("session waiting: at the Mac → macOS right away; away and waiting > 5 min
   assert.equal(h3.mac.length, 1);
   h3.t += 5 * MIN;
   await h3.tick();
-  assert.equal(h3.tg.length, 0);
+  assert.equal(h3.mac.length, 1);
 
   // answered within 5 minutes: nothing
   const h4 = harness({ idleMin: 30 });
@@ -276,20 +259,32 @@ test("session waiting: at the Mac → macOS right away; away and waiting > 5 min
   h5.t += MIN;
   await h5.raise("claude-sessions", "session-waiting:s5");
   assert.equal(h5.mac.length, 2);
+
+  // during quiet hours, away for longer than 5 min: not urgent — into the morning digest
+  const h6 = harness({ start: "2026-11-05T01:00", idleMin: 60 });
+  await h6.raise("claude-sessions", "session-waiting:s6");
+  h6.t += 5 * MIN;
+  await h6.tick();
+  assert.deepEqual([h6.mac.length, h6.engine.digest.length], [0, 1]);
 });
 
-test("Hermes gateway silent: macOS only; a third-party plugin: macOS only and without its own text", async () => {
+test("macOnly from an older plugin is ignored (night, away — the digest); a third-party plugin: without its own text", async () => {
   const h = harness({
     idleMin: 60,
     plugins: { evil: { pluginTitle: "Evil", itemTitle: "секрет: hunter2", trusted: false, rules: [{ key: "run-blocker", label: "Чужой ярлык", quietException: true }] } },
   });
-  await h.raise("hermes", "hermes-gateway-silent");
-  assert.deepEqual([h.mac.length, h.tg.length], [1, 0]);
+  await h.raise("gateway", "gateway-silent");
+  assert.equal(h.mac.length, 1);
   await h.raise("evil", "run-blocker");
-  assert.equal(h.tg.length, 0);
   assert.equal(h.mac.length, 2);
   assert.equal(h.mac[1].body, "Событие «run-blocker»", "a foreign plugin does not get the hub label and does not pass its own text or rules");
   assert.equal(h.mac[1].subtitle, "Evil");
+  // at night with the person away macOnly no longer bypasses the digest: it means nothing now
+  const n = harness({ start: "2026-11-05T02:00", idleMin: 60 });
+  await n.raise("gateway", "gateway-silent");
+  assert.deepEqual([n.mac.length, n.engine.digest.length], [0, 1]);
+  assert.equal(n.engine.ruleFor("gateway-silent", true, OWN_RULES.gateway, "gateway").macOnly, undefined);
+  assert.equal(n.engine.ruleFor("x", false, null, "evil").macOnly, undefined);
 });
 
 test("quota: once a week", async () => {
@@ -345,26 +340,29 @@ test("restart: what was sent does not repeat; what is not raised again is cleare
   const h4 = harness({ store: s3, idleMin: 60, start: "2026-11-05T08:30" });
   h4.engine.load();
   await h4.tick();
-  assert.equal(h4.tg.length, 1);
-  assert.match(h4.tg[0], /за ночь \(1\)/);
+  assert.equal(h4.mac.length, 1);
+  assert.equal(h4.mac[0].subtitle, "За ночь: 1");
 });
 
-test("Telegram limit: at most 10 per 10 minutes, the excess goes to macOS", async () => {
-  const h = harness({ idleMin: 60 });
-  for (let i = 0; i < 12; i++) await h.raise("agents", `workflow-failed:w${i}`);
-  assert.equal(h.tg.length, 10);
-  assert.equal(h.mac.length, 2);
-  assert.ok(h.journal.some((e) => e.type === "push-fallback" && e.reason === "local-limit"));
+test("state from a build that still had a second channel: an entry marked sentTg counts as delivered", async () => {
+  const store = memoryStore();
+  store.save({ version: 1, entries: [{ key: "agents:workflow-failed:old", plugin: "agents", bare: "workflow-failed:old", trusted: true, active: true, raisedAt: at("2026-11-04T13:00"), lastSentAt: at("2026-11-04T13:00"), sentMac: false, sentTg: true, queued: false, msg: { subtitle: "x", body: "y" } }], digest: [], lastDigestAt: null });
+  const h = harness({ store, idleMin: 0 });
+  h.engine.load();
+  assert.equal(h.engine.entries.get("agents:workflow-failed:old").sentTg, undefined);
+  await h.raise("agents", "workflow-failed:old");
+  await h.tick();
+  assert.equal(h.mac.length, 0, "already delivered before the update: no second banner");
 });
 
 test("time zone from settings: the same moment is quiet in Belgrade and not quiet in New York", async () => {
   const t = Date.parse("2026-11-04T23:30:00Z"); // 00:30 Belgrade, 18:30 New York
-  for (const [tz, expectTg] of [["Europe/Belgrade", 0], ["America/New_York", 1]]) {
+  for (const [tz, expectNow] of [["Europe/Belgrade", 0], ["America/New_York", 1]]) {
     const h = harness({ idleMin: 60, cfg: { timezone: tz } });
     h.t = t;
     await h.raise("agents", "workflow-failed:z");
-    assert.equal(h.tg.length, expectTg, tz);
-    assert.equal(h.engine.digest.length, 1 - expectTg, tz);
+    assert.equal(h.mac.length, expectNow, tz);
+    assert.equal(h.engine.digest.length, 1 - expectNow, tz);
   }
 });
 
@@ -374,9 +372,9 @@ test("text: control characters are stripped, length is limited; the journal has 
     plugins: { p: { pluginTitle: "P\nlug", itemTitle: "строка\u0000\nдва" + "x".repeat(500), trusted: true } },
   });
   await h.raise("p", "plugin-error");
-  assert.equal(h.tg.length, 1);
-  const [head, body] = h.tg[0].split("\n");
-  assert.equal(head, "Agent Hub · P lug · Плагин перестал работать");
+  assert.equal(h.mac.length, 1);
+  const { subtitle, body } = h.mac[0];
+  assert.equal(subtitle, "P lug · Плагин перестал работать");
   assert.ok(body.startsWith("строка два"));
   assert.ok(body.length <= 160);
   for (const e of h.journal) {
@@ -431,24 +429,15 @@ test("core keys are in the table rules; plugin (and built-in) events come from t
 
 // Migration pass review: official plugin rules live in their metadata, but the user's services.push.rules
 // has the last word ("<plugin>:<name>" or "<name>").
-test("a user override on top of a plugin rule: macOnly=false sends \"gateway silent\" to Telegram", async () => {
-  // without an override: the plugin rule macOnly means macOS only, even when the person is away
-  let h = harness({ idleMin: 30 });
-  await h.raise("hermes", "hermes-gateway-silent");
-  assert.deepEqual([h.mac.length, h.tg.length], [1, 0]);
-  // by rule name
-  h = harness({ idleMin: 30, cfg: { rules: { "hermes-gateway-silent": { macOnly: false } } } });
-  await h.raise("hermes", "hermes-gateway-silent");
-  assert.deepEqual([h.mac.length, h.tg.length], [0, 1]);
-  assert.match(h.tg[0], /hermes · gateway молчит/i, "the plugin label stays (without repeating the name)");
-  // by "<plugin>:<name>": only this plugin; the label can be changed too
-  h = harness({ idleMin: 30, cfg: { rules: { "hermes:hermes-gateway-silent": { macOnly: false, label: "Мой ярлык" } } } });
-  assert.equal(h.engine.ruleFor("hermes-gateway-silent", true, OWN_RULES.hermes, "other").macOnly, true, "another plugin is not affected");
-  await h.raise("hermes", "hermes-gateway-silent");
-  assert.equal(h.tg.length, 1);
-  assert.match(h.tg[0], /Мой ярлык/);
-  // an untrusted plugin needs no rule overrides: it is always macOS only
-  assert.equal(h.engine.ruleFor("hermes-gateway-silent", false, null, "hermes").macOnly, true);
+test("a user override on top of a plugin rule: by \"<plugin>:<name>\" only that plugin, by \"<name>\" every plugin; macOnly is not a field", async () => {
+  let h = harness({ idleMin: 0, cfg: { rules: { "gateway:gateway-silent": { label: "Мой ярлык", macOnly: false } } } });
+  assert.equal(h.engine.ruleFor("gateway-silent", true, OWN_RULES.gateway, "other").label, "Gateway молчит", "another plugin is not affected");
+  await h.raise("gateway", "gateway-silent");
+  assert.match(h.mac[0].subtitle, /Мой ярлык/);
+  assert.equal(h.engine.ruleFor("gateway-silent", true, OWN_RULES.gateway, "gateway").macOnly, undefined, "macOnly from config.json is ignored");
+  h = harness({ idleMin: 0, cfg: { rules: { "gateway-silent": { label: "Общий ярлык" } } } });
+  await h.raise("gateway", "gateway-silent");
+  assert.match(h.mac[0].subtitle, /Общий ярлык/);
 });
 
 test("event flood from a plugin: notification and entry limits, one file write per batch, the event loop stays free (review)", async () => {

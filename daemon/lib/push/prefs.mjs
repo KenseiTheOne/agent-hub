@@ -22,7 +22,7 @@
 // the old core does not normalize and keeps as is when it writes. If a human turned an old kind back on in the old hub, after
 // updating the migration clears the "off" values derived from it (migrated), an explicit choice stays.
 //
-// A turned-off kind is not shown in any way — neither as a shell banner, nor via the fallback osascript, nor in Telegram, nor in the morning
+// A turned-off kind is not shown in any way — neither as a shell banner, nor via the fallback osascript, nor in the morning
 // digest; the event stays in the popover (plugin state) and in the journal (`push-muted`). Security exceptions
 // (kind "security") arrive whatever the switches say. The module does not depend on i18n (lib/i18n.mjs imports it).
 

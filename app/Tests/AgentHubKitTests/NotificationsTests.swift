@@ -5,6 +5,7 @@ import Testing
 // "Settings → Notifications" (2026-11-09): model from /state, editing via the daemon, the settings.changed event, ru/en texts.
 @Suite(.serialized) struct NotificationsTests {
     @Test func stateDecodesNotifications() throws {
+        // an older daemon still sends the removed channel flag ("telegram") — ignored
         let json = #"""
         {"seq":1,"notifications":{"enabled":false,"kinds":{"sessions":true,"updates":false},
          "plugins":[{"id":"nightly","title":"Ночной","on":false,"labels":["Готово"],"legacy":true},{"id":"x"},{"title":"без id"}],
@@ -40,14 +41,13 @@ import Testing
         defer { d.shutdown() }
         d.events = { _, _ in
             snapshotFrame(1, peer: "app")
-                + sseFrame(2, "settings.changed", #"{"id":2,"type":"settings.changed","notifications":{"enabled":false,"kinds":{},"quiet":{"enabled":false,"start":"23:00","end":"08:00","from":"settings"},"security":[],"service":true,"telegram":true}}"#)
+                + sseFrame(2, "settings.changed", #"{"id":2,"type":"settings.changed","notifications":{"enabled":false,"kinds":{},"quiet":{"enabled":false,"start":"23:00","end":"08:00","from":"settings"},"security":[],"service":true}}"#)
         }
         let store = HubStore(client: HubClient(socketPath: d.path))
         store.start()
         defer { store.stop() }
         #expect(await waitFor { store.state?.notifications?.enabled == false })
         #expect(store.state?.notifications?.quiet.enabled == false)
-        #expect(store.state?.notifications?.telegram == true)
         await store.setNotifications(.object(["plugins": .object(["nightly": .bool(false)])]))
         #expect(d.requests.contains { $0.method == "PUT" && $0.uri == "/settings/notifications" })
         #expect(store.state?.notifications?.pluginOn("nightly") == false)
@@ -72,7 +72,8 @@ import Testing
         #expect(NotificationsText.pluginsHeader == "By plugin")
         #expect(NotificationsText.pluginLegacyNote.contains("earlier notification setting"))
         #expect(NotificationsText.securityTitle(.init(key: "hub-update-tag-moved")) == "Agent Hub release tag moved — possible substitution")
-        #expect(NotificationsText.channels(NotificationsInfo(telegram: false)).contains("Telegram is off"))
+        #expect(NotificationsText.channels(NotificationsInfo()) == "macOS banners.", "an older daemon — no away threshold, no invented number")
+        #expect(NotificationsText.kindDetail("updates").contains("own plugin updated from its folder"))
         // every row is distinct in each language
         for k in NotificationsInfo.kinds {
             L10n.shared.lang = .ru
@@ -105,23 +106,28 @@ import Testing
         for t in [NotificationsText.securityExplain, NotificationsText.quietExplain] {
             #expect(t.range(of: #"(?i)hermes|ночь|ночн|раннер|clickup"#, options: .regularExpression) == nil)
         }
-        #expect(NotificationsText.quietExplain.contains("«Agent Hub падает», — одной сводкой"))
+        #expect(NotificationsText.quietExplain.contains("«Agent Hub падает» — тоже в сводку"))
+        #expect(NotificationsText.quietExplain.contains("приходят одной сводкой"))
         #expect(!NotificationsText.quietExplain.contains("исключения безопасности)"))
-        #expect(NotificationsText.channels(NotificationsInfo(telegram: true, awayAfterMs: 20 * 60_000)) == "У Mac — баннер; отошли больше чем на 20 мин — Telegram.")
-        #expect(!NotificationsText.channels(NotificationsInfo(telegram: true)).contains("10"), "an older daemon — no invented number")
+        #expect(NotificationsText.channels(NotificationsInfo(awayAfterMs: 20 * 60_000)).hasPrefix("Баннеры macOS. Без клавиатуры и мыши дольше 20 мин — вы отошли от Mac"))
+        #expect(!NotificationsText.channels(NotificationsInfo()).contains("10"), "an older daemon — no invented number")
+        for t in [NotificationsText.channels(NotificationsInfo(awayAfterMs: 60_000)), NotificationsText.quietExplain, NotificationsText.mutedExplain] {
+            #expect(t.range(of: #"(?i)telegram"#, options: .regularExpression) == nil, "macOS banners are the only channel")
+        }
         #expect(NotificationsText.securityTitle(.init(key: "hub-update-suspect")) == "Обновление Agent Hub остановлено — возможна подмена")
         #expect(NotificationsText.securityTitle(.init(key: "plugin-own-unexpected")) == "Свой плагин записан мимо Agent Hub")
         #expect(NotificationsText.securityExplain.contains("config.json их не переопределяет"))
         #expect(NotificationsText.quietZone(.init(timezone: "Asia/Tokyo"), current: "Europe/Belgrade")?.contains("Asia/Tokyo") == true)
         #expect(NotificationsText.quietZone(.init(timezone: "Europe/Belgrade"), current: "Europe/Belgrade") == nil)
         #expect(NotificationsText.quietZone(.init(), current: "Europe/Belgrade") == nil)
-        let n = try JSONDecoder().decode(NotificationsInfo.self, from: Data(#"{"enabled":true,"kinds":{},"quiet":{"enabled":true,"start":"23:00","end":"08:00","from":"default","timezone":"Asia/Tokyo"},"security":[],"service":true,"telegram":true,"awayAfterMs":600000}"#.utf8))
+        let n = try JSONDecoder().decode(NotificationsInfo.self, from: Data(#"{"enabled":true,"kinds":{},"quiet":{"enabled":true,"start":"23:00","end":"08:00","from":"default","timezone":"Asia/Tokyo"},"security":[],"service":true,"awayAfterMs":600000}"#.utf8))
         #expect(n.quiet.timezone == "Asia/Tokyo" && n.awayAfterMs == 600_000)
         L10n.shared.lang = .en
         for t in [NotificationsText.securityExplain, NotificationsText.quietExplain] {
             #expect(t.range(of: #"(?i)hermes|night|runner|clickup"#, options: .regularExpression) == nil)
         }
-        #expect(NotificationsText.channels(NotificationsInfo(telegram: true, awayAfterMs: 20 * 60_000)).contains("20 min"))
+        #expect(NotificationsText.channels(NotificationsInfo(awayAfterMs: 20 * 60_000)).contains("more than 20 min"))
+        #expect(NotificationsText.quietExplain.hasPrefix("While you're away from the Mac, during quiet hours banners are held"))
         L10n.shared.lang = .ru
     }
 }

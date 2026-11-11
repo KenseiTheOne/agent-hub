@@ -148,7 +148,7 @@ contract in [`docs/extension-points.md`](docs/extension-points.md); registry, co
 | [`docs/plugins-registry.md`](docs/plugins-registry.md) | the plugin registry, manager, tiers and own sources |
 | [`docs/hook.md`](docs/hook.md) | answering Claude Code sessions: hook, cards, `session.respond` |
 | [`docs/hub-updates.md`](docs/hub-updates.md) | hub auto-update, the installer and the release procedure |
-| [`daemon/lib/push/README.md`](daemon/lib/push/README.md) | push notifications: rules, kinds, quiet hours, Telegram |
+| [`daemon/lib/push/README.md`](daemon/lib/push/README.md) | push notifications (macOS banners): rules, kinds, quiet hours, the morning digest |
 | [`app/README.md`](app/README.md) | the SwiftUI shell: features, building without Xcode, diagnostic flags |
 | [`bridge/README.md`](bridge/README.md) | the cmux bridge and action primitives |
 | [`docs/windows.md`](docs/windows.md) | Windows groundwork |
@@ -198,7 +198,7 @@ kill %1
 ```
 
 Without `AGENTHUB_HOME` the daemon works in `~/Library/Application Support/AgentHub/`. In test mode the keychain is not
-read and Telegram is off. Shell flags for checks (`--panel-section`, `--show-popover`, `--demo-cards`, `--probe-peer`,
+read. Shell flags for checks (`--panel-section`, `--show-popover`, `--demo-cards`, `--probe-peer`,
 …) are described in [`app/README.md`](app/README.md).
 
 ## Manual installation from a working folder (developers)

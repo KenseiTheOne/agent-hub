@@ -764,7 +764,7 @@ public struct LaunchAtLoginInfo: Codable, Sendable, Hashable {
 }
 
 /// `notifications` in `/state`, `GET /settings`, the `PUT /settings/notifications` response and the `settings.changed` event:
-/// "Settings → Notifications". A disabled kind does not arrive at all: no banner, no osascript fallback, no Telegram;
+/// "Settings → Notifications". A disabled kind does not arrive at all: no banner, no osascript fallback, no digest;
 /// the event stays in the popover and the journal (`push-muted`). `security` lists the security exceptions: they arrive under any
 /// toggles (hub events and trusted plugin rules with `kind="security"`).
 public struct NotificationsInfo: Codable, Sendable, Hashable {
@@ -854,13 +854,12 @@ public struct NotificationsInfo: Codable, Sendable, Hashable {
     public var security: [SecurityItem]
     /// The push service is running (`services.push.enabled` is not false in config.json).
     public var service: Bool
-    /// Telegram is enabled in config.json (never in a test directory).
-    public var telegram: Bool
-    /// Idle threshold after which a notification goes to Telegram (`services.push.idleThresholdMs`); an older daemon gives nil.
+    /// Idle threshold after which the person counts as away from the Mac (`services.push.idleThresholdMs`): quiet hours then
+    /// hold banners for the digest, a waiting session's banner waits for them; an older daemon gives nil.
     public var awayAfterMs: Int?
 
-    public init(enabled: Bool = true, kinds: [String: Bool] = [:], plugins: [PluginToggle] = [], quiet: Quiet = Quiet(), security: [SecurityItem] = [], service: Bool = true, telegram: Bool = false, awayAfterMs: Int? = nil) {
-        self.enabled = enabled; self.kinds = kinds; self.plugins = plugins; self.quiet = quiet; self.security = security; self.service = service; self.telegram = telegram; self.awayAfterMs = awayAfterMs
+    public init(enabled: Bool = true, kinds: [String: Bool] = [:], plugins: [PluginToggle] = [], quiet: Quiet = Quiet(), security: [SecurityItem] = [], service: Bool = true, awayAfterMs: Int? = nil) {
+        self.enabled = enabled; self.kinds = kinds; self.plugins = plugins; self.quiet = quiet; self.security = security; self.service = service; self.awayAfterMs = awayAfterMs
     }
 
     public init(from decoder: Decoder) throws {
@@ -874,7 +873,6 @@ public struct NotificationsInfo: Codable, Sendable, Hashable {
         quiet = (try? c.decode(Quiet.self, forKey: .quiet)) ?? Quiet()
         security = ((try? c.decode([SecurityItem].self, forKey: .security)) ?? []).filter { !$0.key.isEmpty }
         service = (try? c.decode(Bool.self, forKey: .service)) ?? true
-        telegram = (try? c.decode(Bool.self, forKey: .telegram)) ?? false
         awayAfterMs = try? c.decodeIfPresent(Int.self, forKey: .awayAfterMs)
     }
 
@@ -883,7 +881,7 @@ public struct NotificationsInfo: Codable, Sendable, Hashable {
     /// Whether a plugin's own toggle is on (no row means on).
     public func pluginOn(_ id: String) -> Bool { plugins.first { $0.id == id }?.on ?? true }
 
-    enum CodingKeys: String, CodingKey { case enabled, kinds, plugins, quiet, security, service, telegram, awayAfterMs }
+    enum CodingKeys: String, CodingKey { case enabled, kinds, plugins, quiet, security, service, awayAfterMs }
 }
 
 /// `idle` in `/state` and the `idle.verdict` event: whether the computer can be shut down, one daemon answer for the popover and the icon

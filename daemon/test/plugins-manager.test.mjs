@@ -728,6 +728,73 @@ test("downgrading official → community in a new signed index removes actions f
   }
 });
 
+test("official = only what the signed catalog lists now: delisted → community, journaled once; fetch or signature failures keep the last verified state; back in the catalog → official", async () => {
+  const h = await hubWithRegistry();
+  const mgr = managerFor(h.config.paths.home);
+  const lines = (type) => h.core.journal.tail(3000).filter((e) => e.type === type && e.plugin === "off");
+  const tiers = join(h.config.paths.home, "Registry", "tiers.json");
+  try {
+    publish(h.reg, [{ id: "off", text: offText(), tier: "official" }], { key: h.key, generatedAt: nextTime() });
+    await h.call("POST", "/registry/fetch");
+    await installAny(h, "off");
+    const st = await waitFor(() => h.core.pluginState("off")?.lastRunAt && h.core.pluginState("off"), { timeoutMs: 8000 });
+    assert.deepEqual([st.tier, st.trusted, st.actions.length], ["official", true, 1]);
+
+    // the registry can't be reached (no index) or answers with a broken signature: the last verified catalog stays
+    const goodIndex = readFileSync(join(h.reg, "index.json"));
+    const goodSig = readFileSync(join(h.reg, "index.json.minisig"));
+    writeFileSync(join(h.reg, "index.json.minisig"), "untrusted comment: x\nRWQ=\n");
+    assert.notEqual((await h.call("POST", "/registry/fetch")).status, 200);
+    const { rmSync } = await import("node:fs");
+    rmSync(join(h.reg, "index.json"));
+    assert.notEqual((await h.call("POST", "/registry/fetch")).status, 200);
+    // a half-written pair on disk (another process replaced index.json, the signature is not there yet) — the same
+    writeFileSync(join(h.config.paths.home, "Registry", "index.json.minisig"), "untrusted comment: x\nRWQ=\n");
+    await h.rescan();
+    await new Promise((r) => setTimeout(r, 300));
+    assert.equal(h.core.pluginState("off").tier, "official", "no verified change — no downgrade");
+    assert.equal(lines("plugin-tier-lowered").length, 0);
+    writeFileSync(join(h.config.paths.home, "Registry", "index.json.minisig"), goodSig);
+    writeFileSync(join(h.reg, "index.json"), goodIndex);
+    writeFileSync(join(h.reg, "index.json.minisig"), goodSig);
+
+    // the owner removed it from the catalog (official.json and the plugin list): a newer signed index without the id
+    publish(h.reg, [], { key: h.key, generatedAt: nextTime() });
+    assert.equal((await h.call("POST", "/registry/fetch")).status, 200);
+    const st2 = await waitFor(() => h.core.pluginState("off")?.tier === "community" && h.core.pluginState("off"), { timeoutMs: 8000 });
+    assert.deepEqual([st2.trusted, st2.official, st2.actions, st2.pushRules], [false, false, [], []], "permissions and actions as for community");
+    const inst = (await h.call("GET", "/registry/installed")).body.installed[0];
+    assert.deepEqual([inst.tier, inst.official, inst.officialPending, inst.label], ["community", false, false, null], "just the tier it has now, no special label");
+    const low = lines("plugin-tier-lowered");
+    assert.equal(low.length, 1);
+    assert.deepEqual([low[0].version, low[0].from, low[0].to, low[0].reason], ["1.0.0", "official", "community", "not-in-catalog"]);
+    // more checks and a daemon restart (the mark is read from Registry/tiers.json): no second line
+    await h.rescan();
+    mgr.lowered = null;
+    await h.rescan();
+    await new Promise((r) => setTimeout(r, 300));
+    assert.equal(lines("plugin-tier-lowered").length, 1);
+    assert.ok(JSON.parse(readFileSync(tiers, "utf8")).lowered.off);
+
+    // back in the catalog as official (the same archive): official again, one line
+    publish(h.reg, [{ id: "off", text: offText(), tier: "official" }], { key: h.key, generatedAt: nextTime() });
+    assert.equal((await h.call("POST", "/registry/fetch")).status, 200);
+    await waitFor(() => h.core.pluginState("off")?.tier === "official", { timeoutMs: 8000 });
+    await h.rescan();
+    assert.equal(lines("plugin-tier-restored").length, 1);
+    assert.equal(JSON.parse(readFileSync(tiers, "utf8")).lowered.off, undefined);
+    // listed as community (official.json without it) — lowered again, reason "community"; removal forgets the mark
+    publish(h.reg, [{ id: "off", text: offText(), tier: "community" }], { key: h.key, generatedAt: nextTime() });
+    await h.call("POST", "/registry/fetch");
+    await waitFor(() => lines("plugin-tier-lowered").length === 2, { timeoutMs: 8000 });
+    assert.equal(lines("plugin-tier-lowered")[1].reason, "community");
+    await h.call("POST", "/registry/remove", { id: "off" });
+    assert.equal(JSON.parse(readFileSync(tiers, "utf8")).lowered.off, undefined);
+  } finally {
+    await h.stop();
+  }
+});
+
 test("a new version of an official plugin in the catalog does not downgrade the installed one: Registry/attest evidence; a tier downgrade and tampered evidence — community", async () => {
   const h = await hubWithRegistry();
   try {

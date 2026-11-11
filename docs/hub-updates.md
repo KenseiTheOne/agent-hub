@@ -259,10 +259,10 @@ up to `keepVersions`; versions that failed — right away; build logs — except
 
 Push (rules in `lib/push/rules.mjs`; for hub events the title is "Agent Hub", the subtitle is the gist, the body is the
 detail, without repeating "Agent Hub / Agent Hub"): `hub-update` — "A new Agent Hub version is available" · "0.3.0 —
-<description subject>. Currently 0.2.0 · update from the Agent Hub menu" (macOS only); `hub-update-ready` — "A new Agent
+<description subject>. Currently 0.2.0 · update from the Agent Hub menu" (not urgent: during quiet hours while you are away it waits for the morning digest); `hub-update-ready` — "A new Agent
 Hub version is built — waiting for restart" · "0.3.0. Waiting for an answer: 2 — the restart will remove their cards,
 the questions will go to the terminal. Restart from the Agent Hub menu or in Settings" (sessions only — "Sessions
-waiting for an answer: 2 — better answer first"; macOS only, once per version); `hub-update-installed` — "Agent Hub
+waiting for an answer: 2 — better answer first"; once per version, not urgent); `hub-update-installed` — "Agent Hub
 updated" · "0.3.0 (was 0.2.0) · pinned build <cdhash:12>" (rollback: "Agent Hub returned to the previous version" ·
 "0.1.0 (was 0.2.0) · …"); `hub-update-failed` — "The Agent Hub update failed" · "0.3.0: build error. The hub stayed on
 0.2.0 · log: <path>" (always a banner, during quiet hours too); `hub-update-tag-moved` — "Agent Hub release tag moved" ·

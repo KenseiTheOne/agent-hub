@@ -322,7 +322,9 @@ test("usage service: an overall request deadline — a byte-by-byte reply doesn'
     const t0 = Date.now();
     await svc.tick();
     const took = Date.now() - t0;
-    assert.ok(took < 3000, `tick hung for ${took} ms`);
+    // Without the overall deadline the drip never ends and tick runs into the 15 s test timeout; 8 s leaves room for a
+    // loaded machine (the fake `security` spawn alone can take seconds during a full parallel run).
+    assert.ok(took < 8000, `tick hung for ${took} ms`);
     assert.equal(JSON.parse(readFileSync(file, "utf8")).error, "timeout");
   } finally {
     for (const c of conns) {

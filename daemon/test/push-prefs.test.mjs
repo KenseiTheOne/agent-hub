@@ -36,13 +36,12 @@ const OWN = {
 };
 
 function harness({ start = "2026-11-04T14:00", idleMin = 0, prefs = null, quiet = null, cfg = {} } = {}) {
-  const h = { t: at(start), idle: idleMin * MIN, mac: [], tg: [], journal: [] };
+  const h = { t: at(start), idle: idleMin * MIN, mac: [], journal: [] };
   h.engine = new PushEngine({
     config: resolvePushConfig({ timezone: "Europe/Belgrade", ...cfg }),
     now: () => h.t,
     presence: async () => h.idle,
     mac: { notify: (m) => (h.mac.push(m), { notifyId: String(h.mac.length), done: Promise.resolve({ ok: true }) }) },
-    telegram: { send: async (text) => (h.tg.push(text), { ok: true }) },
     lookup: (plugin, bare) => ({ pluginTitle: plugin, itemTitle: `пункт ${bare}`, trusted: plugin !== "weird", rules: OWN[plugin] || null }),
     store: memoryStore(),
     journal: (e) => h.journal.push(e),
@@ -78,6 +77,7 @@ test("kinds: core table, plugin rules, fallback to the table, untrusted is \"oth
   assert.equal(kind("plugin-update:my-runner:0.5.0"), "updates");
   assert.equal(kind("hub-update:0.4.0"), "updates");
   assert.equal(kind("hub-update-failed:0.4.0"), "updates");
+  assert.equal(kind("plugin-own-updated:mine:1.2.0"), "updates", "an own plugin updated from its folder — the same switch as other updates");
   assert.equal(kind("source-broken"), "problems");
   // quota is declared by the builtin quota plugin with its own tags — the core table does not have it
   assert.equal(kind("week-80:20261108"), "other");
@@ -175,8 +175,11 @@ test("prefs: normalization, partial edit, quiet hours from config.json until the
   assert.equal(kindAllowed({ ...legacy, enabled: false }, "plugin", { plugin: "hermes", rules: OWN.hermes }), false, "the master switch also silences plugin switches");
 });
 
-test("turned-off kind: no macOS, no Telegram, no digest; push-muted in the journal; other kinds as usual", async () => {
+test("turned-off kind: no banner, no digest; push-muted in the journal; other kinds as usual", async () => {
   const h = harness({ prefs: off("updates", "night") });
+  await h.raise("@hub", "plugin-own-updated:mine:1.0.0");
+  assert.deepEqual(h.muted().map((e) => [e.key, e.kind]), [["@hub:plugin-own-updated:mine:1.0.0", "updates"]], "\"Hub and plugin updates\" off — no \"Plugin updated\" either");
+  h.journal.length = 0;
   await h.raise("@hub", "plugin-update:my-runner:0.5.0");
   await h.raise("my-runner", "run-done:20261104");
   assert.equal(h.mac.length, 0);
@@ -188,21 +191,21 @@ test("turned-off kind: no macOS, no Telegram, no digest; push-muted in the journ
   await h.raise("claude-sessions", "waiting:abc");
   assert.equal(h.mac.length, 1, "sessions are on");
   await h.clear("claude-sessions", "waiting:abc");
-  // stepped away: Telegram is also silent for a turned-off kind
+  // stepped away: a turned-off kind stays silent too
   h.idle = 30 * MIN;
   await h.raise("hermes", "job-failed-1");
-  assert.equal(h.tg.length, 1, "runs are on → Telegram");
+  assert.equal(h.mac.length, 2, "runs are on → a banner");
   await h.raise("my-runner", "run-done:20261105");
-  assert.equal(h.tg.length, 1);
+  assert.equal(h.mac.length, 2);
   // at night a turned-off kind does not go into the digest
   h.set("2026-11-05T01:00");
   await h.raise("my-runner", "run-done:20261106");
   await h.raise("quota", "week-80:20261108");
   h.set("2026-11-05T08:01");
   await h.tick();
-  assert.equal(h.tg.length, 2);
-  assert.match(h.tg[1], /за ночь \(1\)/);
-  assert.ok(!/run-done/.test(h.tg[1]));
+  assert.equal(h.mac.length, 3);
+  assert.equal(h.mac[2].subtitle, "За ночь: 1");
+  assert.ok(!/run-done/.test(h.mac[2].body));
 });
 
 test("master switch: everything is silent except security exceptions; turned-off events do not consume the rate limit", async () => {
@@ -237,14 +240,14 @@ test("kind turned off after raising: the evening blocker and the waiting session
   // raised while the kind was on: turning it off during the wait does not silence it forever — turned on before sending, it goes out
   assert.equal(h.mac.length, 1, "turned on before sending — the blocker arrives");
   assert.equal(h.muted().length, 1, "push-muted — once per \"off\"");
-  // waiting session: on the Mac — right away; stepped away and turned off — Telegram does not go out
+  // waiting session: on the Mac — right away; stepped away and turned off before the delayed banner — it does not go out
   h.idle = 30 * MIN;
   h.set("2026-11-05T10:00");
   await h.raise("claude-sessions", "waiting:s1");
   h.engine.setPrefs(off("sessions"));
   h.set("2026-11-05T10:10");
   await h.tick();
-  assert.equal(h.tg.length, 0);
+  assert.equal(h.mac.length, 1, "only the blocker from before");
   // raised while off and cleared — a new state after turning on arrives
   h.idle = 0;
   await h.raise("hermes", "job-failed-x");
@@ -268,38 +271,38 @@ test("digest: kind turned off overnight — its items do not go out in the morni
   h.engine.setPrefs(off("night"));
   h.set("2026-11-05T08:01");
   await h.tick();
-  assert.equal(h.tg.length, 1);
-  assert.match(h.tg[0], /за ночь \(1\)/);
+  assert.equal(h.mac.length, 1);
+  assert.equal(h.mac[0].subtitle, "За ночь: 1");
   assert.ok(h.journal.some((e) => e.type === "push-muted" && e.key === "digest" && e.count === 1));
   const h2 = harness({ start: "2026-11-05T01:00", idleMin: 30 });
   await h2.raise("hermes", "job-failed-1");
   h2.engine.setPrefs({ ...defaultPrefs(), enabled: false });
   h2.set("2026-11-05T08:01");
   await h2.tick();
-  assert.equal(h2.tg.length + h2.mac.length, 0);
+  assert.equal(h2.mac.length, 0);
   assert.equal(h2.engine.digest.length, 0, "the queue does not build up until turned on");
 });
 
-test("quiet hours from \"Settings\": custom bounds, turned off — Telegram right away at night; the evening blocker does not wait at night", async () => {
+test("quiet hours from \"Settings\": custom bounds, turned off — a banner right away at night; the evening blocker does not wait at night", async () => {
   const h = harness({ start: "2026-11-04T22:15", idleMin: 30, quiet: { enabled: true, start: "22:00", end: "07:00" } });
   await h.raise("hermes", "job-failed-1");
-  assert.equal(h.tg.length, 0, "22:15 — already quiet hours (22:00)");
+  assert.equal(h.mac.length, 0, "22:15 — already quiet hours (22:00)");
   assert.equal(h.engine.digest.length, 1);
   h.set("2026-11-05T07:01");
   await h.tick();
-  assert.equal(h.tg.length, 1, "digest — after 07:00");
+  assert.equal(h.mac.length, 1, "digest — after 07:00");
   // quiet hours turned off — right away at night
   h.engine.setPrefs(defaultPrefs(), { enabled: false, start: "22:00", end: "07:00" });
   h.set("2026-11-06T02:00");
   await h.raise("hermes", "job-failed-2");
-  assert.equal(h.tg.length, 2);
+  assert.equal(h.mac.length, 2);
   // an evening blocker raised at night with quiet hours off does not wait for the next evening
   await h.raise("my-runner", "unity-open:Game");
-  assert.equal(h.tg.length, 3);
+  assert.equal(h.mac.length, 3);
   // without "Settings" — config.json (quietStart/quietEnd), as before
   const c = harness({ start: "2026-11-04T22:15", idleMin: 30, cfg: { quietStart: "22:00", quietEnd: "07:00" } });
   await c.raise("hermes", "job-failed-1");
-  assert.equal(c.tg.length, 0);
+  assert.equal(c.mac.length, 0);
 });
 
 // ---------- service in the core: PUT /settings/notifications, /state, events ----------
@@ -358,7 +361,7 @@ test("service: only app writes the setting, /state and /settings show it, a turn
     assert.deepEqual(q0, { enabled: true, start: "22:30", end: "08:00", from: "config" });
     assert.ok(typeof tz0 === "string" && tz0, "the quiet hours timezone is in the response");
     assert.equal(st0.awayAfterMs, 10 * MIN, "the \"stepped away\" threshold comes from push settings");
-    assert.equal(st0.telegram, false, "test mode — never Telegram");
+    assert.equal("telegram" in st0, false, "one channel — macOS banners: no channel flag in the response");
     assert.deepEqual(st0.security.filter((s) => s.plugin === "@hub").map((s) => s.key), ["app-pin-changed", "app-pin-path-changed", "app-restart-stopped", "hub-update-tag-moved", "hub-update-suspect", "plugin-own-unexpected"]);
     await waitFor(async () => (await req(h.sock, "GET", "/settings")).body.notifications.security.some((s) => s.plugin === "batch" && s.key === "tamper"));
     const tamper = (await req(h.sock, "GET", "/settings")).body.notifications.security.find((s) => s.key === "tamper");
@@ -462,7 +465,7 @@ test("turned off for one tick while the event was waiting to be sent, and turned
   await s.tick();
   s.set("2026-11-05T14:10");
   await s.tick();
-  assert.equal(s.tg.length, 1, "the human stepped away — Telegram goes out");
+  assert.equal(s.mac.length, 1, "the human stepped away for longer than 5 min — the delayed banner goes out");
   // raised while off — not resent after turning on either (as before)
   const q = harness({ start: "2026-11-04T14:00", prefs: off("night") });
   await q.raise("my-runner", "unity-open:Game");
@@ -486,8 +489,8 @@ test("security exceptions: config.json does not override hold, awayDelayMs, cool
     await h.clear("@hub", key);
     h.set("2026-11-05T14:00");
     await h.tick();
-    assert.equal(h.mac.length + h.tg.length, 1, `arrived with ${JSON.stringify(rules)}`);
-    assert.ok(!JSON.stringify([...h.mac, ...h.tg]).includes("Всё хорошо"), "the label is not replaced");
+    assert.equal(h.mac.length, 1, `arrived with ${JSON.stringify(rules)}`);
+    assert.ok(!JSON.stringify(h.mac).includes("Всё хорошо"), "the label is not replaced");
     assert.ok(!h.journal.some((e) => e.type === "push-held"));
   }
   // cooldown "for years" — the second re-pin still arrives
@@ -541,9 +544,9 @@ test("config.json with quietStart == quietEnd (no quiet hours): shown as off, ca
   const st = applyPatch(defaultPrefs(), { quiet: { start: "01:00" } }, cfg);
   assert.deepEqual(st.prefs.quiet, { enabled: false, start: "01:00", end: "08:00" }, "not a 23-hour 01:00–00:00 window");
   assert.equal(applyPatch(defaultPrefs(), { quiet: { enabled: true, start: "02:00", end: "02:00" } }, cfg).error, "args:quiet:empty");
-  // engine: no quiet hours at 03:00 — stepped away, Telegram right away
+  // engine: no quiet hours at 03:00 — stepped away, a banner right away (no digest)
   const h = harness({ start: "2026-11-05T03:00", idleMin: 30, quiet: effectiveQuiet(defaultPrefs(), cfg) });
-  return h.raise("hermes", "job-failed-1").then(() => assert.equal(h.tg.length, 1));
+  return h.raise("hermes", "job-failed-1").then(() => assert.equal(h.mac.length, 1));
 });
 
 test("digest from a file before 2026-11-09 (item without kind): a security exception does not drop out with notifications off", async () => {
@@ -570,12 +573,12 @@ test("the system timezone changed (travel) — quiet hours are computed in the n
   const h = harness({ start: "2026-11-05T16:00", idleMin: 30 }); // 16:00 in Belgrade = 00:00 in Tokyo
   h.engine.setTimeZone("Asia/Tokyo");
   await h.raise("hermes", "job-failed-1");
-  assert.equal(h.tg.length, 0, "it is night in Tokyo — into the digest");
+  assert.equal(h.mac.length, 0, "it is night in Tokyo — into the digest");
   assert.equal(h.engine.digest.length, 1);
   assert.ok(h.journal.some((e) => e.type === "push-timezone" && e.timezone === "Asia/Tokyo"));
   const b = harness({ start: "2026-11-05T16:00", idleMin: 30 });
   await b.raise("hermes", "job-failed-1");
-  assert.equal(b.tg.length, 1, "it is day in Belgrade — right away");
+  assert.equal(b.mac.length, 1, "it is day in Belgrade — right away");
 });
 
 // ---------- contract 2: migrating turned-off "Night" and "Agent runs" into plugin switches ----------
@@ -635,7 +638,7 @@ test("settings migration: kinds.night/runs = false from settings.json turn off s
   }
 });
 
-test("a plugin's own switch: when off it silences only that plugin's kind=plugin rules — immediately, in Telegram and in the digest", async () => {
+test("a plugin's own switch: when off it silences only that plugin's kind=plugin rules — immediately and in the digest", async () => {
   const h = harness({ prefs: offPlugins("hermes") });
   await h.raise("hermes", "job-failed-1");
   assert.equal(h.mac.length, 0);
@@ -652,9 +655,9 @@ test("a plugin's own switch: when off it silences only that plugin's kind=plugin
   d.engine.setPrefs(offPlugins("my-runner"));
   d.set("2026-11-05T08:01");
   await d.tick();
-  assert.equal(d.tg.length, 1);
-  assert.match(d.tg[0], /за ночь \(1\)/);
-  assert.ok(!/run-done/.test(d.tg[0]));
+  assert.equal(d.mac.length, 1);
+  assert.equal(d.mac[0].subtitle, "За ночь: 1");
+  assert.ok(!/run-done/.test(d.mac[0].body));
 });
 
 test("settings migration survives a hub rollback to a contract 1 core and back", async () => {

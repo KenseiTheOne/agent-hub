@@ -97,6 +97,30 @@ final class ConsentRecorder: ConfirmPresenter {
         L10n.shared.lang = .ru
     }
 
+    // decision 2026-11-11: a folder writable by the group (umask 002) installs, but the window shows a loud line
+    @Test func groupWritableSourceRisk() throws {
+        L10n.shared.lang = .ru
+        let json = #"""
+        {"kind":"own","path":"/Users/k/tool/agenthub/tool","pathShort":"~/tool/agenthub/tool","fingerprint":"ff",
+         "writable":{"mine":true,"others":[],"group":[".","README.md","tool.5m.sh","lib.mjs"],"parentOpen":false,"acl":[]},"risk":"group-writable","warnings":[]}
+        """#
+        let src = try JSONDecoder().decode(ConsentSource.self, from: Data(json.utf8))
+        #expect(src.risk == "group-writable" && src.groupWritable.count == 4)
+        let w = try #require(src.riskWarning)
+        #expect(w.title == "Папку плагина может менять ваша группа, а не только вы")
+        #expect(w.text.contains("(запись для группы: ., README.md, tool.5m.sh…)"))
+        #expect(w.text.contains("chmod -R g-w ~/tool/agenthub/tool"))
+        #expect(src.writableNote.hasPrefix("Менять папку могут процессы под вашим пользователем — и ваша группа"))
+        L10n.shared.lang = .en
+        #expect(src.riskWarning?.title == "Your group can change the plugin folder, not only you")
+        #expect(src.riskWarning?.text.contains("umask 002") == true)
+        L10n.shared.lang = .ru
+        // no risk (or an older daemon without the field) — no line; a registry source never has one
+        let plain = try JSONDecoder().decode(ConsentSource.self, from: Data(#"{"kind":"own","path":"/p","writable":{"mine":true}}"#.utf8))
+        #expect(plain.riskWarning == nil && plain.groupWritable.isEmpty)
+        #expect(ConsentSource(kind: "registry", risk: "group-writable").riskWarning == nil)
+    }
+
     @Test func reviewFixesTextsAndStatuses() throws {
         L10n.shared.lang = .ru
         // id matches a catalog plugin (not installed): a note on what the own plugin will get

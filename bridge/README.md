@@ -113,7 +113,7 @@ Text for the shell: `facts:bridge-offline` — "the cmux bridge is not running".
 Controlling third-party tools (Hermes, a runner) is not among the primitives (decision 2026-11-04): those are declared
 `<agenthub.action>` actions of official plugins (registry `agent-hub-plugins`, see their READMEs).
 
-**remoteAllowed.** There are no remote action channels in v1 (Telegram only calls you). The flag separates in advance
+**remoteAllowed.** There are no remote action channels in v1 (the hub only notifies you with macOS banners). The flag separates in advance
 "stopping" actions (interrupt a turn, stop a session, stop a run, skip a task — yes) from actions that start spending or
 reach outside (launching a session — only from the Mac, design §5).
 

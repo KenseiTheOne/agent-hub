@@ -135,6 +135,8 @@ struct ConsentSheet: View {
                     Text(src.path ?? src.shownPath).font(.system(size: 11, design: .monospaced)).foregroundStyle(.white.opacity(0.6))
                         .textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
                     Text(src.writableNote).font(.system(size: 11.5)).foregroundStyle(.white.opacity(0.7)).fixedSize(horizontal: false, vertical: true)
+                    // writable by the group (umask 002): allowed, but as loud as a takeover location
+                    if let w = src.riskWarning { RiskLine(title: w.title, text: w.text).padding(.top, 2) }
                     if request.changedSinceRequest {
                         Text(tr("Содержимое папки сменилось после заявки — в окне то, что будет установлено сейчас.", "The folder changed after the request — this window shows what will be installed now."))
                             .font(.system(size: 11.5, weight: .semibold)).foregroundStyle(hexColor(0xFFC56B)).fixedSize(horizontal: false, vertical: true)

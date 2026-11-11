@@ -1,6 +1,6 @@
 // Push: the service in a real core (the daemon inside the test process, AGENTHUB_HOME in a temporary directory).
 // No external programs run: ctx.exec writes calls to exec.log (AGENTHUB_TEST_EXEC_LOG).
-// Telegram is always off in test mode — even with telegram.enabled=true.
+// macOS banners are the only channel; keys of services.push the service doesn't know are ignored (push-config-ignored).
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -45,13 +45,13 @@ function sysAs(state) {
   };
 }
 
-test("plugin event → push.notify, no ack — osascript; Telegram is not touched in tests", async () => {
+test("plugin event → push.notify, no ack — osascript; an old channel key in config.json is ignored with one journal line", async () => {
   const plugins = tempHome("ah-pp-");
   writePlugin(plugins, "batch.1h.sh", PLUGIN(true));
   const h = await startHub({
     pluginsDir: plugins,
     services: "push",
-    overrides: { services: { push: { ackTimeoutMs: 100, telegram: { enabled: true } } } },
+    overrides: { services: { push: { ackTimeoutMs: 100, telegram: { enabled: true, keychainService: "agent-hub.telegram" } } } },
   });
   try {
     const osa = await waitFor(() => execLog(h.home).find((c) => c.file === "/usr/bin/osascript"));
@@ -67,7 +67,10 @@ test("plugin event → push.notify, no ack — osascript; Telegram is not touche
     assert.equal(notify.source, "service:push");
     assert.equal(notify.key, "batch:runner-crashed");
     const j = h.core.journal.tail(200);
-    assert.ok(j.some((e) => e.type === "push-start" && e.telegram === false));
+    const start = j.find((e) => e.type === "push-start");
+    assert.ok(start && !("telegram" in start));
+    // the removed channel's key from an older config.json: ignored, one line, no error
+    assert.deepEqual(j.filter((e) => e.type === "push-config-ignored").map((e) => e.keys), [["services.push.telegram"]], "one line, no error");
     assert.ok(j.some((e) => e.type === "push-sent" && e.channel === "mac" && e.key === "batch:runner-crashed"));
     // state — 0600
     const st = join(h.home, "push-state.json");
@@ -171,6 +174,27 @@ test("service: writing an own plugin bypassing the manager (plugins.own-unexpect
     await waitFor(() => _engine()?.entries.has("@hub:plugin-own-unexpected:evil"));
     await _engine().idle();
     assert.equal([..._engine().entries.keys()].filter((k) => k.includes("plugin-own-unexpected")).length, 1, "invalid id is dropped");
+  } finally {
+    await h.stop();
+  }
+});
+
+test("service: an own plugin updated from its folder (plugins.own-updated) — \"Plugin updated\" banner, kind updates; a rebuilt same version says so", async () => {
+  const h = await startHub({ services: "push", overrides: { services: { push: { ackTimeoutMs: 100 } } } });
+  try {
+    const { _engine } = await import("../lib/services/push.mjs");
+    h.core.emit({ type: "plugins.own-updated", plugin: "mine", from: "1.0.0", version: "1.1.0", files: ["mine.5m.sh"] });
+    h.core.emit({ type: "plugins.own-updated", plugin: "../bad", version: "1.0.0" });
+    const osa = await waitFor(() => execLog(h.home).find((c) => c.file === "/usr/bin/osascript" && /обновлён до/.test(bannerText(c))));
+    assert.equal(bannerText(osa), "Плагин обновлён: «mine» обновлён до 1.1.0");
+    assert.ok(h.core.recent.some((e) => e.type === "push.notify" && e.key === "@hub:plugin-own-updated:mine:1.1.0"), "through the shell first, like other update notifications");
+    // the same version rebuilt from the folder: announced again (no flapping window), and the text says the version stayed
+    h.core.emit({ type: "plugins.own-updated", plugin: "mine", from: "1.1.0", version: "1.1.0" });
+    const again = await waitFor(() => execLog(h.home).find((c) => c.file === "/usr/bin/osascript" && /из своей папки/.test(bannerText(c))));
+    assert.equal(bannerText(again), "Плагин обновлён: «mine» обновлён из своей папки (версия 1.1.0)");
+    await _engine().idle();
+    assert.equal([..._engine().entries.keys()].filter((k) => k.includes("plugin-own-updated")).length, 1, "invalid id is dropped");
+    assert.equal(h.core.journal.tail(200).filter((e) => e.type === "push-sent" && e.rule === "plugin-own-updated").length, 2);
   } finally {
     await h.stop();
   }

@@ -22,7 +22,7 @@ function fakeSecurity(dir) {
 
 test("denyReason: builtin — anything except reserved; installed — only its own namespace; local — nothing", () => {
   assert.equal(denyReason({ source: "builtin", id: "clickup" }, "clickup.token"), null);
-  assert.equal(denyReason({ source: "builtin", id: "x" }, "telegram.token"), "reserved");
+  assert.equal(denyReason({ source: "builtin", id: "x" }, "oauth.token"), "reserved");
   assert.equal(denyReason({ source: "installed", id: "clickup" }, "clickup.token"), null);
   assert.equal(denyReason({ source: "installed", id: "evil" }, "clickup.token"), "foreign-namespace");
   assert.equal(denyReason({ source: "local", id: "clickup" }, "clickup.token"), "untrusted");
@@ -40,15 +40,15 @@ test("plugin gets AGENTHUB_SECRET_* from the keychain; the value doesn't reach t
     "clickup.1h.sh",
     `#!/bin/sh\n# <agenthub.secrets>clickup.token — чтение тикетов</agenthub.secrets>\necho "len \${#AGENTHUB_SECRET_CLICKUP_TOKEN}"\n`,
   );
-  writePlugin(plugins, "other.1h.sh", `#!/bin/sh\n# <agenthub.secrets>telegram.token — чужое</agenthub.secrets>\necho "len \${#AGENTHUB_SECRET_TELEGRAM_TOKEN}"\n`);
+  writePlugin(plugins, "other.1h.sh", `#!/bin/sh\n# <agenthub.secrets>oauth.token — чужое</agenthub.secrets>\necho "len \${#AGENTHUB_SECRET_OAUTH_TOKEN}"\n`);
   const h = await startHub({ pluginsDir: plugins, services: "secrets", overrides: { services: { secrets: { securityPath: security } } } });
   try {
     const st = await waitFor(() => h.core.pluginState("clickup")?.header[0]?.title);
     assert.equal(st, `len ${SECRET.length}`);
-    assert.equal(await waitFor(() => h.core.pluginState("other")?.header[0]?.title), "len 0", "telegram is a hub service, not given to the plugin");
+    assert.equal(await waitFor(() => h.core.pluginState("other")?.header[0]?.title), "len 0", "oauth (connection logins) is a hub service, not given to the plugin");
     const calls = readFileSync(log, "utf8");
     assert.match(calls, /find-generic-password -s agent-hub\.clickup -a token -w/);
-    assert.doesNotMatch(calls, /telegram/);
+    assert.doesNotMatch(calls, /agent-hub\.oauth/);
     const journal = readFileSync(h.config.paths.journal, "utf8");
     assert.doesNotMatch(journal, new RegExp(SECRET));
     assert.match(journal, /"secret-denied"/);

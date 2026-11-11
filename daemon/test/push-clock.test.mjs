@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import { dayBucket, inWindow, localParts, makeClock, parseHM, validTimeZone } from "../lib/push/clock.mjs";
 import { buildRules, matchRule } from "../lib/push/rules.mjs";
 import { createPresence, parseHidIdle } from "../lib/push/idle.mjs";
-import { resolvePushConfig } from "../lib/push/config.mjs";
+import { ignoredKeys, resolvePushConfig } from "../lib/push/config.mjs";
 
 const ms = (iso) => Date.parse(iso);
 const Q = { quietStart: parseHM("23:00"), quietEnd: parseHM("08:00"), eveningAt: parseHM("21:00") };
@@ -64,14 +64,16 @@ test("night day: 01:30 Thursday is the same night as 21:00 Wednesday; across a m
   assert.equal(dayBucket(ms("2027-01-01T03:00:00Z"), tz, 480), "2026-12-31");
 });
 
-test("settings: invalid zone → system zone, invalid hours → defaults, Telegram off", () => {
-  const c = resolvePushConfig({ timezone: "Nope/Nope", quietStart: "25:00", idleThresholdMs: -5, telegram: { keychainService: "bad name!" } });
+test("settings: invalid zone → system zone, invalid hours → defaults; unknown keys are ignored and listed", () => {
+  const raw = { timezone: "Nope/Nope", quietStart: "25:00", idleThresholdMs: -5, chat: { enabled: true, keychainService: "x" }, enabled: true };
+  const c = resolvePushConfig(raw);
   assert.ok(validTimeZone(c.timezone));
   assert.equal(c.quietStart, 23 * 60);
   assert.equal(c.idleThresholdMs, 10 * 60_000);
-  assert.equal(c.telegram.enabled, false);
-  assert.equal(c.telegram.keychainService, "agent-hub.telegram");
-  assert.equal(resolvePushConfig({ telegram: { enabled: "yes" } }).telegram.enabled, false, "only true enables it");
+  assert.equal(c.chat, undefined, "a key the service doesn't know does not reach the settings");
+  assert.deepEqual(ignoredKeys(raw), ["chat"], "enabled and the known keys are not reported");
+  assert.deepEqual(ignoredKeys(null), []);
+  assert.deepEqual(ignoredKeys([1]), []);
 });
 
 test("event table: name, alias, instance suffix, longest match, override", () => {
@@ -81,7 +83,8 @@ test("event table: name, alias, instance suffix, longest match, override", () =>
   assert.equal(matchRule(rules, "session-waiting:1111-2222").name, "session-waiting");
   assert.equal(matchRule(rules, "quota-week-80").name, "quota-week");
   assert.equal(matchRule(rules, "session-waitingX").name, "default");
-  assert.equal(matchRule(rules, "my-event.a").macOnly, true);
+  assert.equal(matchRule(rules, "my-event.a").label, "Mine");
+  assert.equal(matchRule(rules, "my-event.a").macOnly, undefined, "macOnly is not a rule field any more");
   const qp = matchRule(rules, "pace-85:20261109");
   assert.equal(qp.quietException, true);
   assert.equal(qp.hold, undefined, "unknown hold value is dropped");

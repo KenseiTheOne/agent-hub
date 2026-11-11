@@ -6,16 +6,17 @@
 //
 // Only the core's generic rules live here (a waiting session, plugin failures, the hub's own events). Plugins — builtin ones
 // too (agents, claude-sessions, quota) — describe their events themselves with the tag
-// `<agenthub.push key=… hold=… quiet=… macOnly=… cooldown=… away=… kind=…>Label`
+// `<agenthub.push key=… hold=… quiet=… cooldown=… away=… kind=…>Label`
 // (lib/meta.mjs, parsePushRule); the push service takes these rules only from builtin, official and own plugins
 // (tier from the signed index) and puts them ahead of the table (pluginRules).
 //
 // Rule fields:
 //   label          — the event text (written by the hub or a trusted plugin, not shown for untrusted ones);
 //   hold           — "evening": during the day hold until the evening window (21:00), repeat once per "day";
-//   awayDelayMs    — macOS right away if the human is at the Mac; Telegram if they stepped away and the event has been up longer;
-//   quietException — goes to Telegram during quiet hours too;
-//   macOnly        — only a macOS notification, never Telegram;
+//   awayDelayMs    — a banner right away if the human is at the Mac; if they stepped away — once they are back or the event
+//                    has been up longer than this, whichever comes first;
+//   quietException — urgent: a banner right away during quiet hours too (otherwise, while the human is away, it waits
+//                    for the digest);
 //   cooldownMs     — a repeated raise of the same key within the window is not sent (flapping, "once a week");
 //                    null — the default from settings (flapCooldownMs);
 //   kind           — the notification kind for "Settings → Notifications" (KINDS, "plugin" — the plugin's own switch,
@@ -59,18 +60,18 @@ export const DEFAULT_RULES = Object.freeze([
   { name: "app-pin-path-changed", label: L("app-pin-path-changed"), quietException: true, cooldownMs: 0, bannerAlways: true, kind: "security" },
   // Hub event: the signed registry catalog has a new version of an installed plugin (lib/registry/updates.mjs).
   // The key is plugin-update:<id>:<version>; one notification per version is decided by the check itself (Registry/updates.json),
-  // so there is no flapping window. macOS only: an update is not urgent, it is not sent to Telegram.
-  { name: "plugin-update", label: L("plugin-update"), macOnly: true, cooldownMs: 0, kind: "updates" },
+  // so there is no flapping window. Not urgent: during quiet hours it waits for the digest.
+  { name: "plugin-update", label: L("plugin-update"), cooldownMs: 0, kind: "updates" },
   // Hub event: the app keeps crashing, the daemon's supervision (app service) used up the restart limit (3 per 10 min).
   // bannerAlways: there is no app — the banner goes right away through osascript, without waiting for /push/ack.
   { name: "app-restart-stopped", label: L("app-restart-stopped"), cooldownMs: 0, bannerAlways: true, kind: "security" },
   // Hub events: an update of the hub itself (hub-update service, docs/hub-updates.md). A new version is available — key
-  // hub-update:<version>, one notification per version is decided by the check (HubUpdate/check.json), macOS only.
-  { name: "hub-update", label: L("hub-update"), macOnly: true, cooldownMs: 0, kind: "updates" },
+  // hub-update:<version>, one notification per version is decided by the check (HubUpdate/check.json).
+  { name: "hub-update", label: L("hub-update"), cooldownMs: 0, kind: "updates" },
   // A new version is built, but the restart is waiting: there are PermissionRequest cards or waiting sessions (phase ready,
   // "Restart now (N waiting)") — key hub-update-ready:<label>, one notification per version is decided by the install
-  // (HubUpdate/check.json → readyNotified). macOS only: the restart is a button in the app.
-  { name: "hub-update-ready", label: L("hub-update-ready"), macOnly: true, cooldownMs: 0, kind: "updates" },
+  // (HubUpdate/check.json → readyNotified). The restart is a button in the app.
+  { name: "hub-update-ready", label: L("hub-update-ready"), cooldownMs: 0, kind: "updates" },
   // Installed (or rolled back) and confirmed by the new app — key hub-update-installed:<label>.
   { name: "hub-update-installed", label: L("hub-update-installed"), cooldownMs: 0, kind: "updates" },
   // Failed (build, check, trial run) — right away, during quiet hours too; a banner bypassing the shell: there may be
@@ -87,14 +88,19 @@ export const DEFAULT_RULES = Object.freeze([
   // the plugin runs as community, the app shows a request for re-approval. Key —
   // plugin-own-unexpected:<id>. Like a pin change: right away, during quiet hours, a banner bypassing the shell.
   { name: "plugin-own-unexpected", label: L("plugin-own-unexpected"), quietException: true, cooldownMs: 0, bannerAlways: true, kind: "security" },
+  // Hub event: an own plugin was updated from its folder automatically (content changed, permissions the same — no consent
+  // window; plugins.own-updated from the manager). Key — plugin-own-updated:<id>:<version>; every such update is announced
+  // (no flapping window: the same version may be rebuilt), switched off together with the other updates ("updates").
+  { name: "plugin-own-updated", label: L("plugin-own-updated"), cooldownMs: 0, kind: "updates" },
 ]);
 
+// macOnly (a plugin tag and services.push.rules field from when the hub had a second channel) is not a field any more:
+// macOS banners are the only channel, so it is accepted and ignored.
 const FIELDS = {
   label: "string",
   hold: "string",
   awayDelayMs: "number",
   quietException: "boolean",
-  macOnly: "boolean",
   cooldownMs: "number",
 };
 

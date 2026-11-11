@@ -50,8 +50,9 @@ hour, at the top end no longer than 90 days; delays longer than the `setTimeout`
 | `Registry/quarantine/<id>-…` | whatever ended up in `Plugins/` bypassing the manager (not in lock, files changed, not a folder) |
 | `Registry/archives/<id>.tar.gz` | the archive of the installed version: the policy uses it to verify that the files on disk are exactly the archive with the sha256 from the index |
 | `Registry/attest/<id>.json(.minisig)` | the signed index in which the installed official version was the latest: saved when a new catalog supersedes it, so the plugin stays official until it is updated; removed on update and removal |
+| `Registry/tiers.json` (0600) | `{version:1, lowered:{<id>:{version, sha256, reason, at}}}` — installed official plugins the current catalog no longer calls official: `plugin-tier-lowered` is journaled once, not on every check or restart |
 | `Registry/staging`, `Registry/trash` | temporary files during install/removal, cleaned up at startup |
-| `Registry/own-approvals.json` (0600) | consents to own plugins: `{version:1, plugins:{<id>:{digest}}}` — a fingerprint of the lock entry (path, content fingerprint, files, permissions) that the manager itself wrote after the window or by a silent update; the daemon takes only revocations from the file (below, "The `own` tier") |
+| `Registry/own-approvals.json` (0600) | consents to own plugins: `{version:1, plugins:{<id>:{digest}}}` — a fingerprint of the lock entry (path, content fingerprint, files, permissions) that the manager itself wrote after the window or by an automatic update from the same folder; the daemon takes only revocations from the file (below, "The `own` tier") |
 | `Registry/own-requests.json` (0600) | own-plugin requests waiting for confirmation (no bytes): they survive daemon restarts |
 
 ## HTTP
@@ -114,7 +115,19 @@ runs.
   own (no manager consent, see "The `own` tier" below); demoting an id in a new index removes the installed copy's
   actions and push rules after the catalog loads, and the attestation of the old version does not restore official
   status (the manager asks the core to re-evaluate the policy). A catalog on disk newer than the daemon's memory
-  (installed from a terminal) is re-read during the check. The core allows `<agenthub.action>` only for `official` (and
+  (installed from a terminal) is re-read during the check.
+  **"Official" is only what the signed catalog lists right now** (decision 2026-11-11): an installed official plugin
+  whose id a newer verified index no longer lists at all (or lists as `community` — the owner removed it from
+  `official.json`) is `community` from the next policy check on — effects ceiling, actions, its own push rules, service
+  variables and consent rules all as for community. The UI just shows the tier it has now (no "removed from the
+  catalog" label). The journal gets `plugin-tier-lowered {plugin, version, from: "official", to: "community", reason:
+  "not-in-catalog"|"community"|"archive", generatedAt}` once per installed copy, and `plugin-tier-restored` once if a
+  later catalog lists it as official again; `Registry/tiers.json` remembers lowered ids across restarts (cleared on
+  reinstall and removal). Only a verified catalog moves the tier: a failed download, a bad signature or a rollback keeps
+  the last verified catalog (`registry-rejected`), and a catalog pair on disk that does not verify (another process is
+  halfway through writing it, or a damaged file) does not replace the verified one already in memory
+  (`registry-cache-rejected`). A daemon that starts without any verified catalog treats registry plugins as community
+  and journals nothing until it has one. The core allows `<agenthub.action>` only for `official` (and
   built-in) plugins; for an official plugin without declared network access and without a declared price the action is
   as declared, including `immediate` (no window, from the app only; 2026-11-09); with network access or `cost=` (in any
   language, `cost-en=` too) — at least `confirm-cost` (linter: `immediate` with network or `cost=` is an error). Plugin
@@ -184,9 +197,15 @@ as in CI) or more than 1000 entries is an error, not a truncated list; an unread
 no "checked — then read" race: `O_NOFOLLOW|O_NONBLOCK`, `fstat` of the descriptor — a regular file with the same inode as
 during the walk, within the limit; a file swapped for a link or a FIFO gives "the file changed during the check", and a
 directory is re-checked with `lstat`. The path is the `realpath` (a link to the folder is resolved at request time; lock
-holds the real path). Only the owner — you — may write to the folder and its files: a foreign owner, group or world
-write permission, a macOS ACL granting write to anyone but you (`chmod +a "everyone allow write"` with mode 644; read via
-`/bin/ls -le`), a parent directory that is world-writable without the sticky bit — all are errors. The check does not
+holds the real path). Only the owner — you — should write to the folder and its files: a foreign owner, world write
+permission, a macOS ACL granting write to anyone but you (`chmod +a "everyone allow write"` with mode 644; read via
+`/bin/ls -le`), a parent directory that is world-writable without the sticky bit — all are errors. **Group write**
+(umask 002; on a Mac the user's group is usually `staff`, i.e. every local account) is allowed with a loud warning
+(decision 2026-11-11): `writable.group` lists such paths, the request and the consent window carry `risk:
+"group-writable"`, the CLI prints `!!! WARNING: …` under "Request created", the app shows a red line in the consent
+window (the same `WRITE_RISK_TEXT` mechanism as for takeover locations), and the journal gets `risk` in
+`plugin-own-requested` plus a separate `plugin-own-risk {plugin, version, risk, path, files, auto}` on every install
+from such a folder, automatic updates included. The fix is `chmod -R g-w <folder>`. The check does not
 protect against processes **running as your own user** (including agents working in that repository): their edit with
 the same set of permissions will be installed by itself (below, "Updates"); the consent window says so. A failed check
 means no request (`422 own:lint` with `errors`, listed in the CLI). A plugin in the folder that requires a newer
@@ -227,8 +246,11 @@ their appearance is a permission increase.
 check once a minute — `services.plugins.ownCheck {checkMs, debounceMs}`). The content changed, **the set of permissions
 is exactly the same** (`permissionsFingerprint`, including `push` permissions), the version is not older than the
 installed one, the check passed — the new copy is installed **by itself** (user decision: "install it yourself"):
-journal `plugin-own-updated` with the list of changed files (`files`), a quiet `plugins.own-updated` event, no
-notification (while the hub is paused — `paused`, until the pause is lifted). The daemon process installs it, while any
+journal `plugin-own-updated` with the list of changed files (`files`), the `plugins.own-updated` event and a banner
+"Plugin updated — "<title>" updated to <version>" (or "updated from its folder (version …)" when the version stayed;
+decision 2026-11-11: no window, but you always hear about it; kind `updates`, so the "Hub and plugin updates" switch
+turns it off, and during quiet hours while you are away it waits for the digest) (while the hub is paused — `paused`,
+until the pause is lifted). The daemon process installs it, while any
 user process can write to the folder — including a Claude Code session in that repository; this is the price of the
 decision (the consent window says so). Permissions grew — the `update` state: in `pluginUpdates` (`tier: "own"`,
 `notifyKey` — one "Update available" notification per new content), in the manager "Update · new permissions" →
@@ -286,7 +308,7 @@ directory (up to 60 s) and re-reads the updated catalog from disk itself when ch
 `plugin-installed-terminal`, `plugin-consent-declined`.
 
 Own-source journal: `plugin-own-requested`, `plugin-own-rejected`, `plugin-own-declined`, `plugin-own-updated`,
-`plugin-own-source`, `plugin-own-unexpected`; bus: `plugins.own-request`, `plugins.own`, `plugins.own-updated`,
+`plugin-own-source`, `plugin-own-unexpected`, `plugin-own-risk` (installed from a group-writable folder); bus: `plugins.own-request`, `plugins.own`, `plugins.own-updated`,
 `plugins.own-unexpected`.
 
 Journal: `registry-fetched`, `registry-rejected`, `registry-cache-rejected`, `plugin-consent-requested`,

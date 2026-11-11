@@ -304,6 +304,54 @@ test("CLI: agenthub plugins install --from <repo> — a request and a hint about
   }
 });
 
+test("a folder writable by the group (umask 002) — accepted with a loud risk line: request, CLI output, consent sheet, journal; writable by everyone — refused", async () => {
+  // writableInfo by mode bits: group write (0o020) is a risk, world write (0o002) is an error
+  const { repo, dir, main } = makeRepo();
+  const h = await hub();
+  try {
+    chmodSync(dir, 0o775);
+    chmodSync(join(dir, "README.md"), 0o664);
+    const src = inspectSource(dir);
+    assert.deepEqual(src.errors, [], "group write alone is not an error");
+    assert.deepEqual(src.writable.group, [".", "README.md"]);
+    assert.deepEqual(src.writable.others, []);
+    // request from the CLI: accepted, marked; the journal gets the risk
+    h.asCli();
+    const r = await h.call("POST", "/registry/own/request", { path: repo });
+    assert.equal(r.status, 200, JSON.stringify(r.body));
+    assert.equal(r.body.risk, "group-writable");
+    assert.ok(journal(h).some((e) => e.type === "plugin-own-requested" && e.plugin === "mine" && e.risk === "group-writable"));
+    // the CLI prints the loud line (bin/agenthub pluginsFrom → cli.own.risk with the WRITE_RISK_TEXT text)
+    const { writeRiskText } = await import("../lib/registry/perms.mjs");
+    const { t } = await import("../lib/i18n.mjs");
+    assert.match(t("en", "cli.own.risk", { text: writeRiskText("group-writable", "en") }), /^!!! WARNING: the plugin folder can be changed not only by you but by your group too \(umask 002/);
+    assert.match(t("ru", "cli.own.risk", { text: writeRiskText("group-writable", "ru") }), /^!!! ВНИМАНИЕ: папку плагина могут менять не только вы/);
+    // the consent sheet: the same risk, the files the group can write; install goes through
+    const { consent, result } = await approve(h, r.body.requestId);
+    assert.equal(consent.source.risk, "group-writable");
+    assert.deepEqual(consent.source.writable.group, [".", "README.md"]);
+    assert.equal(consent.source.writable.mine, true);
+    assert.equal(result.ok, true);
+    assert.equal(h.mgr.lockEntry("mine").tier, "own");
+    const risk = journal(h).find((e) => e.type === "plugin-own-risk" && e.plugin === "mine");
+    assert.ok(risk, "a separate journal line on install");
+    assert.deepEqual([risk.risk, risk.path, risk.files, risk.auto], ["group-writable", dir, [".", "README.md"], false]);
+    // an automatic update from the same folder (same permissions) is journaled with the risk too
+    const fp1 = h.mgr.lockEntry("mine").sha256;
+    writeFileSync(main, pluginText({ line: "Mine v2" }));
+    await waitFor(() => h.mgr.lockEntry("mine").sha256 !== fp1, { timeoutMs: 8000 });
+    assert.ok(journal(h).some((e) => e.type === "plugin-own-risk" && e.plugin === "mine" && e.auto === true));
+    // world-writable stays a refusal
+    chmodSync(join(dir, "README.md"), 0o666);
+    const w = inspectSource(dir);
+    assert.deepEqual(w.writable.others, ["README.md"]);
+    assert.match(w.errors.join("\n"), /писать сюда могут не только вы \(права для всех\): README\.md/);
+  } finally {
+    await h.stop();
+    cleanup(repo);
+  }
+});
+
 test("same lint as the registry: forbidden place, no README, a link inside, a folder writable by everyone — no request", async () => {
   const h = await hub();
   const cases = [];

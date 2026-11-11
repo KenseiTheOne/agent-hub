@@ -298,10 +298,9 @@ export class Core {
   // quiet.from — where quiet hours come from: settings | config (services.push.quietStart/quietEnd, as before 2026-11-09) | default.
   // security — security exceptions that cannot be turned off: core events and trusted plugins' rules with
   // kind="security" (metadata only: key, plugin, label in the hub language). service — the push service is running
-  // (services.push.enabled = false in config.json — nothing goes out except journal entries); telegram — whether
-  // Telegram is enabled in config.json (never in test mode). quiet.timezone — the zone in which the engine computes quiet hours
-  // (services.push.timezone or the system one: the push service checks the system zone on each tick); awayAfterMs — idle threshold
-  // after which a notification goes to Telegram (idleThresholdMs).
+  // (services.push.enabled = false in config.json — nothing goes out except journal entries). quiet.timezone — the zone in
+  // which the engine computes quiet hours (services.push.timezone or the system one: the push service checks the system zone on
+  // each tick); awayAfterMs — idle threshold after which the human counts as away from the Mac (idleThresholdMs).
   notificationsSetting() {
     const prefs = this.settings.notifications;
     const pushCfg = this.config.services?.push;
@@ -335,7 +334,6 @@ export class Core {
       awayAfterMs: resolved.idleThresholdMs,
       security,
       service: pushCfg?.enabled !== false,
-      telegram: pushCfg?.telegram?.enabled === true && !this.config.testMode,
     };
   }
   // Migrating contract 1 settings (lib/push/prefs.mjs): a plugin declared an old kind (LEGACY_KINDS) that a human

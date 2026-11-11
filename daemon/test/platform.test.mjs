@@ -8,8 +8,8 @@ import { join, relative } from "node:path";
 import { DAEMON_DIR } from "../lib/config.mjs";
 import { interpreterFor, openCommand, stateDir, terminateCommand, transportPath, transportProblem, treeSpawnOptions, usesFileModes } from "../lib/platform.mjs";
 
-// Modules that are inherently macOS-only (launchd, notifications, keychain, codesign/peercred, Telegram
-// via curl, .app build), plus the platform layer itself. The core (server, host, runner, generic primitives) is not.
+// Modules that are inherently macOS-only (launchd, notifications, keychain, codesign/peercred, .app build), plus the
+// platform layer itself. The core (server, host, runner, generic primitives) is not.
 const MAC_ONLY = new Set([
   "lib/platform.mjs",
   "lib/launchd.mjs",
@@ -19,8 +19,6 @@ const MAC_ONLY = new Set([
   "lib/meta.mjs", // binary xattrs, the fallback path without the addon
   "lib/push/idle.mjs",
   "lib/push/macos.mjs",
-  "lib/push/send-test.mjs",
-  "lib/push/telegram.mjs",
   "lib/services/secrets.mjs",
   "lib/services/usage.mjs", // macOS keychain (/usr/bin/security) on darwin only; otherwise .credentials.json
   "lib/services/actions.mjs",

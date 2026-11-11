@@ -12,9 +12,12 @@
 // the human agrees to; it's also the sha256 in plugins.lock.
 //
 // The path is a realpath: a symlink to the folder is resolved at request time, and the real path goes into plugins.lock; there are no symlinks inside
-// the folder at all (neither outward nor inward). Only the owner — the current user — may write to the folder and its files:
-// group- or world-writable, a foreign owner or a world-writable directory above the folder (without
-// sticky) — refused: the hub installs changes without new permissions itself, and a foreign writer would gain the own plugin's trust.
+// the folder at all (neither outward nor inward). Only the owner — the current user — should write to the folder and its files:
+// world-writable, a foreign owner or a world-writable directory above the folder (without sticky) — refused: the hub installs
+// changes without new permissions itself, and a foreign writer would gain the own plugin's trust. Group-writable (umask 002 —
+// on macOS the user's group is usually staff, i.e. every local account) is allowed with a loud warning (decision 2026-11-11):
+// writable.group lists such paths, the consent window and the CLI show the "group-writable" risk line (WRITE_RISK_TEXT),
+// the journal records it.
 // On macOS ACLs also grant permissions (`chmod +a "everyone allow write"` with mode 644): ACL write access for anyone but you —
 // also refused (writableInfo reads them via /bin/ls -le). Processes running as your own user (including agents in
 // this repository) can always write to the folder — the folder check doesn't protect against them.
@@ -144,7 +147,7 @@ const MSG = {
   tooMany: (p) => [`файлов больше ${p.n}`, `more than ${p.n} files`],
   tooManyEntries: (p) => [`в папке больше ${p.n} записей — проверка прервана`, `the folder has more than ${p.n} entries — check stopped`],
   notMine: () => ["папку или её файлы может менять другой пользователь (владелец — не вы)", "another user can change the folder or its files (you're not the owner)"],
-  others: (p) => [`писать сюда могут не только вы (права группы или всех): ${p.list}`, `not only you can write here (group or everyone permissions): ${p.list}`],
+  others: (p) => [`писать сюда могут не только вы (права для всех): ${p.list}`, `not only you can write here (everyone permissions): ${p.list}`],
   acl: (p) => [`писать сюда могут не только вы (ACL): ${p.list}`, `not only you can write here (ACL): ${p.list}`],
   parentOpen: (p) => [`каталог над папкой открыт на запись всем: ${p.dir}`, `the folder above is world-writable: ${p.dir}`],
   noReadme: () => ["нет README.md", "no README.md"],
@@ -278,16 +281,19 @@ function currentUser() {
   }
 }
 
-// Who can write to the source folder. → { mine, others: [paths], parentOpen, acl: [paths] } — others: what's writable by
-// group or world by mode bits; acl — where an ACL grants write to someone other than you (macOS). Without a uid (Windows: permission bits
-// mean something else there) — not checked.
+// Who can write to the source folder. → { mine, others: [paths], group: [paths], parentOpen, acl: [paths] } — others: what's
+// writable by everyone by mode bits (refused); group: writable by the group but not by everyone (allowed with a warning);
+// acl — where an ACL grants write to someone other than you (macOS). Without a uid (Windows: permission bits mean something
+// else there) — not checked.
 export function writableInfo(dir, entries, uid = myUid() ?? -1, { acl = aclWriters } = {}) {
   const others = [];
-  if (uid < 0) return { mine: true, others, parentOpen: false, acl: [] };
+  const group = [];
+  if (uid < 0) return { mine: true, others, group, parentOpen: false, acl: [] };
   let mine = true;
   const note = (rel, st) => {
     if (uid >= 0 && st.uid !== uid) mine = false;
-    if (st.mode & 0o022) others.push(rel);
+    if (st.mode & 0o002) others.push(rel);
+    else if (st.mode & 0o020) group.push(rel);
   };
   note(".", statSync(dir));
   for (const e of entries) if (!e.symlink) note(e.rel, e.st);
@@ -297,7 +303,7 @@ export function writableInfo(dir, entries, uid = myUid() ?? -1, { acl = aclWrite
     parentOpen = Boolean(ps.mode & 0o002) && !(ps.mode & 0o1000);
   } catch {}
   const viaAcl = acl ? acl(dir) : [];
-  return { mine, others: others.slice(0, 10), parentOpen, acl: (viaAcl || []).slice(0, 10) };
+  return { mine, others: others.slice(0, 10), group: group.slice(0, 10), parentOpen, acl: (viaAcl || []).slice(0, 10) };
 }
 
 // Full check of a source folder. Path errors — OwnSourceError; content errors — in errors (like the CI linter).
