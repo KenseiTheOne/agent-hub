@@ -21,8 +21,12 @@ import { PARSE_MESSAGES, setParseLangSource } from "./messages/parse.mjs";
 
 export const LANGS = ["ru", "en"];
 
+// The hub UI language: ru | en. Anything else falls back to en — the same product decision as the "system" setting
+// (lib/settings.mjs detectSystemLang: a non-Russian system gets en) and as a process without a language source
+// (currentLang). The effective language itself is always ru | en, so ru/en users see no change; this only decides what
+// an unexpected value (a third-language code, a missing argument) renders in.
 export function normLang(v) {
-  return LANGS.includes(v) ? v : "ru";
+  return LANGS.includes(v) ? v : "en";
 }
 
 // ---------- core messages ----------
@@ -263,16 +267,105 @@ export function has(key) {
   return key in MESSAGES.ru;
 }
 
-// Translation from plugin metadata: { base, i18n: { en: {...} } } → the value in language lang, or the base one.
+// ---------- plugin content languages (G14) ----------
+// The hub UI speaks ru | en only (LANGS); a third UI language is out of scope. Plugin CONTENT (metadata translations:
+// <agenthub.title lang="de">, title-de=…, status labels, connection names, catalog titles) may be in any language, tagged
+// with a BCP-47 tag (primary subtag 2–3 letters, optional script/region/variant subtags: de, pt-BR, zh-Hant, sr-Latn-RS).
+// The translation is picked by a chain (contentLang):
+//   1. the hub UI language (ru | en), if the plugin has it;
+//   2. the system preferred languages (Settings.systemLocales: macOS AppleLanguages, in order), up to the first one that is
+//      a hub UI language — that one is decided by step 1 (the plugin's base text is assumed to be in it), so existing ru/en
+//      users see exactly what they saw before (a ru hub never switches a ru-base plugin to its en variant);
+//   3. the base text (the tag without lang).
+// Matching a candidate tag: exact (case-insensitive), then the bare primary language, then any variant with the same primary
+// language (system de-AT finds a plugin's "de" or "de-DE"). Plugins also get the system list in AGENTHUB_LOCALE
+// (lib/runner.mjs buildEnv) to localize their own output the same way.
+const TAG_RE = /^([A-Za-z]{2,3})((?:[-_][A-Za-z0-9]{1,8})*)$/;
+
+// A BCP-47 language tag in canonical case (de, pt-BR, zh-Hant, sr-Latn-RS), or null if malformed. "_" is accepted for "-"
+// (macOS and POSIX spell en_US).
+export function normTag(v) {
+  const m = TAG_RE.exec(String(v ?? "").trim());
+  if (!m || String(v).length > 35) return null;
+  const subs = m[2] ? m[2].slice(1).split(/[-_]/) : [];
+  const out = [m[1].toLowerCase()];
+  for (const s of subs) {
+    if (!/^[A-Za-z0-9]{1,8}$/.test(s)) return null;
+    if (/^[A-Za-z]{4}$/.test(s)) out.push(s[0].toUpperCase() + s.slice(1).toLowerCase());
+    else if (/^(?:[A-Za-z]{2}|\d{3})$/.test(s)) out.push(s.toUpperCase());
+    else out.push(s.toLowerCase());
+  }
+  return out.join("-");
+}
+const primaryOf = (tag) => String(tag).split("-")[0].toLowerCase();
+
+// A system language list (array or "de-DE,en-US") → canonical tags, no duplicates, at most 8.
+export function normLocales(v) {
+  const list = Array.isArray(v) ? v : String(v ?? "").split(",");
+  const out = [];
+  for (const x of list) {
+    const t = normTag(x);
+    if (t && !out.includes(t)) out.push(t);
+    if (out.length >= 8) break;
+  }
+  return out;
+}
+
+// Candidate content languages for a hub language and a system list (see the chain above).
+export function langCandidates(lang, locales = []) {
+  const ui = normLang(lang);
+  const out = [ui];
+  for (const t of normLocales(locales)) {
+    if (LANGS.includes(primaryOf(t))) break;
+    out.push(t);
+  }
+  return out;
+}
+
+function matchKey(keys, cand) {
+  const c = cand.toLowerCase();
+  const p = primaryOf(cand);
+  return keys.find((k) => k.toLowerCase() === c) || keys.find((k) => k.toLowerCase() === p) || keys.find((k) => primaryOf(k) === p) || null;
+}
+
+// The key of i18n ({ <tag>: {...} }) to show for hub language lang, or null — the base text. field — only variants that
+// translate this field count (a "de" variant without a title doesn't hide a title further down the chain).
+export function contentLang(i18n, lang, { field = null, locales = currentLocales() } = {}) {
+  if (!i18n || typeof i18n !== "object") return null;
+  const keys = Object.keys(i18n).filter((k) => {
+    const v = i18n[k];
+    if (!v || typeof v !== "object") return false;
+    if (!field) return true;
+    const f = v[field];
+    return typeof f === "string" ? f !== "" : Boolean(f && typeof f === "object" && Object.keys(f).length);
+  });
+  if (!keys.length) return null;
+  for (const cand of langCandidates(lang, locales)) {
+    const k = matchKey(keys, cand);
+    if (k) return k;
+  }
+  return null;
+}
+
+// The variant object of i18n for hub language lang ({} — none; then the base text is shown).
+export function contentOf(i18n, lang, opts = {}) {
+  const k = contentLang(i18n, lang, opts);
+  return k ? i18n[k] : {};
+}
+
+// Translation from plugin metadata: { base, i18n: { en: {...}, de: {...} } } → the value of field by the chain above, or
+// the base one.
 export function pickLang(base, i18n, field, lang) {
-  const v = i18n?.[normLang(lang)]?.[field];
+  const k = contentLang(i18n, lang, { field });
+  const v = k ? i18n[k][field] : null;
   return typeof v === "string" && v ? v : base;
 }
 
 // ---------- the current process language ----------
 let langSource = null;
 
-// fn() → "ru" | "en"; null — back to the default (AGENTHUB_LANG or English).
+// fn() → "ru" | "en"; null — back to the default (AGENTHUB_LANG or English). fn.locales() (optional) → the system
+// preferred languages for plugin content (currentLocales; the daemon's core: Settings.systemLocales).
 export function setLangSource(fn) {
   langSource = typeof fn === "function" ? fn : null;
   // the parser/linter texts live in a self-contained module (lib/messages/parse.mjs): same language
@@ -293,6 +386,17 @@ export function currentLang() {
   }
   const env = process.env.AGENTHUB_LANG;
   return LANGS.includes(env) ? env : "en";
+}
+
+// The system preferred languages of the current process (plugin content, contentLang): the registered source's
+// locales(), otherwise AGENTHUB_LOCALE (a plugin process, the CLI), otherwise none (only the hub language counts).
+export function currentLocales() {
+  if (typeof langSource?.locales === "function") {
+    try {
+      return normLocales(langSource.locales());
+    } catch {}
+  }
+  return normLocales(process.env.AGENTHUB_LOCALE || "");
 }
 
 // A message in the current process language (see the header).

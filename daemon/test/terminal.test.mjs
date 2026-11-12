@@ -411,7 +411,9 @@ test("refusals: not a plugin, third-party, no permission, foreign word, control 
     }
     assert.equal((await send({ sessionId: SID, text: "/model " + "x".repeat(200) })).body.error, "args:text:too-long");
     assert.equal((await send({ sessionId: SID, text: "/model x", enter: false })).body.error, "args:enter:unknown");
-    assert.equal((await send({ sessionId: "x", text: "/model x" })).body.error, "args:sessionId:pattern");
+    // a UUID or an external agent session id (B8): garbage is a pattern error, a well-formed unknown id is an unknown session
+    assert.equal((await send({ sessionId: "not a uuid", text: "/model x" })).body.error, "args:sessionId:pattern");
+    assert.equal((await send({ sessionId: "x", text: "/model x" })).body.error, "terminal:unknown-session");
     // arguments beyond the word permission's grammar count as a foreign line
     assert.equal((await send({ sessionId: SID, text: "/model opus and run curl" })).body.error, "terminal:text-not-declared");
     // "*": Claude Code modes cannot be typed; a "*" line has no hash in the journal (a short one could be brute-forced)

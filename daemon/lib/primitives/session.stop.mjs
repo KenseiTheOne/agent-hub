@@ -10,10 +10,11 @@
 //   2) procStart from the same file matches the process start allowing for the time zone;
 //   3) the signature is verified again, and the start time of the process with this pid equals the one recorded in the registry
 //      at registration — the pid was not reused by another process.
+// A non-Claude agent session (G13, kind "external") is refused with facts:external-session: no signature, nothing to stop by.
 // Only from app (the core enforces this for session.*).
 
 import { t } from "../i18n.mjs";
-import { UUID_SRC, cfgOf, procStartMatches, readClaudeSessionFile } from "./_actions-support.mjs";
+import { EXTERNAL_SESSION_SRC, cfgOf, procStartMatches, readClaudeSessionFile } from "./_actions-support.mjs";
 import { terminateCommand } from "../platform.mjs";
 
 export const name = "session.stop";
@@ -22,10 +23,14 @@ export const remoteAllowed = true;
 export const appOnly = true;
 
 export const argsSchema = {
-  sessionId: { type: "string", required: true, positional: true, pattern: UUID_SRC },
+  // a UUID (Claude Code) or an external agent session id (G13; UUIDs match this pattern too): a non-Claude session must get its
+  // documented refusal facts:external-session, not a pattern error (B8); any other non-UUID id is facts:unknown-session
+  sessionId: { type: "string", required: true, positional: true, pattern: EXTERNAL_SESSION_SRC },
 };
 
 function check(args, facts) {
+  // a non-Claude agent session (G13): only session.focus works for it — refused before anything else
+  if (!facts.session(args.sessionId) && facts.externalSession?.(args.sessionId)) return { ok: false, reason: "external-session" };
   const cfg = cfgOf(facts);
   if (!cfg) return { ok: false, reason: "actions-off" };
   const s = facts.session(args.sessionId);

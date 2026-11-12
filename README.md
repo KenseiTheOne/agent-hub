@@ -11,8 +11,9 @@ without Xcode.
 
 ![Panel](docs/screenshots/panel-overview.png)
 
-*Screenshots from a test hub with demo data: synthetic sessions and answer cards, a synthetic workflow run and quota,
-and three demo local plugins (Build status, Pomodoro, Weather).*
+*Screenshots from a test hub with demo data: synthetic sessions and answer cards, a synthetic workflow run and quota
+read by the built-in `agents` and `quota` plugins, and three throwaway local plugins written for the screenshots
+(Build, Pomodoro, Weather — they are not part of the repository; the built-in plugins are in [`plugins/`](plugins)).*
 
 ## Features
 
@@ -22,7 +23,8 @@ and three demo local plugins (Build status, Pomodoro, Weather).*
   push notifications, answers to sessions (hook), actions and the cmux bridge, the plugin manager, secrets from the
   Keychain, the Claude quota, OAuth connections, hub auto-update.
 - **Built-in plugins** that ship with the app: Claude Code sessions (`claude-sessions`), background workflow runs
-  (`agents`) and the subscription quota (`quota`).
+  (`agents`), the subscription quota (`quota`) and a token spend journal with its API list price equivalent
+  (`spend`).
 - **Plugins** — official ones from a signed registry, community ones, and your own from a local folder. A plugin's tier
   (`builtin | official | own | community | local`) comes from where it was installed, the signed registry index and
   your consent, never from the plugin's own metadata. Plugins can declare their own actions, notification rules,
@@ -32,7 +34,8 @@ and three demo local plugins (Build status, Pomodoro, Weather).*
   - panel: sessions with "go to tab / interrupt / stop", answer cards for permission requests and questions
     (allow once / deny, options, multi-select, "Other"), a session launch form, the plugin manager with a
     permissions window, the journal, settings;
-  - native notifications with an "Open" button; confirmations in `NSAlert` with text written by the core;
+  - native notifications: a click opens the plugin's link or its page, and a plugin may put up to two of its buttons
+    on the banner; confirmations with text written by the core;
   - English and Russian (System / English / Русский).
 - **cmux bridge** (`bridge/`), **hook** (`hook/agenthub-hook`) and a **Claude Code plugin** (`claude-plugin/`) to
   answer sessions from the hub.
@@ -159,10 +162,10 @@ contract in [`docs/extension-points.md`](docs/extension-points.md); registry, co
 | Directory | What |
 |---|---|
 | `daemon/` | the `agenthubd` daemon and the `agenthub` CLI (Node ESM, no dependencies) |
-| `daemon/lib/primitives/`, `routes/`, `services/` | extension points (auto-loaded) — [`docs/extension-points.md`](docs/extension-points.md) |
+| `daemon/lib/primitives/`, `routes/`, `services/`, `terminals/` | extension points (auto-loaded); on one Mac the same modules can live in `<state dir>/Extensions/`, loaded after a human approves each file — [`docs/extension-points.md`](docs/extension-points.md) |
 | `daemon/lib/push/`, `hook/`, `registry/` | push ([`push/README.md`](daemon/lib/push/README.md)), answer cards, minisign / tar / permissions linter shared with the registry |
 | `daemon/native/peercred/` | an N-API addon: pid, path and ancestors of the socket peer |
-| `plugins/` | built-in plugins (claude-sessions, agents, quota): `<id>/<id>.<interval>.mjs`, README, fixtures |
+| `plugins/` | built-in plugins (claude-sessions, agents, quota, spend): `<id>/<id>.<interval>.mjs`, README, fixtures |
 | `app/` | the SwiftUI shell (SwiftPM, macOS 26) — [`app/README.md`](app/README.md) |
 | `bridge/` | the cmux bridge — [`bridge/README.md`](bridge/README.md) |
 | `hook/` | `agenthub-hook` — [`docs/hook.md`](docs/hook.md) |

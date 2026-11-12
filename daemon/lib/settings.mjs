@@ -9,41 +9,74 @@
 // the language there would look like an edit of the app requirement.
 //
 // Plugins get the effective language in AGENTHUB_LANG=ru|en (lib/runner.mjs buildEnv) and are restarted when it changes.
-// A plugin without a translation is shown as is.
+// A plugin without a translation is shown as is. The hub UI has two languages only; plugin content may be in any language:
+// the system preferred languages (systemLocales) go to plugins in AGENTHUB_LOCALE and pick plugin metadata translations
+// (lib/i18n.mjs contentLang). A non-Russian system gets the en UI (product decision, detectSystemLang).
 
 import { execFileSync } from "node:child_process";
 import { existsSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { readJsonFile, systemLangOverride } from "./config.mjs";
 import { systemLanguagesCommand } from "./platform.mjs";
-import { normLang } from "./i18n.mjs";
+import { normLang, normLocales } from "./i18n.mjs";
 import { normPrefs, prefsFromFile, prefsToFile } from "./push/prefs.mjs";
 
 export const LANG_SETTINGS = ["system", "ru", "en"];
 const SYSTEM_TTL_MS = 60_000;
 
+// The raw OS language list (macOS: `defaults read -g AppleLanguages`, a synchronous call ≤ 2 s). → text | "" (none, failed)
+export function readSystemLanguages({ platform = process.platform } = {}) {
+  const cmd = systemLanguagesCommand({ platform });
+  if (!cmd) return "";
+  try {
+    return execFileSync(cmd[0], cmd.slice(1), { encoding: "utf8", timeout: 2000, stdio: ["ignore", "pipe", "ignore"] });
+  } catch {
+    return "";
+  }
+}
+
+const intlLocale = () => {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().locale || "";
+  } catch {
+    return "";
+  }
+};
+
+// Both answers from one OS read (review 2026-11-12: the daemon used to run the command twice a minute). text — the output of
+// readSystemLanguages; env — AGENTHUB_SYSTEM_LOCALES overrides the list. → { lang: "ru" | "en", locales: [...] }
+export function systemLanguagesFrom(text, { env = process.env } = {}) {
+  const first = (/([A-Za-z]{2,3})(?:[-_][A-Za-z0-9]+)*/.exec(text || "") || [])[1] || intlLocale();
+  let locales = env.AGENTHUB_SYSTEM_LOCALES ? normLocales(env.AGENTHUB_SYSTEM_LOCALES) : normLocales(String(text || "").split(/[\s(),"]+/).filter(Boolean));
+  if (!locales.length && !env.AGENTHUB_SYSTEM_LOCALES) locales = normLocales([intlLocale()]);
+  return { lang: /^ru(?:$|[-_])/i.test(first) ? "ru" : "en", locales };
+}
+
 // OS language → ru | en (override for checks — config.systemLang from AGENTHUB_SYSTEM_LANG, lib/config.mjs).
 export function detectSystemLang({ platform = process.platform } = {}) {
-  let first = "";
-  const cmd = systemLanguagesCommand({ platform });
-  if (cmd) {
-    try {
-      const out = execFileSync(cmd[0], cmd.slice(1), { encoding: "utf8", timeout: 2000, stdio: ["ignore", "pipe", "ignore"] });
-      first = (/([A-Za-z]{2,3})(?:[-_][A-Za-z0-9]+)*/.exec(out) || [])[1] || "";
-    } catch {}
-  }
-  if (!first) {
-    try {
-      first = Intl.DateTimeFormat().resolvedOptions().locale || "";
-    } catch {}
-  }
-  return /^ru(?:$|[-_])/i.test(first) ? "ru" : "en";
+  return systemLanguagesFrom(readSystemLanguages({ platform }), { env: {} }).lang;
+}
+
+// The OS preferred languages, in order, as canonical BCP-47 tags (plugin content, lib/i18n.mjs contentLang; AGENTHUB_LOCALE
+// for plugins). AGENTHUB_SYSTEM_LOCALES="de-DE,en-US" overrides it (checks and test hubs); macOS — AppleLanguages; elsewhere —
+// the Intl locale. → ["de-DE", "en-US", …] (at most 8; may be empty)
+export function detectSystemLocales({ platform = process.platform, env = process.env } = {}) {
+  if (env.AGENTHUB_SYSTEM_LOCALES) return normLocales(env.AGENTHUB_SYSTEM_LOCALES);
+  return systemLanguagesFrom(readSystemLanguages({ platform }), { env }).locales;
 }
 
 export class Settings {
-  constructor(path, { detect = detectSystemLang, now = () => Date.now() } = {}) {
+  // detectLocales — the system language list (detectSystemLocales). With only detect overridden (a test hub's fixed
+  // language), the list is that one language — unless AGENTHUB_SYSTEM_LOCALES sets it explicitly.
+  // Neither overridden (the live daemon): both come from ONE OS read per SYSTEM_TTL_MS (readLanguages — readSystemLanguages;
+  // a check may pass its own, with env for AGENTHUB_SYSTEM_LOCALES).
+  constructor(path, { detect = null, detectLocales = null, readLanguages = null, env = process.env, now = () => Date.now() } = {}) {
     this.path = path;
-    this.detect = detect;
+    this.shared = !detect && !detectLocales ? { read: readLanguages || (() => readSystemLanguages()), env, at: 0, value: null } : null;
+    this.detect = detect || (() => this.sharedLanguages().lang);
+    this.detectLocales = detectLocales || (this.shared ? () => this.sharedLanguages().locales : () => (process.env.AGENTHUB_SYSTEM_LOCALES ? detectSystemLocales() : [this.detect()]));
+    this.locs = null;
+    this.locsAt = 0;
     this.now = now;
     // launchAtLogin — "Launch at login" (decision 2026-11-07): the daemon + app pair. Off — a daemon started
     // at login (launchd RunAtLoad) waits for the app and exits normally (the app service, lib/app-supervisor.mjs).
@@ -117,8 +150,22 @@ export class Settings {
   get langSetting() {
     return this.data.lang;
   }
+  // One OS read for systemLang and systemLocales (their own caches expire together, so a minute costs one read).
+  sharedLanguages() {
+    const sh = this.shared;
+    if (!sh.value || this.now() - sh.at > SYSTEM_TTL_MS) {
+      try {
+        sh.value = systemLanguagesFrom(sh.read(), { env: sh.env });
+      } catch {
+        sh.value = sh.value || { lang: "en", locales: [] };
+      }
+      sh.at = this.now();
+    }
+    return sh.value;
+  }
   systemLang({ fresh = false } = {}) {
     if (fresh || !this.sys || this.now() - this.sysAt > SYSTEM_TTL_MS) {
+      if (fresh && this.shared) this.shared.at = -Infinity;
       try {
         this.sys = normLang(this.detect());
       } catch {
@@ -127,6 +174,19 @@ export class Settings {
       this.sysAt = this.now();
     }
     return this.sys;
+  }
+  // The system preferred languages (detectSystemLocales), cached like the system language.
+  systemLocales({ fresh = false } = {}) {
+    if (fresh || !this.locs || this.now() - this.locsAt > SYSTEM_TTL_MS) {
+      if (fresh && this.shared) this.shared.at = -Infinity;
+      try {
+        this.locs = normLocales(this.detectLocales());
+      } catch {
+        this.locs = this.locs || [];
+      }
+      this.locsAt = this.now();
+    }
+    return [...this.locs];
   }
   effectiveLang() {
     return this.data.lang === "system" ? this.systemLang() : this.data.lang;
@@ -137,7 +197,8 @@ export class Settings {
     this.save();
   }
   langInfo() {
-    return { setting: this.data.lang, effective: this.effectiveLang(), system: this.systemLang() };
+    // locales — the system preferred languages (plugin content and AGENTHUB_LOCALE; the hub UI itself is ru | en)
+    return { setting: this.data.lang, effective: this.effectiveLang(), system: this.systemLang(), locales: this.systemLocales() };
   }
 }
 

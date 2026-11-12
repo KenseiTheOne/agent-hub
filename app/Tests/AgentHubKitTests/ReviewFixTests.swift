@@ -11,7 +11,7 @@ import Testing
 // MARK: - fake daemon
 
 final class FakeDaemon: @unchecked Sendable {
-    struct Request: Sendable { var method: String; var uri: String; var lastEventId: String? }
+    struct Request: Sendable { var method: String; var uri: String; var lastEventId: String?; var body: String = "" }
 
     let path: String
     private let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
@@ -26,6 +26,8 @@ final class FakeDaemon: @unchecked Sendable {
     var cards: @Sendable () -> String = { #"{"cards":[],"paused":false}"# }
     /// A custom reply to a request (method, path) → (status, body); nil means the default reply.
     var reply: @Sendable (_ method: String, _ uri: String) -> (status: Int, body: String)? = { _, _ in nil }
+    /// Like `reply`, with the request body (checked first).
+    var replyBody: @Sendable (_ method: String, _ uri: String, _ body: String) -> (status: Int, body: String)? = { _, _, _ in nil }
 
     var peerClass: String {
         get { lock.withLock { _peerClass } }
@@ -57,13 +59,14 @@ final class FakeDaemon: @unchecked Sendable {
         unlink(path)
     }
 
-    fileprivate func respond(_ head: HTTPRequestHead, channel: Channel) -> (status: HTTPResponseStatus, body: String, sse: Bool) {
+    fileprivate func respond(_ head: HTTPRequestHead, body: String = "", channel: Channel) -> (status: HTTPResponseStatus, body: String, sse: Bool) {
         let leid = head.headers.first(name: "last-event-id")
         let n: Int = lock.withLock {
-            _requests.append(Request(method: head.method.rawValue, uri: head.uri, lastEventId: leid))
+            _requests.append(Request(method: head.method.rawValue, uri: head.uri, lastEventId: leid, body: body))
             return _requests.filter { $0.uri.hasPrefix("/events") }.count - 1
         }
         let isApp = peerClass == "app"
+        if let r = replyBody(head.method.rawValue, head.uri, body) { return (HTTPResponseStatus(statusCode: r.status), r.body, false) }
         if let r = reply(head.method.rawValue, head.uri) { return (HTTPResponseStatus(statusCode: r.status), r.body, false) }
         switch (head.method, head.uri) {
         case (.GET, "/health"): return (.ok, #"{"ok":true,"pid":123}"#, false)
@@ -87,15 +90,16 @@ final class FakeDaemon: @unchecked Sendable {
         typealias OutboundOut = HTTPServerResponsePart
         let daemon: FakeDaemon
         var head: HTTPRequestHead?
+        var body = ByteBuffer()
         init(daemon: FakeDaemon) { self.daemon = daemon }
 
         func channelRead(context: ChannelHandlerContext, data: NIOAny) {
             switch unwrapInboundIn(data) {
-            case .head(let h): head = h
-            case .body: break
+            case .head(let h): head = h; body.clear()
+            case .body(var b): body.writeBuffer(&b)
             case .end:
                 guard let h = head else { return }
-                let r = daemon.respond(h, channel: context.channel)
+                let r = daemon.respond(h, body: body.readString(length: body.readableBytes) ?? "", channel: context.channel)
                 var headers = HTTPHeaders()
                 headers.add(name: "content-type", value: r.sse ? "text/event-stream" : "application/json")
                 if !r.sse { headers.add(name: "content-length", value: "\(r.body.utf8.count)") }

@@ -1,4 +1,6 @@
-// The push service (stage 4): plugin `event=` events → a macOS notification (the shell's banner or osascript).
+// The push service (stage 4): plugin `event=` events → a notification through the channel set (lib/push/channels.mjs): the macOS
+// banner (the shell's or osascript) always, plus the channels from services.push.channels (webhook, ntfy) and the ones services
+// register through the `push.channels` fact (G12).
 // Logic — lib/push/engine.mjs, event table — lib/push/rules.mjs, contract — lib/push/README.md.
 //
 // Settings — services.push in <home>/config.json (lib/push/config.mjs). Keys the service doesn't know (a channel
@@ -19,6 +21,7 @@ import { effectiveQuiet } from "../push/prefs.mjs";
 import { PushEngine } from "../push/engine.mjs";
 import { createPresence } from "../push/idle.mjs";
 import { createMacNotifier } from "../push/macos.mjs";
+import { createChannelSet, parseChannelConfig } from "../push/channels.mjs";
 import { createStore } from "../push/store.mjs";
 import { samePath } from "../platform.mjs";
 import { isLabel } from "../version.mjs";
@@ -26,6 +29,7 @@ import { isLabel } from "../version.mjs";
 export const name = "push";
 
 let engine = null;
+let channelSet = null;
 let timer = null;
 let unsubscribe = null;
 // id → {from, version} of the last automatic own plugin update (the notification text says whether the version changed)
@@ -209,6 +213,10 @@ export function makeLookup(ctx) {
       trusted: st.trusted,
       // own push rules (<agenthub.push>) — the core gives them only to built-in and official plugins
       rules: st.pushRules,
+      // G5: banner buttons (≤ 2 child offers of the event line) and the click target (its href=, checked like open.url); the engine
+      // passes them on only when the banner shows the row text
+      actions: Array.isArray(st.actions) ? st.actions : [],
+      href: typeof st.href === "string" ? st.href : null,
     };
   };
 }
@@ -228,10 +236,25 @@ export async function start(ctx) {
   const journal = (entry) => ctx.journal.write(entry);
   const ignored = ignoredKeys(ctx.config.services?.push);
   if (ignored.length) journal({ type: "push-config-ignored", keys: ignored.map((k) => `services.push.${String(k).slice(0, 64)}`) });
+  // Delivery channels (G12): mac always; services.push.channels from config.json; services register more through the fact.
+  const parsed = parseChannelConfig(ctx.config.services?.push?.channels);
+  for (const bad of parsed.invalid) journal({ type: "push-channel-invalid", index: bad.index, reason: bad.reason });
+  const set = createChannelSet({
+    mac: createMacNotifier({ emit: (ev) => ctx.emit(ev), waitAck, exec: ctx.exec, ackTimeoutMs: cfg.ackTimeoutMs, journal }),
+    configured: parsed.channels,
+    journal,
+  });
+  channelSet = set;
+  // ctx.facts.get("push.channels") → { register(channel) → unregister, list() } for other services (built-in or extensions):
+  // channel = { id, label?, security?, events?, send(payload) → Promise<{ok, code?}> } (lib/push/channels.mjs). One fact per
+  // core (provide throws on a second start of the service in the same core — the first registration stays).
+  try {
+    ctx.facts.provide("push.channels", () => ({ register: (ch) => set.register(ch), list: () => set.list() }));
+  } catch {}
   engine = new PushEngine({
     config: cfg,
     presence: createPresence({ exec: ctx.exec }),
-    mac: createMacNotifier({ emit: (ev) => ctx.emit(ev), waitAck, exec: ctx.exec, ackTimeoutMs: cfg.ackTimeoutMs, journal }),
+    mac: set,
     lookup: makeLookup(ctx),
     store: createStore(join(ctx.paths.home, "push-state.json")),
     journal,
@@ -391,7 +414,7 @@ export async function start(ctx) {
     engine?.tick();
   }, cfg.tickMs);
   timer.unref();
-  ctx.journal.write({ type: "push-start", timezone: cfg.timezone, enabled: engine.prefs.enabled, quiet: initial.quiet.enabled ? `${initial.quiet.start}-${initial.quiet.end}` : "off" });
+  ctx.journal.write({ type: "push-start", timezone: cfg.timezone, enabled: engine.prefs.enabled, quiet: initial.quiet.enabled ? `${initial.quiet.start}-${initial.quiet.end}` : "off", channels: set.list().map((c) => c.id) });
 }
 
 export async function stop() {
@@ -405,7 +428,10 @@ export async function stop() {
   await e?.idle();
 }
 
-// For tests: the current engine.
+// For tests: the current engine and channel set.
 export function _engine() {
   return engine;
+}
+export function _channels() {
+  return channelSet;
 }

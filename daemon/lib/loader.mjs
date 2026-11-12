@@ -5,6 +5,14 @@ import { existsSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
+// Module names in a directory (the file name without .mjs), the same filter as loadModules, without importing anything.
+export function listModuleNames(dir) {
+  if (!existsSync(dir)) return [];
+  return readdirSync(dir)
+    .filter((f) => f.endsWith(".mjs") && !f.startsWith("_") && !f.startsWith("."))
+    .map((f) => f.replace(/\.mjs$/, ""));
+}
+
 export async function loadModules(dir, { onError } = {}) {
   if (!existsSync(dir)) return [];
   const files = readdirSync(dir)

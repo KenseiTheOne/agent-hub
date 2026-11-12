@@ -5,14 +5,20 @@
 //                                        the shell opens the sign-in page
 //   POST /connections/:id/cancel       — app only: abort an ongoing sign-in
 //   POST /connections/:id/disconnect   — app only: "Disconnect" — remove the registration and tokens from the keychain
-//   POST /connections/:id/mcp          — a trusted plugin's process (cli class, identified by pid): call an
-//                                        allowlisted MCP tool { tool, args } → result
+//   POST /connections/:id/mcp          — a trusted plugin's process (cli class, identified by pid: a run, the streamable
+//                                        process or an action a human started): call an allowlisted MCP tool
+//                                        { tool, args, fresh? } → result; fresh: true — a write or an explicit refresh,
+//                                        past the interval cache (lib/services/oauth.mjs)
+//   POST /connections/:id/http         — the same callers, a type="http" connection (G7): proxy one HTTP request to a declared
+//                                        API host with the bearer token { method?, host?, path, query?, headers?, body?, fresh? }
+//                                        → { ok, response: { status, headers, body, encoding, json?, truncated? }, fetchedAt,
+//                                        nextAt, why, fresh, … } (GET/HEAD cached per interval unless fresh; other methods — writes)
 
 import { pluginAllowed } from "../services/oauth.mjs";
 
 const svcOf = (ctx) => ctx.facts.get("oauth.api") || null;
 const unavailable = { status: 503, body: { error: "oauth:disabled" } };
-const ERR_STATUS = { orphan: 409, "no-keychain": 409, keychain: 500, "keychain-read": 503, discovery: 502, register: 502, net: 502, http: 502 };
+const ERR_STATUS = { orphan: 409, "no-keychain": 409, "port-busy": 409, keychain: 500, "keychain-read": 503, discovery: 502, register: 502, net: 502, http: 502 };
 
 function conn(ctx, id) {
   const svc = svcOf(ctx);
@@ -88,15 +94,37 @@ export const routes = [
     handler: async ({ params, body, ctx, peer }) => {
       const { res, c } = conn(ctx, params.id);
       if (res) return res;
-      // only a plugin process the hub launched itself (the peer pid comes from the core, not from the request)
-      const pl = ctx.facts.pluginByPid?.(peer.pid) ?? null;
+      // only a plugin process the hub launched itself (the peer pid comes from the core, not from the request): a run,
+      // the streamable process, or an action a human started (a write after a button press, like /terminal/*)
+      const pl = ctx.facts.pluginByPid?.(peer.pid, { actions: true }) ?? null;
       const why = pluginAllowed(pl, c);
       if (why) {
         ctx.journal.write({ type: "mcp-denied", connector: c.id, plugin: pl?.id || null, pid: peer.pid ?? null, error: why });
         return { status: 403, body: { error: why } };
       }
       if (!body || typeof body !== "object" || typeof body.tool !== "string") return { status: 400, body: { error: "args:tool:required" } };
-      return c.call(pl, body.tool, body.args);
+      if (body.fresh !== undefined && typeof body.fresh !== "boolean") return { status: 400, body: { error: "args:fresh:type" } };
+      return c.call(pl, body.tool, body.args, { fresh: body.fresh === true });
+    },
+  },
+  {
+    method: "POST",
+    path: "/connections/:id/http",
+    peers: ["cli"],
+    maxBody: 96 * 1024,
+    handler: async ({ params, body, ctx, peer }) => {
+      const { res, c } = conn(ctx, params.id);
+      if (res) return res;
+      // the same caller rule as /mcp: a process the hub launched for the plugin that declared the connection (pid from the core)
+      const pl = ctx.facts.pluginByPid?.(peer.pid, { actions: true }) ?? null;
+      const why = pluginAllowed(pl, c);
+      if (why) {
+        const error = why.replace(/^mcp:/, "http:");
+        ctx.journal.write({ type: "http-denied", connector: c.id, plugin: pl?.id || null, pid: peer.pid ?? null, error });
+        return { status: 403, body: { error } };
+      }
+      if (!body || typeof body !== "object" || Array.isArray(body)) return { status: 400, body: { error: "args:body:type" } };
+      return c.httpRequest(pl, body);
     },
   },
 ];

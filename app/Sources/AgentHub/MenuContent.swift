@@ -83,7 +83,7 @@ struct PopoverView: View {
 
     let store: HubStore
     let router: PanelRouter
-    private let openStore = State<String?>(initialValue: nil)
+    private let openStore = State<String?>(initialValue: LaunchOptions.current.openTile)
     private var openTile: String? { get { openStore.wrappedValue } nonmutating set { openStore.wrappedValue = newValue } }
     // the same key as HubUpdatePopoverLine: whether there's a hub update row (for the "Updates" heading)
     private let hubDoneAck = AppStorage(wrappedValue: "", HubDefaults.key("hubUpdateDoneAck", socketPath: HubPaths.socketPath()))
@@ -217,12 +217,26 @@ struct PopoverView: View {
             VStack(alignment: .leading, spacing: 4) {
                 HStack(alignment: .top) {
                     Image(systemName: pluginSymbol(p)).font(.system(size: 15)).foregroundStyle(.white.opacity(0.8))
-                    Spacer()
+                    // `spark=` on the first header line: a mini sparkline between the icon and the status (the tile has
+                    // no spare height under the value, so it takes the icon row)
+                    if let spark = p.header.first(where: { !$0.separator })?.spark, !spark.isEmpty {
+                        SparkBars(values: spark, avg: p.header.first(where: { !$0.separator })?.sparkAvg, highlight: pluginAccent(p), spacing: 1.5, radius: 1,
+                                  fixedTop: p.header.first(where: { !$0.separator })?.sparkMax)
+                            .frame(height: 16)
+                            .padding(.horizontal, 3)
+                    } else {
+                        Spacer()
+                    }
                     StatusGlyph(status: p.status, size: 15)
                 }
                 .padding(.bottom, 4)
-                Text(p.tileValue).font(.system(size: 15, weight: .bold)).tracking(-0.15).lineLimit(1).minimumScaleFactor(0.7)
-                    .reportsTruncation(p.tileValue, font: .system(size: 15, weight: .bold))
+                // `until=` on the first header line: the value counts down to the moment (G18)
+                if let until = p.header.first(where: { !$0.separator })?.until {
+                    CountdownText(until: until, font: .system(size: 15, weight: .bold)).tracking(-0.15).lineLimit(1)
+                } else {
+                    Text(p.tileValue).font(.system(size: 15, weight: .bold)).tracking(-0.15).lineLimit(1).minimumScaleFactor(0.7)
+                        .reportsTruncation(p.tileValue, font: .system(size: 15, weight: .bold))
+                }
                 Text(p.tileLabel).font(.system(size: 11)).foregroundStyle(.white.opacity(0.62)).lineLimit(1).truncationMode(.tail)
                     .reportsTruncation(p.tileLabel, font: .system(size: 11))
             }
@@ -236,29 +250,70 @@ struct PopoverView: View {
         .hoverHelp(PluginText.tileHelp(p))
     }
 
-    private func detail(_ p: PluginState) -> some View {
-        Button { router.open(.plugin(p.id)) } label: {
-            VStack(alignment: .leading, spacing: 5) {
-                Text(p.headline).font(.system(size: 12, weight: .semibold)).lineLimit(2).multilineTextAlignment(.leading)
-                    .reportsTruncation(p.headline, font: .system(size: 12, weight: .semibold))
-                let lines = p.body.filter { !$0.separator && $0.level == 0 && $0.params["size"] == nil }.prefix(4)
-                ForEach(Array(lines.enumerated()), id: \.offset) { _, it in
-                    let line = it.stat.map { "\($0): \(it.title)" } ?? it.title
-                    Text(line).font(.system(size: 12)).foregroundStyle(.white.opacity(0.7)).lineLimit(1)
-                        .reportsTruncation(line, font: .system(size: 12))
+    /// Up to four top-level body lines for the tile's short detail. Controls (2026-11-12) show their value, not a bare
+    /// label: a segment or popup — "Model: Opus 5.5" (its `selected=true` child), a switch — "Ultracode: off"; a table —
+    /// its title. A label-only line right before a control group ("For new sessions") is skipped: alone it says nothing.
+    static func detailLines(_ body: [Item]) -> [String] {
+        var out: [String] = []
+        for (i, it) in body.enumerated() where !it.separator && it.level == 0 && it.params["size"] == nil {
+            if it.isSegment || it.isSelect {
+                var chosen: String?
+                for c in body[(i + 1)...] {
+                    if c.level == 0 { break }
+                    if c.level == 1, c.isSelected { chosen = c.title; break }
                 }
-                if p.status == .error, let e = p.error {
-                    Text(e).font(.system(size: 12)).foregroundStyle(hexColor(0xFF8A80)).lineLimit(1).reportsTruncation(e, font: .system(size: 12))
+                out.append(chosen.map { "\(it.title): \($0)" } ?? it.title)
+            } else if let on = it.toggleState {
+                out.append("\(it.title): \(on ? tr("вкл", "on") : tr("выкл", "off"))")
+            } else if !it.isTable, it.offer == nil, it.stat == nil,
+                      i + 1 < body.count, body[i + 1].level == 0, body[i + 1].isSegment || body[i + 1].isSelect || body[i + 1].toggleState != nil {
+                continue
+            } else {
+                out.append(it.stat.map { "\($0): \(it.title)" } ?? it.title)
+            }
+            if out.count == 4 { break }
+        }
+        return out
+    }
+
+    /// Up to three offers of the plugin's header (G5): the same buttons as in the page header — same gate, confirmation
+    /// and spinner. Fixed-height tiles have no room for them, so they live in the expanded detail card only.
+    static func headerOffers(_ p: PluginState) -> [(item: Item, offer: Offer)] {
+        Array(p.header.filter { !$0.separator }.compactMap { it in it.offer.map { (it, $0) } }.prefix(3))
+    }
+
+    private func detail(_ p: PluginState) -> some View {
+        let offers = Self.headerOffers(p)
+        return VStack(alignment: .leading, spacing: 8) {
+            Button { router.open(.plugin(p.id)) } label: {
+                VStack(alignment: .leading, spacing: 5) {
+                    Text(p.headline).font(.system(size: 12, weight: .semibold)).lineLimit(2).multilineTextAlignment(.leading)
+                        .reportsTruncation(p.headline, font: .system(size: 12, weight: .semibold))
+                    ForEach(Array(Self.detailLines(p.body).enumerated()), id: \.offset) { _, line in
+                        Text(line).font(.system(size: 12)).foregroundStyle(.white.opacity(0.7)).lineLimit(1)
+                            .reportsTruncation(line, font: .system(size: 12))
+                    }
+                    if p.status == .error, let e = p.error {
+                        Text(e).font(.system(size: 12)).foregroundStyle(hexColor(0xFF8A80)).lineLimit(1).reportsTruncation(e, font: .system(size: 12))
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            // the header and rows are truncated here (two lines and one) — the tooltip has the full text, then where a click leads
+            .hoverHelp(PluginText.help(p.headline, tr("Открыть в панели", "Open in panel")))
+            if !offers.isEmpty {
+                HStack(spacing: 6) {
+                    ForEach(Array(offers.enumerated()), id: \.offset) { _, o in
+                        OfferButton(store: store, item: o.item, offer: o.offer, style: CapsuleStyle(height: 24, expand: false), inlineInput: false)
+                    }
                 }
             }
-            .padding(.horizontal, 12).padding(.vertical, 10)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(RoundedRectangle(cornerRadius: 12).fill(Color.black.opacity(0.22)))
-            .contentShape(RoundedRectangle(cornerRadius: 12))
         }
-        .buttonStyle(.plain)
-        // the header and rows are truncated here (two lines and one) — the tooltip has the full text, then where a click leads
-        .hoverHelp(PluginText.help(p.headline, tr("Открыть в панели", "Open in panel")))
+        .padding(.horizontal, 12).padding(.vertical, 10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 12).fill(Color.black.opacity(0.22)))
     }
 
     // MARK: "Waiting for you" (in the prototype — "You're needed"; the interface uses the polite form everywhere)

@@ -266,6 +266,13 @@ public struct CatalogPlugin: Decodable, Sendable, Hashable, Identifiable {
     public var icon: PluginIcon?
     /// The plugin needs a newer contract than the hub has: "Requires a newer hub", installation unavailable.
     public var needsHub: NeedsHub?
+    /// Several registries (G19): the registry this entry comes from; `registryLabel` — nil while only the default registry
+    /// exists (the UI then looks exactly as with one registry), `tierLabel` — "official plugin · corp" in the hub language.
+    public var registry: String? = nil
+    public var registryLabel: String? = nil
+    public var tierLabel: String? = nil
+    /// The registry's trust capped the entry at community (whatever the index says).
+    public var capped: Bool = false
 
     public struct NeedsHub: Codable, Sendable, Hashable {
         /// nil — the index entry names the contract in a form this hub doesn't understand (also "requires a newer hub").
@@ -310,10 +317,15 @@ public struct CatalogPlugin: Decodable, Sendable, Hashable, Identifiable {
         installedOwn = try? c.decodeIfPresent(OwnPath.self, forKey: .installedOwn)
         icon = try? c.decodeIfPresent(PluginIcon.self, forKey: .icon)
         needsHub = try? c.decodeIfPresent(NeedsHub.self, forKey: .needsHub)
+        registry = try? c.decodeIfPresent(String.self, forKey: .registry)
+        registryLabel = RegistrySource.label(try? c.decodeIfPresent(String.self, forKey: .registryLabel))
+        tierLabel = try? c.decodeIfPresent(String.self, forKey: .tierLabel)
+        capped = (try? c.decodeIfPresent(Bool.self, forKey: .capped)) ?? false
     }
 
     enum CodingKeys: String, CodingKey {
         case id, version, title, desc, author, official, tier, permissions, installed, updateAvailable, growth, blocked, builtin, platformOk, requires, installedOwn, icon, needsHub
+        case registry, registryLabel, tierLabel, capped
     }
 
     public var displayTitle: String { title ?? id }
@@ -381,6 +393,19 @@ public struct RegistryCatalog: Decodable, Sendable, Hashable {
     public var plugins: [CatalogPlugin]
     /// How to connect the registry: the CLI by full path and the hub directory (the daemon knows where it is; agenthub isn't in PATH).
     public var connect: RegistryConnect?
+    /// Every configured registry (G19); one entry (or none, an older daemon) — the single-registry look.
+    public var registries: [RegistrySource] = []
+    /// The same id in a later registry, hidden behind an earlier one.
+    public var shadowed: [Shadowed] = []
+
+    public struct Shadowed: Codable, Sendable, Hashable {
+        public var id: String
+        public var registry: String
+        public var by: String
+    }
+
+    /// Several registries are configured: the catalog shows a status line per registry.
+    public var multiRegistry: Bool { registries.count > 1 }
 
     public init(configured: Bool = false, plugins: [CatalogPlugin] = [], generatedAt: String? = nil, error: String? = nil) {
         self.configured = configured; self.missing = configured ? [] : ["index-url", "public-key"]
@@ -401,9 +426,11 @@ public struct RegistryCatalog: Decodable, Sendable, Hashable {
         else { error = nil }
         plugins = (try? c.decode([CatalogPlugin].self, forKey: .plugins)) ?? []
         connect = try? c.decodeIfPresent(RegistryConnect.self, forKey: .connect)
+        registries = c.lossyList(RegistrySource.self, forKey: .registries) ?? []
+        shadowed = c.lossyList(Shadowed.self, forKey: .shadowed) ?? []
     }
 
-    enum CodingKeys: String, CodingKey { case configured, missing, generatedAt, fetchedAt, error, plugins, connect }
+    enum CodingKeys: String, CodingKey { case configured, missing, generatedAt, fetchedAt, error, plugins, connect, registries, shadowed }
 
     /// The registry connect command, ready for zsh: the CLI by full path, AGENTHUB_HOME if the hub isn't in the default
     /// directory. Placeholders for the URL and key are in the interface language.
@@ -412,6 +439,65 @@ public struct RegistryCatalog: Decodable, Sendable, Hashable {
         let cli = connect.map { q($0.cli) } ?? "agenthub"
         let home = connect.flatMap { $0.defaultHome ? nil : "AGENTHUB_HOME=\(q($0.home)) " } ?? ""
         return "\(home)\(cli) install --registry-url \(url) --registry-pubkey \(key) --apply --no-launchd"
+    }
+}
+
+public enum RegistryText {
+    public static func from(_ registry: String) -> String { tr("из реестра «\(registry)»", "from the \"\(registry)\" registry") }
+    public static var cappedHelp: String {
+        tr("Этому реестру доверено не больше, чем плагинам сообщества: каждая команда — с подтверждением.",
+           "This registry is trusted no more than community plugins: every command asks first.")
+    }
+}
+
+/// One configured registry (`GET /registry/catalog → registries[]`, G19).
+public struct RegistrySource: Decodable, Sendable, Hashable, Identifiable {
+    public var name: String
+    /// `official` | `community` — the most a plugin of this registry can be.
+    public var trust: String?
+    public var label: String?
+    public var configured: Bool
+    public var missing: [String]
+    public var generatedAt: String?
+    public var fetchedAt: String?
+    public var plugins: Int?
+    public var error: String?
+    public var tierLabel: String?
+    public var id: String { name }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        name = try c.decode(String.self, forKey: .name)
+        trust = try? c.decodeIfPresent(String.self, forKey: .trust)
+        label = try? c.decodeIfPresent(String.self, forKey: .label)
+        configured = (try? c.decodeIfPresent(Bool.self, forKey: .configured)) ?? true
+        missing = (try? c.decodeIfPresent([String].self, forKey: .missing)) ?? []
+        generatedAt = try? c.decodeIfPresent(String.self, forKey: .generatedAt)
+        fetchedAt = try? c.decodeIfPresent(String.self, forKey: .fetchedAt)
+        plugins = try? c.decodeIfPresent(Int.self, forKey: .plugins)
+        if let s = try? c.decodeIfPresent(String.self, forKey: .error) { error = s }
+        else if let o = try? c.decodeIfPresent([String: JSONValue].self, forKey: .error) { error = o["code"]?.stringValue ?? "error" }
+        else { error = nil }
+        tierLabel = try? c.decodeIfPresent(String.self, forKey: .tierLabel)
+    }
+
+    enum CodingKeys: String, CodingKey { case name, trust, label, configured, missing, generatedAt, fetchedAt, plugins, error, tierLabel }
+
+    /// An empty label is no label.
+    static func label(_ raw: String??) -> String? {
+        guard let v = raw ?? nil, !v.trimmingCharacters(in: .whitespaces).isEmpty else { return nil }
+        return v
+    }
+
+    /// The status line in the catalog when several registries are configured: name, state, last fetch.
+    public var statusLine: String {
+        let n = label ?? name
+        if !configured { return tr("\(n): не настроен", "\(n): not set up") }
+        if let e = error { return tr("\(n): ошибка — \(e)", "\(n): error — \(e)") }
+        guard let f = fetchedAt ?? generatedAt else { return tr("\(n): каталог ещё не загружен", "\(n): catalog not loaded yet") }
+        let when = PluginUpdatesStatus.parseDate(f).map(Fmt.dateTime) ?? String(f.prefix(16))
+        let count = plugins.map { tr(" · плагинов: \($0)", " · \($0) plugins") } ?? ""
+        return tr("\(n): загружен \(when)", "\(n): fetched \(when)") + count
     }
 }
 
@@ -437,10 +523,15 @@ public struct InstalledPlugin: Decodable, Sendable, Hashable, Identifiable {
     public var permissions: [PluginPermission]
     /// An own plugin: the source folder and its state (nil for registry plugins).
     public var own: OwnSourceInfo?
+    /// The registry it came from (G19); `registryLabel` nil — only the default registry exists.
+    public var registry: String?
+    public var registryLabel: String?
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         id = try c.decode(String.self, forKey: .id)
+        registry = try? c.decodeIfPresent(String.self, forKey: .registry)
+        registryLabel = RegistrySource.label(try? c.decodeIfPresent(String.self, forKey: .registryLabel))
         own = try? c.decodeIfPresent(OwnSourceInfo.self, forKey: .own)
         title = try? c.decodeIfPresent(String.self, forKey: .title)
         version = try? c.decodeIfPresent(String.self, forKey: .version)
@@ -456,7 +547,7 @@ public struct InstalledPlugin: Decodable, Sendable, Hashable, Identifiable {
         permissions = (try? c.decode([PluginPermission].self, forKey: .permissions)) ?? []
     }
 
-    enum CodingKeys: String, CodingKey { case id, title, version, officialPending, updateAvailable, source, official, tier, label, disabled, blocked, permissions, own }
+    enum CodingKeys: String, CodingKey { case id, title, version, officialPending, updateAvailable, source, official, tier, label, disabled, blocked, permissions, own, registry, registryLabel }
 }
 
 /// An own plugin's folder (`GET /registry/installed → installed[].own`): where it is and what's going on with it now.
@@ -666,6 +757,9 @@ public struct ConsentRequest: Decodable, Sendable, Hashable {
     public var requestId: String?
     /// Icon from the metadata of the plugin being installed (`<agenthub.icon>`); nil — neutral.
     public var icon: PluginIcon?
+    /// The registry it installs from (G19); nil label — only the default registry exists.
+    public var registry: String? = nil
+    public var registryLabel: String? = nil
 
     public init(token: String, id: String, title: String? = nil, version: String? = nil, update: Bool = false, tier: PluginTier = .community,
                 permissions: [PluginPermission] = [], source: ConsentSource? = nil, migrate: PluginMigration? = nil, changedSinceRequest: Bool = false) {
@@ -690,9 +784,11 @@ public struct ConsentRequest: Decodable, Sendable, Hashable {
         tier = PluginTier(tier: try? c.decodeIfPresent(String.self, forKey: .tier), source: "installed", official: false)
         permissions = (try? c.decode([PluginPermission].self, forKey: .permissions)) ?? []
         expiresInMs = try? c.decodeIfPresent(Int.self, forKey: .expiresInMs)
+        registry = try? c.decodeIfPresent(String.self, forKey: .registry)
+        registryLabel = RegistrySource.label(try? c.decodeIfPresent(String.self, forKey: .registryLabel))
     }
 
-    enum CodingKeys: String, CodingKey { case token, id, title, version, fromVersion, update, tier, permissions, expiresInMs, source, migrate, changedSinceRequest, requestId, icon }
+    enum CodingKeys: String, CodingKey { case token, id, title, version, fromVersion, update, tier, permissions, expiresInMs, source, migrate, changedSinceRequest, requestId, icon, registry, registryLabel }
 
     public var isOwn: Bool { source?.isOwn == true || tier == .own }
 
@@ -719,6 +815,39 @@ public enum InstallOutcome: Sendable {
 // MARK: - notifications
 
 /// `push.notify` from SSE: show a macOS banner and reply `POST /push/ack`.
+/// A banner button from `push.notify` `actions`: the offer to press, its title and level (non-immediate → the app's
+/// confirmation sheet, exactly as from the panel).
+public struct NotifyAction: Codable, Sendable, Hashable {
+    public var offer: String
+    public var label: String
+    public var level: ActionLevel
+
+    public static let maxPerBanner = 2
+
+    public init(offer: String, label: String, level: ActionLevel) { self.offer = offer; self.label = label; self.level = level }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        offer = try c.decode(String.self, forKey: .offer)
+        let l = ((try? c.decodeIfPresent(String.self, forKey: .label)) ?? nil)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !offer.isEmpty, !l.isEmpty else { throw DecodingError.dataCorruptedError(forKey: .label, in: c, debugDescription: "empty") }
+        label = String(l.prefix(60))
+        level = (try? c.decode(ActionLevel.self, forKey: .level)) ?? .unknown
+    }
+
+    enum CodingKeys: String, CodingKey { case offer, label, level }
+
+    /// The offer to run: the core decides on confirmation (428) by itself.
+    public var asOffer: Offer { Offer(id: offer, kind: "action", level: level, label: label) }
+
+    /// Only plain http/https addresses with a host and no credentials (the daemon checks the same; this is a second look).
+    public static func webURL(_ raw: String) -> URL? {
+        guard let u = URL(string: raw.trimmingCharacters(in: .whitespaces)), let scheme = u.scheme?.lowercased(),
+              scheme == "https" || scheme == "http", let host = u.host, !host.isEmpty, u.user == nil, u.password == nil else { return nil }
+        return u
+    }
+}
+
 public struct PushNotify: Decodable, Sendable, Hashable {
     public var notifyId: String
     public var title: String
@@ -727,10 +856,16 @@ public struct PushNotify: Decodable, Sendable, Hashable {
     public var plugin: String?
     public var key: String?
     public var digest: Bool
+    /// Banner buttons (contract between waves 2/3, G5): offers of the children of the line that carries `event=`, at most 2.
+    /// Pressing one = `POST /actions/:offer` like a panel button. An older daemon sends none — no extra buttons.
+    public var actions: [NotifyAction]
+    /// The banner click target: the event line's `href=` (http/https only); nil — the plugin page.
+    public var href: URL?
 
-    public init(notifyId: String, title: String, subtitle: String? = nil, body: String? = nil, plugin: String? = nil) {
+    public init(notifyId: String, title: String, subtitle: String? = nil, body: String? = nil, plugin: String? = nil,
+                key: String? = nil, actions: [NotifyAction] = [], href: URL? = nil) {
         self.notifyId = notifyId; self.title = title; self.subtitle = subtitle; self.body = body; self.plugin = plugin
-        self.key = nil; self.digest = false
+        self.key = key; self.digest = false; self.actions = actions; self.href = href
     }
 
     public init(from decoder: Decoder) throws {
@@ -742,9 +877,11 @@ public struct PushNotify: Decodable, Sendable, Hashable {
         plugin = try? c.decodeIfPresent(String.self, forKey: .plugin)
         key = try? c.decodeIfPresent(String.self, forKey: .key)
         digest = (try? c.decode(Bool.self, forKey: .digest)) ?? false
+        actions = Array((c.lossyList(NotifyAction.self, forKey: .actions) ?? []).prefix(NotifyAction.maxPerBanner))
+        href = ((try? c.decodeIfPresent(String.self, forKey: .href)) ?? nil).flatMap(NotifyAction.webURL)
     }
 
-    enum CodingKeys: String, CodingKey { case notifyId, title, subtitle, body, plugin, key, digest }
+    enum CodingKeys: String, CodingKey { case notifyId, title, subtitle, body, plugin, key, digest, actions, href }
 }
 
 func parseISODate(_ s: String) -> Date? {

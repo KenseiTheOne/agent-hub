@@ -159,8 +159,9 @@ test("claude-sessions: frame — waiting ones on top, session parameters for the
     const { parsed, text } = await p.frame();
     assert.deepEqual(parsed.warnings, [], text);
     assert.equal(parsed.status, "wait");
-    assert.equal(parsed.header[0].title, "1 сессия ждёт вас");
-    assert.equal(parsed.header[0].params.tile, "1 ждёт");
+    // the working sessions are still counted next to the waiting one
+    assert.match(parsed.header[0].title, /^1 сессия ждёт вас( · \d+ в работе)?$/);
+    assert.match(parsed.header[0].params.tile, /^1 ждёт( · \d+ раб\.)?$/);
     // the waiting one is first among sessions; a foreign "| bash=evil" in the name didn't become a parameter
     const sessions = parsed.body.filter((i) => i.params.session);
     assert.equal(sessions[0].params.session, SID.wait);
@@ -713,4 +714,14 @@ test("claude-sessions: the effort cache survives a restart — ⚡ultracode does
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("claude-sessions: header counts working sessions next to the waiting ones", () => {
+  const s = (status, i) => ({ status, sessionId: `0000000${i}-0000-4000-8000-000000000000`, pid: 100 + i, name: `demo-${i}`, cwd: "/tmp" });
+  const sessions = [s("waiting", 1), s("busy", 2), s("busy", 3), s("idle", 4)];
+  const en = parseOutput(C.render({ sessions, died: [], problems: [], agentsOk: true }, Date.now(), "en"));
+  assert.equal(en.header[0].title, "1 session needs you · 2 working");
+  assert.equal(en.header[0].params.tile, "1 wait · 2 run");
+  const ru = parseOutput(C.render({ sessions: [s("waiting", 1), s("idle", 2)], died: [], problems: [], agentsOk: true }, Date.now(), "ru"));
+  assert.equal(ru.header[0].title, "1 сессия ждёт вас");
 });

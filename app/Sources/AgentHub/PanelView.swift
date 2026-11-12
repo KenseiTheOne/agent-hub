@@ -226,7 +226,8 @@ struct Sidebar: View {
                     row(.journal, icon: "doc.text", title: tr("Журнал", "Log"))
                     // the number of available plugin updates (the daemon's background check every 6 h) — as a capsule, in words — as a second line
                     row(.manager, icon: "square.grid.2x2", title: tr("Плагины", "Plugins"),
-                        status: SidebarStatus.updates(store.pluginUpdates, live: live), count: SidebarStatus.updatesCount(store.pluginUpdates))
+                        status: SidebarStatus.extensionsWaiting(store.state?.extensions) ?? SidebarStatus.updates(store.pluginUpdates, live: live),
+                        count: SidebarStatus.updatesCount(store.pluginUpdates))
                     row(.settings, icon: "gearshape", title: tr("Настройки", "Settings"))
                 }
             }
@@ -640,7 +641,7 @@ struct NotificationsSettings: View {
                             }
                         }
                         .toggleStyle(.switch).font(.system(size: 12.5))
-                        Text(NotificationsText.pluginDetail(p))
+                        Text(NotificationsText.pluginDetail(p, community: store.plugin(p.id)?.tier == .community))
                             .font(.system(size: 11.5)).foregroundStyle(.white.opacity(0.5)).fixedSize(horizontal: false, vertical: true)
                         if p.legacy && !p.on {
                             Text(NotificationsText.pluginLegacyNote)
@@ -785,8 +786,17 @@ struct TerminalSettings: View {
             HStack(spacing: 8) {
                 Circle().fill(dot(a)).frame(width: 7, height: 7)
                 Text(a.label).font(.system(size: 12.5, weight: .semibold))
+                // an adapter from <home>/Extensions/terminals (approved by a human in Plugins → Extensions)
+                if a.isExtension { BadgeView(text: tr("расширение", "extension"), color: "purple") }
                 Spacer(minLength: 8)
                 Text(TerminalText.status(a, bridgeOnline: store.bridgeOnline)).font(.system(size: 11.5)).foregroundStyle(.white.opacity(0.55))
+            }
+            // the adapter's own words for why it can't run, or what to set up first
+            if let why = a.reasonText, !a.available || a.needsSetup {
+                Label(why, systemImage: a.needsSetup ? "wrench.and.screwdriver" : "info.circle")
+                    .font(.system(size: 11.5)).foregroundStyle(a.needsSetup ? hexColor(0xFFC56B) : .white.opacity(0.6))
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.leading, 15)
             }
             HStack(spacing: 5) {
                 ForEach(["focus", "read-screen", "send-text", "send-esc", "launch"], id: \.self) { c in
@@ -923,15 +933,20 @@ struct PluginDetailView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 12) {
                 hero
+                // background jobs the plugin's actions started (G6): elapsed time and "Stop"
+                if !plugin.jobs.isEmpty { PluginJobsCard(store: store, plugin: plugin) }
                 // sign-in to a service the plugin declared (<agenthub.connection>): "Connect" right on its page
                 PluginConnectionBanner(store: store, pluginId: plugin.id)
                 ForEach(Array(ItemTree.blocks(plugin.body).enumerated()), id: \.offset) { _, block in
                     ForEach(Array(ItemTree.segments(block).enumerated()), id: \.offset) { _, seg in segment(seg) }
                 }
+                // the keys the plugin declares (G8): "Set key…" instead of `security add-generic-password`
+                PluginSecretsCard(store: store, pluginId: plugin.id)
                 about
             }
             .padding(.bottom, 20)
         }
+        .environment(\.pluginAccent, pluginAccent(plugin))
     }
 
     /// Layout per the prototype: a row of number cards, cards with a bar, a strip, a list.
@@ -953,6 +968,8 @@ struct PluginDetailView: View {
                 .overlay(RoundedRectangle(cornerRadius: 16).strokeBorder(Color.white.opacity(0.09), lineWidth: 0.5))
         case .table(let node):
             PluginTableView(store: store, node: node, card: true)
+        case .chart(let node):
+            PluginChartView(store: store, node: node, card: true)
         case .list(let nodes):
             VStack(alignment: .leading, spacing: 0) {
                 ForEach(Array(nodes.enumerated()), id: \.offset) { i, node in
@@ -966,7 +983,95 @@ struct PluginDetailView: View {
         }
     }
 
-    private var hero: some View {
+    @ViewBuilder private var hero: some View {
+        if let first = plugin.header.first(where: { !$0.separator }), !first.spark.isEmpty {
+            sparkHero(first)
+        } else {
+            plainHero
+        }
+    }
+
+    /// The header with `spark=` (Main.dc.html, design A): `stat=` as the caption, the tile value large in the plugin's
+    /// color, `note=` (or the headline) and the other header lines under it; the sparkline on the right with
+    /// `sparkLabel=`/`sparkNote=` above it and the dashed `sparkAvg=` line. The status line shows only when it is not ok.
+    private func sparkHero(_ first: Item) -> some View {
+        let c = plugin.status.color
+        let accent = pluginAccent(plugin)
+        let rest = plugin.header.dropFirst().filter { !$0.separator && $0.offer == nil }
+        let offers = plugin.header.compactMap { it in it.offer.map { (it, $0) } }
+        let value = plugin.tileValue
+        return VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .center, spacing: 26) {
+                VStack(alignment: .leading, spacing: 5) {
+                    if let cap = first.stat {
+                        Text(cap).font(.system(size: 13)).foregroundStyle(.white.opacity(0.6)).lineLimit(1)
+                            .reportsTruncation(cap, font: .system(size: 13))
+                    }
+                    Group {
+                        // `until=`: the large value counts down to the moment (G18)
+                        if let until = first.until {
+                            CountdownText(until: until, font: .system(size: 44, weight: .bold))
+                        } else {
+                            Text(value).font(.system(size: 44, weight: .bold))
+                        }
+                    }
+                    .tracking(-0.5)
+                    .foregroundStyle(plugin.status == .ok ? accent : .white)
+                    .lineLimit(1).minimumScaleFactor(0.5)
+                    let sub = first.note ?? plugin.headline
+                    Text(sub).font(.system(size: 13)).foregroundStyle(.white.opacity(0.78))
+                        .lineLimit(2).fixedSize(horizontal: false, vertical: true)
+                        .reportsTruncation(sub, font: .system(size: 13))
+                    ForEach(Array(rest.enumerated()), id: \.offset) { _, it in
+                        Text(it.title).font(it.isMono ? .system(size: 12, design: .monospaced) : .system(size: 12)).foregroundStyle(.white.opacity(0.52)).lineLimit(2)
+                            .reportsTruncation(it.title, font: .system(size: 12))
+                            .hoverHelp(PluginText.rowHelp(it), always: it.tooltip != nil)
+                    }
+                    if plugin.status != .ok {
+                        HStack(alignment: .firstTextBaseline, spacing: 6) {
+                            StatusGlyph(status: plugin.status, size: 13).alignmentGuide(.firstTextBaseline) { $0[VerticalAlignment.center] + 4 }
+                            Text(plugin.statusLabel()).font(.system(size: 12, weight: .semibold)).fixedSize()
+                            Text("· \(plugin.statusHint())").font(.system(size: 12)).foregroundStyle(.white.opacity(0.6)).lineLimit(2)
+                        }
+                        .hoverHelp(PluginText.help(plugin.statusLabel(), plugin.statusHint()))
+                    }
+                    if plugin.status == .error, let err = plugin.error {
+                        Text(tr("Сбой плагина: \(err)", "Plugin failure: \(err)")).font(.system(size: 12)).foregroundStyle(hexColor(0xFF8A80))
+                    }
+                }
+                .frame(minWidth: 220, maxWidth: 300, alignment: .leading)
+                .layoutPriority(1)
+                .hoverHelp(PluginText.help(tooltip: first.tooltip, plugin.headline), always: first.tooltip != nil)
+                VStack(alignment: .leading, spacing: 8) {
+                    if first.sparkLabel != nil || first.sparkNote != nil {
+                        HStack {
+                            Text(first.sparkLabel ?? "").lineLimit(1)
+                            Spacer(minLength: 8)
+                            Text(first.sparkNote ?? "").lineLimit(1)
+                        }
+                        .font(.system(size: 12)).foregroundStyle(.white.opacity(0.55))
+                    }
+                    SparkBars(values: first.spark, avg: first.sparkAvg, highlight: accent, spacing: 5, radius: 3, showAverage: true, fixedTop: first.sparkMax)
+                        .frame(height: 86)
+                }
+                .frame(maxWidth: .infinity)
+                Button { Task { await store.refresh(plugin: plugin.id) } } label: { Image(systemName: "arrow.clockwise") }
+                    .buttonStyle(CapsuleStyle(height: 28, expand: false))
+                    .help(tr("Обновить плагин", "Refresh plugin"))
+                    .frame(maxHeight: .infinity, alignment: .top)
+            }
+            .fixedSize(horizontal: false, vertical: true)
+            if !offers.isEmpty {
+                HStack { ForEach(Array(offers.enumerated()), id: \.offset) { _, o in OfferButton(store: store, item: o.0, offer: o.1) } }
+            }
+        }
+        .padding(.horizontal, 20).padding(.vertical, 18)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 22).fill(plugin.status == .ok ? Color.white.opacity(0.06) : c.opacity(0.16)))
+        .overlay(RoundedRectangle(cornerRadius: 22).strokeBorder(plugin.status == .ok ? Color.white.opacity(0.1) : c.opacity(0.35), lineWidth: 0.5))
+    }
+
+    private var plainHero: some View {
         let c = plugin.status.color
         let first = plugin.header.first { !$0.separator }
         return VStack(alignment: .leading, spacing: 10) {
@@ -979,7 +1084,7 @@ struct PluginDetailView: View {
                 VStack(alignment: .leading, spacing: 4) {
                     // the title isn't truncated with an ellipsis: it wraps (up to three lines), the column takes the full width
                     // full text in a tooltip: the title is truncated after three lines, the explanation after two
-                    Text(plugin.headline).font(.system(size: 17, weight: .bold))
+                    Text(plugin.headline).font(.system(size: 17, weight: .bold, design: first?.isMono == true ? .monospaced : .default))
                         .lineLimit(3).fixedSize(horizontal: false, vertical: true)
                         .reportsTruncation(plugin.headline, font: .system(size: 17, weight: .bold))
                         .hoverHelp(PluginText.help(plugin.headline))
@@ -991,9 +1096,17 @@ struct PluginDetailView: View {
                             .reportsTruncation("· \(plugin.statusHint())", font: .system(size: 12))
                     }
                     .hoverHelp(PluginText.help(plugin.statusLabel(), plugin.statusHint()))
+                    // `until=`: a live countdown to the moment (G18)
+                    if let until = first?.until {
+                        HStack(spacing: 5) {
+                            Image(systemName: "timer").font(.system(size: 12))
+                            CountdownText(until: until, font: .system(size: 13, weight: .semibold))
+                        }
+                        .foregroundStyle(pluginAccent(plugin))
+                    }
                     let rest = plugin.header.dropFirst().filter { !$0.separator && $0.offer == nil }
                     ForEach(Array(rest.enumerated()), id: \.offset) { _, it in
-                        Text(it.title).font(.system(size: 12)).foregroundStyle(.white.opacity(0.7)).lineLimit(3)
+                        Text(it.title).font(it.isMono ? .system(size: 12, design: .monospaced) : .system(size: 12)).foregroundStyle(.white.opacity(0.7)).lineLimit(3)
                             .reportsTruncation(it.title, font: .system(size: 12))
                             .hoverHelp(PluginText.rowHelp(it), always: it.tooltip != nil)
                     }
@@ -1096,7 +1209,9 @@ struct BlockNode: View {
 
     var body: some View {
         let it = node.item
-        if let c = node.control {
+        if node.chart != nil {
+            PluginChartView(store: store, node: node, card: false)
+        } else if let c = node.control {
             // a control reached directly (inside details, a gauge card): drawn on its own
             if c == .table { PluginTableView(store: store, node: node, card: false) } else { ControlsGrid(store: store, nodes: [node]) }
         } else {
@@ -1105,7 +1220,10 @@ struct BlockNode: View {
     }
 
     @ViewBuilder private func lineBody(_ it: Item) -> some View {
-        VStack(alignment: .leading, spacing: 5) {
+        // a top-level heading over rows with `bar=` (a ranked list) reads as a card title, like the chart cards
+        let barHeading = depth == 0 && node.children.contains { $0.item.bar != nil }
+        let titleFont = Font.system(size: barHeading ? 15 : depth == 0 ? 13 : 12, weight: depth == 0 && node.hasChildren ? .semibold : .regular)
+        VStack(alignment: .leading, spacing: barHeading ? 12 : 5) {
             if it.separator || (it.isDetails && node.hasChildren) {
                 EmptyView()
             } else if let offer = it.offer {
@@ -1114,6 +1232,8 @@ struct BlockNode: View {
                 } else {
                     OfferButton(store: store, item: it, offer: offer)
                 }
+            } else if it.bar != nil {
+                BarLineView(item: it, depth: depth)
             } else {
                 HStack(spacing: 7) {
                     if let st = it.status { Circle().fill(st.color).frame(width: 7, height: 7) }
@@ -1121,11 +1241,13 @@ struct BlockNode: View {
                         Image(systemName: sym).font(.system(size: 12))
                             .foregroundStyle(swiftBarColor(it.iconColor ?? it.color) ?? .white.opacity(0.6))
                     }
+                    // `font=mono`: a monospaced title (ids, hashes, aligned figures)
+                    let font = it.isMono ? titleFont.monospaced() : titleFont
                     Text(it.title)
-                        .font(.system(size: depth == 0 ? 13 : 12, weight: depth == 0 && node.hasChildren ? .semibold : .regular))
+                        .font(font)
                         .foregroundStyle(swiftBarColor(it.color) ?? (depth == 0 ? .white : .white.opacity(0.65)))
                         .textSelection(.enabled)
-                        .reportsTruncation(it.title, font: .system(size: depth == 0 ? 13 : 12, weight: depth == 0 && node.hasChildren ? .semibold : .regular))
+                        .reportsTruncation(it.title, font: font)
                     if let s = it.session { SessionTag(session: s) }
                     if let badge = it.badge { BadgeView(text: badge, color: it.badgeColor) }
                 }
@@ -1142,11 +1264,14 @@ struct BlockNode: View {
                 let rest = node.children.filter { !gathered($0) }
                 let runs = ItemTree.runs(rest)
                 let hasControls = runs.contains { if case .node = $0 { return false } else { return true } }
-                VStack(alignment: .leading, spacing: hasControls ? 10 : 4) {
+                // rows with `bar=` (a ranked list under a heading) line up with the heading, like controls
+                let flush = hasControls || rest.contains { $0.item.bar != nil }
+                VStack(alignment: .leading, spacing: hasControls ? 10 : flush ? 10 : 4) {
                     ForEach(Array(runs.enumerated()), id: \.offset) { _, run in
                         switch run {
                         case .controls(let nodes): ControlsGrid(store: store, nodes: nodes)
                         case .table(let n): PluginTableView(store: store, node: n, card: false)
+                        case .chart(let n): PluginChartView(store: store, node: n, card: false)
                         case .node(let n): BlockNode(store: store, node: n, depth: depth + 1)
                         }
                     }
@@ -1155,7 +1280,7 @@ struct BlockNode: View {
                     }
                 }
                 // controls and tables under a heading line line up with it, as in the "Page" design
-                .padding(.leading, hasControls ? 0 : 16)
+                .padding(.leading, flush ? 0 : 16)
             }
         }
     }
@@ -1378,24 +1503,44 @@ struct OfferButton: View {
     let offer: Offer
     /// Table rows use a smaller capsule, a table header — a filled one.
     var style = CapsuleStyle(height: 26, expand: false)
+    /// An immediate input action (G1) draws its text field in place (the plugin page); false — a capsule that asks for the
+    /// text in a sheet (the popover, tight rows).
+    var inlineInput = true
 
     /// What the core will certainly reject (connection, unpinned build, pause, bridge) — the button is disabled, and the tooltip
     /// says why (without the bridge — how to start it).
     private var block: ActionBlock? { store.gate(offer: offer) }
 
     var body: some View {
-        Button {
-            Task { await store.perform(offer: offer, label: item.title) }
-        } label: {
-            HStack(spacing: 5) {
-                if let sym = item.sfImage, NSImage(systemSymbolName: sym, accessibilityDescription: nil) != nil { Image(systemName: sym) }
-                Text(item.title + (offer.level == .immediate ? "" : "…"))
-                if store.busyAction == offer.id { ProgressView().controlSize(.mini) }
-            }
+        if inlineInput, let spec = offer.input, offer.level == .immediate {
+            OfferInputField(store: store, item: item, offer: offer, spec: spec)
+        } else {
+            capsule
         }
-        .buttonStyle(style)
-        .help(block.map { BridgeText.help($0, primitive: offer.primitive, store) } ?? (offer.level == .immediate ? (offer.label ?? "") : offer.level == .confirmCost ? tr("С подтверждением: тратит квоту или выходит в сеть", "Asks first: uses quota or the network") : tr("С подтверждением", "Asks first")))
-        .disabled(store.busyAction != nil || block != nil)
+    }
+
+    private var capsule: some View {
+        HStack(spacing: 4) {
+            Button {
+                Task { await store.perform(offer: offer, label: item.title) }
+            } label: {
+                HStack(spacing: 5) {
+                    if let sym = item.sfImage, NSImage(systemSymbolName: sym, accessibilityDescription: nil) != nil { Image(systemName: sym) }
+                    // "…": asks first or asks for text
+                    Text(item.title + (offer.level == .immediate && offer.input == nil ? "" : "…"))
+                    if store.busyAction == offer.id { ProgressView().controlSize(.mini) }
+                }
+            }
+            .buttonStyle(style)
+            .help(block.map { BridgeText.help($0, primitive: offer.primitive, store) } ?? helpText)
+            .disabled(store.busyAction != nil || block != nil)
+            if offer.background { BackgroundMark() }
+        }
+    }
+
+    private var helpText: String {
+        let level = offer.level == .immediate ? (offer.label ?? "") : offer.level == .confirmCost ? tr("С подтверждением: тратит квоту или выходит в сеть", "Asks first: uses quota or the network") : tr("С подтверждением", "Asks first")
+        return offer.background ? [level, JobsText.backgroundHelp].filter { !$0.isEmpty }.joined(separator: "\n") : level
     }
 }
 
@@ -1420,7 +1565,7 @@ struct OfferLink: View {
             Button {
                 Task { await store.perform(offer: offer, label: item.title) }
             } label: {
-                Text(item.title + (offer.level == .immediate ? "" : "…"))
+                Text(item.title + (offer.level == .immediate && offer.input == nil ? "" : "…"))
                     .font(font)
                     .foregroundStyle(block != nil ? Color.white.opacity(0.4) : (swiftBarColor(item.color) ?? Color.accentColor))
                     .underline(hoverState.wrappedValue && block == nil)
@@ -1633,6 +1778,19 @@ struct SessionsView: View {
                     .background(RoundedRectangle(cornerRadius: 16).fill(Color.white.opacity(0.05)))
                     .overlay(RoundedRectangle(cornerRadius: 16).strokeBorder(Color.white.opacity(0.09), lineWidth: 0.5))
                 }
+                // non-Claude agent sessions that trusted plugins report (hub 0.1.3+): only "Go to tab", not counted above
+                let others = filteredExternal
+                if !others.isEmpty {
+                    Text(tr("Другие агенты", "Other agents")).font(.system(size: 13, weight: .semibold)).padding(.top, 6)
+                    VStack(spacing: 0) {
+                        ForEach(Array(others.enumerated()), id: \.element.id) { i, s in
+                            if i > 0 { Rectangle().fill(Color.white.opacity(0.08)).frame(height: 0.5) }
+                            ExternalSessionRow(store: store, session: s)
+                        }
+                    }
+                    .background(RoundedRectangle(cornerRadius: 16).fill(Color.white.opacity(0.05)))
+                    .overlay(RoundedRectangle(cornerRadius: 16).strokeBorder(Color.white.opacity(0.09), lineWidth: 0.5))
+                }
                 Text(tr("Workflow внутри сессии снаружи не останавливается — «Перейти», затем /workflows во вкладке.", "A Workflow inside a session can't be stopped from outside — use Go to tab, then /workflows in the tab."))
                     .font(.system(size: 11.5)).foregroundStyle(.white.opacity(0.5))
             }
@@ -1641,12 +1799,51 @@ struct SessionsView: View {
         .task { await store.loadCards() }
     }
 
+    private var filteredExternal: [ExternalSession] {
+        let all = (store.state?.externalSessions ?? []).sorted { $0.displayName.localizedStandardCompare($1.displayName) == .orderedAscending }
+        let q = search.trimmingCharacters(in: .whitespaces).lowercased()
+        guard !q.isEmpty else { return all }
+        return all.filter { $0.displayName.lowercased().contains(q) || ($0.agent ?? "").lowercased().contains(q) }
+    }
+
     private var filtered: [SessionInfo] {
         let order = ["waiting": 0, "busy": 1, "idle": 2]
         let all = store.sessions.sorted { (order[$0.status ?? ""] ?? 3, $0.displayName) < (order[$1.status ?? ""] ?? 3, $1.displayName) }
         let q = search.trimmingCharacters(in: .whitespaces).lowercased()
         guard !q.isEmpty else { return all }
         return all.filter { $0.displayName.lowercased().contains(q) || ($0.cwd ?? "").lowercased().contains(q) }
+    }
+}
+
+/// A non-Claude agent session (`externalSessions`): name, agent, the plugin that reports it and its terminal; the only
+/// button is "Go to tab" (`session.focus`) when the core found the tab.
+struct ExternalSessionRow: View {
+    let store: HubStore
+    let session: ExternalSession
+
+    var body: some View {
+        let owner = session.owner.map { store.plugin($0)?.title ?? $0 }
+        let sub = [session.agent, owner.map { tr("от плагина «\($0)»", "via \"\($0)\"") }, session.terminalInfo?.label ?? session.terminal]
+            .compactMap { $0 }.joined(separator: " · ")
+        HStack(spacing: 10) {
+            Image(systemName: "terminal").font(.system(size: 13)).foregroundStyle(.white.opacity(0.6)).frame(width: 18)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(session.displayName).font(.system(size: 13, weight: .medium)).lineLimit(1)
+                    .reportsTruncation(session.displayName, font: .system(size: 13, weight: .medium))
+                if !sub.isEmpty { Text(sub).font(.system(size: 11.5)).foregroundStyle(.white.opacity(0.55)).lineLimit(1) }
+            }
+            Spacer(minLength: 8)
+            if let req = store.focusRequest(external: session) {
+                let block = store.gate(external: session)
+                Button {
+                    Task { await store.perform(id: req.primitive, args: req.args, label: tr("Перейти во вкладку", "Switch to tab")) }
+                } label: { Label(tr("Перейти", "Go to tab"), systemImage: "arrow.up.forward.app") }
+                    .buttonStyle(CapsuleStyle(height: 26, expand: false))
+                    .disabled(store.busyAction != nil || block != nil)
+                    .help(block.map { BridgeText.help($0, primitive: req.primitive, store) } ?? tr("Перейти во вкладку агента", "Switch to the agent's tab"))
+            }
+        }
+        .padding(.horizontal, 14).padding(.vertical, 10)
     }
 }
 

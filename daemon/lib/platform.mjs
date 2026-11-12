@@ -42,6 +42,25 @@ export function liveStateDir({ env = process.env, home = homedir(), platform = P
   return stateDir({ env: rest, home, platform });
 }
 
+// The account's home directory from the user database, not $HOME (os.homedir() reads HOME). null — unknown.
+export function accountHome() {
+  try {
+    return userInfo().homedir || null;
+  } catch {
+    return null;
+  }
+}
+
+// Whether dir is the live hub's state directory — by $HOME (liveStateDir) or by the account's real home: the guards that
+// lift test-only switches (AGENTHUB_TEST_TIER, AGENTHUB_TEST_EXTENSIONS, self-test) must not be fooled by HOME=/tmp/x with
+// AGENTHUB_HOME pointing at the real live directory. liveStateDir itself keeps following HOME: install/update tests and
+// tools run with a fake HOME rely on it to stay out of the real directory.
+export function isLiveStateDir(dir, { env = process.env, platform = PLATFORM } = {}) {
+  if (samePath(dir, liveStateDir({ env, platform }), { platform })) return true;
+  const real = accountHome();
+  return Boolean(real) && samePath(dir, liveStateDir({ env, home: real, platform }), { platform });
+}
+
 // Whether a path is absolute — by platform rules. Not startsWith("/"): that would silently lose real paths on Windows.
 // On Windows only a drive-letter path "C:\\x" (or "C:/x"). win32.isAbsolute won't do here: it treats
 // "/x" and "\\x" as absolute (from the root of the current directory's drive — chosen by cwd, where any user may

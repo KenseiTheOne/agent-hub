@@ -85,56 +85,92 @@ struct PluginControlView: View {
 }
 
 /// `segment=true`: options in one shared track, the `selected=true` one highlighted.
+///
+/// A click lights the chosen option once and it stays lit (2026-11-12): the track remembers the choice until the plugin
+/// redraws the page with it selected, so the in-between states (the action running, its reply arriving a moment before
+/// the new page) never show — before, the highlight jumped new → old → new. No animations, and every option keeps the
+/// width of its bold title, so the track does not shift when the selection moves.
 struct SegmentTrack: View {
     let store: HubStore
     let node: ItemNode
+    /// `@State` without the macro (built without Xcode): the title of the option clicked and not yet confirmed.
+    private let chosenState = State<String?>(initialValue: nil)
 
     var body: some View {
+        let options = node.children.filter { !$0.item.separator }
+        let selectedTitle = options.first { $0.item.isSelected }?.item.title
+        let shown = chosenState.wrappedValue ?? selectedTitle
         HStack(spacing: 0) {
-            ForEach(node.children.filter { !$0.item.separator }) { SegmentButton(store: store, item: $0.item) }
+            ForEach(options) { o in
+                SegmentButton(store: store, item: o.item, lit: o.item.title == shown,
+                              locked: chosenState.wrappedValue != nil) { choose(o.item) }
+            }
         }
         .padding(2)
         .background(RoundedRectangle(cornerRadius: 9).fill(Color.white.opacity(0.08)))
         .fixedSize()
+        .transaction { $0.animation = nil; $0.disablesAnimations = true }
+        .onChange(of: selectedTitle) { _, _ in chosenState.wrappedValue = nil }
         .accessibilityElement(children: .contain)
         .accessibilityLabel(node.item.title)
+    }
+
+    private func choose(_ item: Item) {
+        guard let offer = item.offer, chosenState.wrappedValue == nil else { return }
+        chosenState.wrappedValue = item.title
+        Task {
+            await store.perform(offer: offer, label: item.title)
+            // the page with the new selection normally arrives within ~0.1 s and clears the choice (onChange above);
+            // if the action failed or the plugin kept the old option, the real selection shows again after a moment
+            try? await Task.sleep(for: .seconds(1.5))
+            if chosenState.wrappedValue == item.title { chosenState.wrappedValue = nil }
+        }
     }
 }
 
 struct SegmentButton: View {
     let store: HubStore
     let item: Item
+    /// Shown as the selected option: the plugin's `selected=true`, or the option just clicked.
+    let lit: Bool
+    /// A choice in this track is on its way: no clicks until the page confirms it.
+    let locked: Bool
+    let tap: () -> Void
     private let hoverState = State(initialValue: false)
 
     var body: some View {
-        let selected = item.isSelected
         let offer = item.offer
         let block = offer.flatMap { store.gate(offer: $0) }
-        let enabled = !selected && offer != nil && block == nil && store.busyAction == nil
-        Button {
-            if let offer { Task { await store.perform(offer: offer, label: item.title) } }
-        } label: {
+        let enabled = !lit && !locked && offer != nil && block == nil && store.busyAction == nil
+        // another action running dims nothing: the options only stop taking clicks until it ends
+        let looksEnabled = offer != nil && block == nil
+        let title = item.isSelected ? item.title : OfferHelp.title(item, offer)
+        Button(action: tap) {
             HStack(spacing: 4) {
                 if let sym = item.sfImage, NSImage(systemSymbolName: sym, accessibilityDescription: nil) != nil {
                     Image(systemName: sym).font(.system(size: 11))
                 }
-                Text(selected ? item.title : OfferHelp.title(item, offer)).lineLimit(1)
-                if let offer, store.busyAction == offer.id { ProgressView().controlSize(.mini) }
+                // the bold title reserves the width, so lighting an option does not widen it
+                ZStack {
+                    Text(title).fontWeight(.semibold).hidden()
+                    Text(title).fontWeight(lit ? .semibold : .regular)
+                }
+                .lineLimit(1)
             }
-            .font(.system(size: 12.5, weight: selected ? .semibold : .regular))
-            .foregroundStyle(.white.opacity(selected || enabled ? 1 : 0.4))
+            .font(.system(size: 12.5))
+            .foregroundStyle(.white.opacity(lit || looksEnabled ? 1 : 0.4))
             .padding(.horizontal, 10)
             .frame(height: 26)
-            .background(RoundedRectangle(cornerRadius: 7).fill(Color.white.opacity(selected ? 0.22 : hoverState.wrappedValue && enabled ? 0.08 : 0)))
+            .background(RoundedRectangle(cornerRadius: 7).fill(Color.white.opacity(lit ? 0.22 : hoverState.wrappedValue && enabled ? 0.08 : 0)))
             .contentShape(RoundedRectangle(cornerRadius: 7))
         }
         .buttonStyle(.plain)
         // the selected option is not a button to press; an option without an offer is shown, but can't be chosen
-        .allowsHitTesting(!selected)
-        .disabled(!selected && !enabled)
+        .allowsHitTesting(!lit && !locked)
+        .disabled(!lit && !enabled && !locked)
         .onHover { hoverState.wrappedValue = $0 }
-        .accessibilityAddTraits(selected ? .isSelected : [])
-        .hoverHelp(selected ? PluginText.help(tooltip: item.tooltip, item.note) : offer.map { OfferHelp.text($0, store) } ?? PluginText.help(tooltip: item.tooltip, item.note),
+        .accessibilityAddTraits(lit ? .isSelected : [])
+        .hoverHelp(item.isSelected ? PluginText.help(tooltip: item.tooltip, item.note) : offer.map { OfferHelp.text($0, store) } ?? PluginText.help(tooltip: item.tooltip, item.note),
                    always: true)
     }
 }
@@ -294,8 +330,9 @@ struct PluginTableView: View {
                         .hoverHelp(PluginText.rowHelp(node.item), always: node.item.tooltip != nil)
                         .frame(maxWidth: .infinity, alignment: .leading)
                     ForEach(t.headerOffers) { o in
+                        // a header capsule: an input action asks for its text in a sheet, no field in the table header
                         OfferButton(store: store, item: o.item, offer: o.item.offer!,
-                                    style: CapsuleStyle(fill: hexColor(0x0A84FF), stroke: .clear, height: 28, expand: false))
+                                    style: CapsuleStyle(fill: hexColor(0x0A84FF), stroke: .clear, height: 28, expand: false), inlineInput: false)
                             .fixedSize()
                     }
                 }
@@ -406,12 +443,15 @@ struct TableRowView: View {
     let widths: TableSlotWidths
     let marks: Bool
     let inGroup: Bool
+    @Environment(\.pluginAccent) private var accent
 
     var body: some View {
         let it = row.item
         TableRowLayout(columns: columns, textSlot: widths.text, iconSlot: widths.icon) {
             title(it)
-            ForEach(0..<max(0, columns - 1), id: \.self) { i in cell(row.cells[i], color: row.colors[i]) }
+            ForEach(0..<max(0, columns - 1), id: \.self) { i in
+                if i == row.barCell, let p = it.bar { barCell(row.cells[i], percent: p) } else { cell(row.cells[i], color: row.colors[i]) }
+            }
             HStack(spacing: 6) { ForEach(row.slot) { slotItem($0.item) } }
                 .fixedSize()
                 .background(GeometryReader { g in Color.clear.preference(key: TableSlotWidthsKey.self, value: TableSlotWidths(text: g.size.width)) })
@@ -427,7 +467,32 @@ struct TableRowView: View {
         .background(RoundedRectangle(cornerRadius: 8).fill(Color.white.opacity(inGroup ? 0 : 0.04)))
     }
 
+    /// `bar=` with `barColumn=` in this cell: the bar and the cell text (if any) to its right.
+    private func barCell(_ text: String, percent: Double) -> some View {
+        HStack(spacing: 8) {
+            // the row's color, else its mark's color (a legend square), else the plugin's
+            ThinBar(percent: percent, color: swiftBarColor(row.item.color ?? row.item.iconColor) ?? accent, height: 5)
+            if !text.isEmpty {
+                Text(text).font(.system(size: 12.5)).lineLimit(1).fixedSize()
+                    .foregroundStyle(.white.opacity(inGroup ? 0.62 : 0.72))
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
     @ViewBuilder private func title(_ it: Item) -> some View {
+        if let p = it.bar, row.barCell == nil {
+            // `bar=` without a column of its own: a hairline bar under the title
+            VStack(alignment: .leading, spacing: 3) {
+                titleLine(it)
+                ThinBar(percent: p, color: swiftBarColor(it.color ?? it.iconColor) ?? accent, height: 3)
+            }
+        } else {
+            titleLine(it)
+        }
+    }
+
+    @ViewBuilder private func titleLine(_ it: Item) -> some View {
         HStack(spacing: 8) {
             if marks {
                 Group {
@@ -468,8 +533,9 @@ struct TableRowView: View {
 
     @ViewBuilder private func slotItem(_ it: Item) -> some View {
         if let offer = it.offer {
+            // a tight table row: an input action stays a capsule and asks for its text in a sheet
             OfferButton(store: store, item: it, offer: offer,
-                        style: CapsuleStyle(fill: .white.opacity(0.1), stroke: .white.opacity(0.18), height: 24, expand: false))
+                        style: CapsuleStyle(fill: .white.opacity(0.1), stroke: .white.opacity(0.18), height: 24, expand: false), inlineInput: false)
                 .fixedSize()
         } else {
             Text(it.title).font(.system(size: 11.5)).lineLimit(1)

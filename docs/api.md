@@ -22,6 +22,26 @@ and is bound to the connection:
 | `cli` | everything else, including `curl` | reading (`/state`, `/events` without `hook.*` events, `/journal`) and `immediate` actions, except app-only ones |
 | `foreign` | another uid (the 0600 socket does not allow this; just in case) | nothing, `403 peer:uid` |
 
+**Plugin processes (2026-11-12).** Next to the class the server binds `peer.plugin = {id, trusted, tier, source}` when
+the client pid **or one of its ancestors** (any depth by ppid, not above the daemon) is a running plugin process: a
+standard run, a streamable process, an action or a background job (the `pluginByPid` fact with `{actions: true}`) — or
+**the process group** of the client (or of one of those ancestors) is one: every plugin process is spawned detached and
+leads its own group, which its descendants inherit even when they are reparented to launchd. So a `curl` started by a
+shell plugin, `agenthub` from a plugin's action, or a double-forked helper is recognized as that plugin.
+
+- **Untrusted plugin** (`community`, `local`): only `GET /health` and `GET /peer`; every other route — `403
+  peer:untrusted-plugin` (`{error, peer, plugin}`), journaled as `denied {route, peer, pid, plugin, tier, error}` at
+  most once a minute per plugin and route. Why one rule instead of a trimmed `/state`: such a plugin has no use for the
+  hub API — it doesn't get `AGENTHUB_HUB_SOCKET`, connections, terminal and secrets need trust — while the `cli` view
+  lets it read every session with its folder, press `immediate` actions of other plugins, refresh them and pause the
+  hub. A smaller `/state` would be one more contract to keep in sync; a 403 is simple to explain and to test.
+- **Trusted plugin** (`builtin`, `official`, `own`): the class it already had (`cli`), nothing changes. Routes that
+  serve plugins (`/connections/:id/mcp`, `/connections/:id/http`, `/terminal/*`) still identify the plugin themselves.
+- Extension routes may opt in with `untrustedPlugin: true` (none do today).
+- **Limit:** a process that leaves both the tree and the plugin's process group (`setsid`/`setpgid`, then a double fork
+  to launchd) or a connection without peercred (`peer:no-peercred`) is a plain `cli` again — the rule closes the easy path, not an attacker with the same
+  UID (see "Limit" below). `GET /peer` shows `plugin: {id, trusted}` (or `null`) for debugging.
+
 Requirements are strings in `config.json` (`requirements.app`, `requirements.claudeCode`), not in code:
 
 - `requirements.app` is `null` by default → the `app` class is unreachable (everything is `cli`). The default mode
@@ -71,6 +91,7 @@ An error response is `{"error": "<code>", ...}`. The code is stable and never tr
 | 403 | `peer:cli`, `peer:hook`, `peer:bridge`, `peer:uid` | the route or action is not available to the class |
 | 403 | `peer:app-signature`, `peer:app-requirement-missing` | the executable is in `AgentHub.app`, but the signature failed / no requirement is set (for actions) |
 | 403 | `peer:no-claude-ancestor` | `agenthub-hook` without a signed Claude Code among its ancestors |
+| 403 | `peer:untrusted-plugin` | the client is a process of an untrusted plugin (or its child): only `/health` and `/peer` ("Plugin processes" above) |
 | 403 | `peer:session-mismatch`, `peer:no-session-file` | the hook's `session_id` did not match `~/.claude/sessions/<claudePid>.json` |
 | 403 | `confirm:invalid` | the confirmation token is foreign, expired, used or from another pid |
 | 404 | `not-found` | no such route/action/plugin |
@@ -79,17 +100,18 @@ An error response is `{"error": "<code>", ...}`. The code is stable and never tr
 | 413 | `too-large` | the body exceeds the limit |
 | 423 | `estop` | the hub is paused (hub pause; internal name estop, file `ESTOP`) |
 | 428 | `confirm-required` | a confirmation is needed (see below) |
-| 429 | `terminal:rate-limited` | more often than allowed (the `/terminal/*` routes, contract 3): `scope`, `retryAfterMs` |
+| 429 | `terminal:rate-limited`, `mcp:wait`, `http:wait`, `own:too-many-requests` | more often than allowed: the `/terminal/*` routes (`scope`, `retryAfterMs`), a fresh or write call of a connection held by its budget or backoff (`why`, `nextAt`; not sent), too many own-plugin requests |
 | 500 | `internal` | daemon error |
 
 ## Routes
 
-### `GET /health` — all classes
-`{"ok":true,"pid":123,"uptimeMs":4567,"contract":2}` — `contract` is the plugin contract version the core understands
+### `GET /health` — all classes (untrusted plugin processes too)
+`{"ok":true,"pid":123,"uptimeMs":4567,"contract":3}` — `contract` is the plugin contract version the core understands
 (`daemon/lib/meta.mjs` CONTRACT_VERSION; changelog in [`extension-points.md`](extension-points.md), "Contract versions").
 
-### `GET /peer` — all classes
-Your class: `{"class":"cli","reason":null,"pid":4242}`. For debugging the app signature.
+### `GET /peer` — all classes (untrusted plugin processes too)
+Your class: `{"class":"cli","reason":null,"pid":4242,"plugin":null}`. For debugging the app signature; `plugin` —
+`{id, trusted}` when the client is a plugin process or its child ("Plugin processes" above).
 
 ### `GET /state` — app, cli
 Snapshot:
@@ -101,14 +123,20 @@ Snapshot:
   "waitingSessions": 1,                  // verified sessions with status=waiting
   "severity": {"ok":0,"unknown":1,"wait":2,"block":3,"error":4},
   "plugins": [{
-    "id": "quota", "source": "builtin|installed|local", "tier": "builtin|official|community|local",
+    "id": "quota", "source": "builtin|installed|local", "tier": "builtin|official|own|community|local",
     "trusted": true, "official": false, "file": "/…/quota.5m.mjs",
+    "registry": "extra", "registryLabel": "extra",  // installed registry plugins only: the registry it came from; registryLabel — null with only the default registry
     "type": "standard|streamable", "title": "Quota", "desc": "…", "lang": "en", "version": "1.0.0", "interval": "5m", "schedule": null,
     "author": {"name": "Kensei", "github": "KenseiTheOne"},          // <agenthub.author.*>; {} — not specified
     "statusLabels": {"wait": {"label": "Quota running low", "hint": "…"}},   // <agenthub.status>, in the hub language
     "effects": ["open.url"],
-    "actions": [{"id":"skip","level":"confirm","title":"Skip task","arg":{"name":"taskId","pattern":"^[A-Za-z0-9_-]{1,64}$"}}],
-    "pushRules": [{"key":"build-blocked","label":"…","hold":"evening","kind":"plugin"}],   // <agenthub.push>, trusted plugins only
+    "actions": [{"id":"skip","level":"confirm","title":"Skip task","arg":{"name":"taskId","pattern":"^[A-Za-z0-9_-]{1,64}$"}},
+                {"id":"note","level":"confirm","title":"Add a note","arg":{"name":"text","pattern":"^.{1,200}$"},
+                 "input":{"placeholder":"Note text","maxLength":200}},                 // input=: the human types the value
+                {"id":"sync","level":"immediate","title":"Sync","arg":null,"background":true,"net":"none"}],
+    "jobs": [{"id":"9f2c4e1a7b3d5c60","actionId":"sync","title":"Sync","startedAt":"…","pid":4242}],   // running background jobs
+    "pushRules": [{"key":"build-blocked","label":"…","hold":"evening","kind":"plugin"}],   // <agenthub.push>: trusted plugins; community — kind="plugin" only, label only ("community": true)
+    "testTier": true,                     // only on a test hub with AGENTHUB_TEST_TIER=own: a Plugins/local plugin running as own
     "icon": {"symbol":"gauge.with.dots.needle.50percent","color":"#0A84FF"},   // <agenthub.icon>; null — not declared
     "contract": 2,                        // <agenthub.contract>; 1 — not declared
     "connections": [{"id":"tix","title":"Tix","note":"…","url":"https://mcp.example.com/mcp","host":"mcp.example.com","hosts":[],
@@ -126,13 +154,21 @@ Snapshot:
                  {"name":"cmux.focus","level":"immediate","remoteAllowed":false,"appOnly":false,"safeUnderEstop":false,
                   "aliasOf":"terminal.focus","deprecated":true}],
   "terminals": {"adapters":[{"id":"cmux","label":"cmux","capabilities":["focus","read-screen","send-text","send-esc","launch"],
-                             "via":"bridge","installed":true,"available":false,"reason":"bridge-offline","sessions":0},
+                             "via":"bridge","installed":true,"available":false,"reason":"bridge-offline","reasonText":null,
+                             "needsSetup":false,"messages":{},"source":"builtin","sessions":0},
                             {"id":"iterm2","label":"iTerm2","capabilities":["focus","launch"],"via":null,"installed":true,
-                             "available":true,"reason":null,"sessions":2}],
+                             "available":true,"reason":null,"reasonText":null,"needsSetup":false,"messages":{},
+                             "source":"builtin","sessions":2}],
                 "launch":{"adapter":"iterm2","why":"sessions"},"prefer":"auto"},
+  "extensions": {"dir":"~/Library/Application Support/AgentHub/Extensions","enabled":true,"testAutoApprove":false,
+                 "consent":"An extension is code that runs inside the Agent Hub daemon with its full rights: …","pending":1,
+                 "items":[{"path":"services/my-sync.mjs","file":"/…/Extensions/services/my-sync.mjs","kind":"service",
+                           "name":"my-sync","sha256":"<64 hex>","size":812,"mtime":"2026-11-12T10:00:00.000Z",
+                           "status":"pending","loaded":false,"restartRequired":false,"approvedSha256":null,
+                           "autoApproved":false,"error":null,"errorText":null}]},
   "appPin": {"kind":"cdhash","fingerprint":"cdhash:<40 hex>","changedAt":"2026-11-05T09:53:53.645Z","by":"agenthub pin-app",
              "under":"terminal","source":"check","old":"none","path":"/…/agent-hub/app/build/AgentHub.app","generation":1},
-  "lang": {"setting":"system","effective":"en","system":"en"},
+  "lang": {"setting":"system","effective":"en","system":"en","locales":["en-US","de-DE"]},
   "hub": {"home":"/tmp/ahl","testMode":true,"builtinDir":"/tmp/ahl/Builtin","builtin":"copy","cli":"/…/agent-hub/daemon/bin/agenthub"},
   "launchAtLogin": {"setting":true,"launchAgent":"ok"},
   "notifications": {"enabled":true,"kinds":{"sessions":true,"updates":true,"problems":true,"other":true},
@@ -187,9 +223,9 @@ still running), "don't know" (`unknown`), `needs-on`, and last a summary that is
 (`waiting`: PermissionRequest cards and sessions in `waiting` — "2 sessions are waiting for an answer: … — you can
 answer after turning the Mac back on"; "Sessions" is then absent from `checked` — there is already a line about them).
 Hub texts are in its language, plugin phrases as the plugin sent them (it gets `AGENTHUB_LANG`); phrases of plugins that
-are neither built-in nor official get a "<name>: " prefix (so a third-party plugin cannot pass its line off as a hub
+are not trusted (builtin, official, own) get a "<name>: " prefix (so a third-party plugin cannot pass its line off as a hub
 line). `target` — where the line leads: `sessions`, `settings`, `manager`, `plugin:<id>`; `plugin` — the plugin name on
-its lines; `trusted` — a phrase from a built-in or official plugin: only such a phrase goes into the card title ("OK, but
+its lines; `trusted` — a phrase from a trusted plugin (builtin, official, own): only such a phrase goes into the card title ("OK, but
 build at 04:30"). `checked` — names of sources where all is well: "Sessions" (only if the `claude-sessions` sessions
 plugin is alive and sent a frame; no frame or the plugin itself failing — an `unknown` line "Don't know about sessions:
 the sessions plugin did not answer"; a frame exists but the plugin reported `status=unknown`/`error` with its own reason
@@ -250,12 +286,26 @@ found the session tab (`cmux`, `tmux`, `iterm2`, `terminal-app`; a string, as in
 capabilities, focusable, via}` or `null`: what the hub can do in that terminal (`focus`, `read-screen`, `send-text`,
 `send-esc`, `launch`), `via: "bridge"` — through the cmux bridge. The adapter's availability (the cmux bridge) is not
 included — see `bridge` and `terminals`.
+`externalSessions` (hub 0.1.3+, within contract 3) — sessions of other (non-Claude) agents that trusted plugins report
+with `agentSession=<id> pid=<pid>` lines: `[{"sessionId":"cx-1","pid":48213,"startSec":1792600000,"kind":"external",
+"agent":"codex"|null,"name":"Refactor auth"|null,"owner":"<plugin id>","updatedAt":0,"terminal":"iterm2"|null,
+"focusable":true,"terminalInfo":{…}|null}]`. A separate list: `sessions` stays Claude Code only (its consumers and
+`Cache/claude-sessions.json` see no change). There is no signature check, so the only operation is `session.focus
+<sessionId>` (the "Go to tab" button when `focusable`); interrupt, stop, answers, typing do not apply. An entry goes when
+the line disappears, the process ends (or its pid is reused) or the plugin is removed; updates come as the
+`sessions.external` event. An older daemon has no field.
 `terminals` — Settings → Terminal ([`extension-points.md`](extension-points.md#terminal-adapter-daemonlibterminalsidmjs)):
 `adapters[]` — every built-in terminal adapter with its `capabilities`, `via`, `installed` (the app or binary is on this
 Mac; `null` — unknown), `available`/`reason` (can run operations now; cmux without the bridge — `false`,
-`bridge-offline`), `sessions` (live sessions detected in it); `launch` — where `session.launch` opens a new tab
+`bridge-offline`), `reasonText` — the adapter's own text for `reason` in the hub language (its `messages` export; `null` —
+the shell uses its own text for the code), `needsSetup` — the adapter says a human must set something up first (install a
+helper, grant a permission: `available()` returned `{error, setup: true}`; the shell shows `reasonText` as a setup hint),
+`messages` — all of the adapter's own texts `{code: text}` in the hub language (for refusals of its operations,
+`409 facts:<code>` / `terminal:<code>`), `source` — `builtin` (`daemon/lib/terminals`) or `extension`
+(`<home>/Extensions/terminals`, below "Extensions"), `sessions` (live sessions detected in it); `launch` — where `session.launch` opens a new tab
 (`{adapter, why}`: `setting` — `services.terminal.launch`, `sessions` — most live sessions run there, `installed` — the
 first installed of cmux, iTerm2, Terminal) or `null` — no terminal can; `prefer` — the setting (`auto` by default).
+`extensions` — external daemon extensions in `<home>/Extensions` (below, "Extensions"); an older daemon has no field.
 `bridge` — the cmux bridge (the actions service; `null` if there is no such service): `online` — connected and polling
 (stopped polling for more than 40 s — `false` and the `bridge.disconnected` event with `reason: "stale"`),
 `since`/`version` — since when and which version, `command` — the bridge script path (the first of
@@ -281,13 +331,20 @@ working tree `<repo>/plugins`), `custom`. `builtinDir` — the directory the dae
 login as a link to the profile); the same field in `GET /registry/catalog` comes from the index.
 `title`, `desc`, `actions[].title`, `statusLabels` — in the effective hub language (the `lang` variants of the metadata).
 `Item`: `{title, level, separator?, status?, event?, params:{color,sfimage,…}, offer?, session?}`;
-`offer`: `{id, kind:"effect"|"action", primitive, action, level, label}` — `id` is passed to `POST /actions/:id`;
-for a parameterized action the argument (from `arg=` in the output) is already part of the offer and the `label`;
-`tier` — the plugin tier: `builtin` (the app's directory), `local` (`Plugins/local`), and for installed ones `official`
-or `community` — by the verified signed catalog **at check time** (the id is named `official`, the archive sha256 is the
+`offer`: `{id, kind:"effect"|"action", primitive, action, level, label, appOnly?, input?, background?}` — `id` is passed
+to `POST /actions/:id`; for a parameterized action the argument (from `arg=` in the output) is already part of the
+offer and the `label`; `input: {placeholder, maxLength, pattern}` — the action takes text a human types (render a field;
+`pattern` is the plugin's JavaScript pattern, for a hint only — the core checks it); `background: true` — pressing starts
+a job (`jobs[]`);
+`actions[]`: `{id, level, title, arg, input?: {placeholder, maxLength}, background?: true, net?: "none"}` — `level` is the
+effective level after the core's floors; `jobs[]` — running background jobs of the plugin `{id, actionId, title,
+startedAt, pid}`: stop one with `POST /actions/job.cancel {"args":{"job":"<id>"}}` (app only);
+`tier` — the plugin tier: `builtin` (the app's directory), `local` (`Plugins/local`; `own` on a test hub with
+`AGENTHUB_TEST_TIER=own`, then `testTier: true`), `own` (installed from your own folder after a human confirmed it in the
+app), and for installed registry ones `official` or `community` — by the verified signed catalog **at check time** (the id is named `official`, the archive sha256 is the
 same as in `plugins.lock`, the files on disk are exactly that archive), never from the plugin metadata and not from a
 lock entry alone; if the registry owner demoted the tier, after `POST /registry/fetch` the plugin runs as `community`;
-`trusted` = `builtin` or `official`;
+`trusted` = `builtin`, `official` or `own`;
 `session`: `{id, pid, verified: true|false|null, label?: "signature not verified"}` (`label` in the hub language; `null` — the check is still running).
 
 ### `GET /events` — app, cli (SSE)
@@ -302,19 +359,23 @@ always below the new instance's start, so after a daemon restart the client gets
 | `event` | `data` |
 |---|---|
 | `snapshot` | `{state}` |
-| `plugin` | `{plugin: <plugin state>, status: <worst status>}` — only when the plugin state changed |
+| `plugin` | `{plugin: <plugin state>, status: <worst status>}` — only when the plugin state changed; at most one per 250 ms per plugin (`plugins.emitMinIntervalMs`), the latest state always follows (trailing); the first change after a quiet period, the first frame after an action or a job's end and a change of `jobs` go out at once |
 | `plugin.removed` | `{plugin: id, restart?: true}` — `restart`: the host removed the plugin to restart it (the same id on disk; it comes back with the next `plugin`), this is not a removal; if it does not come back, a `plugin.removed` without `restart` follows |
 | `sessions` | `{sessions: [...]}` |
+| `sessions.external` | `{sessions: [...]}` — the whole `externalSessions` list after a change (non-Claude agent sessions) |
 | `estop` | `{on: bool}` |
-| `action` | `{action: id, ok, plugin, primitive}` |
-| `event.raised` / `event.cleared` | `{plugin, key: "<plugin>:<key>", status?}` — from plugins' `event=` and `plugin-error` |
-| `push.notify` | `{notifyId, title, subtitle, body, plugin, key, digest}` — show a macOS notification (the push service, [`daemon/lib/push/README.md`](../daemon/lib/push/README.md)); the shell shows a banner and answers `POST /push/ack` |
+| `action` | `{action: id, ok, plugin, primitive, job?}` — `job`: the background job the action started |
+| `job.started` / `job.exited` | `{plugin, actionId, job, pid}` / `{plugin, actionId, job, ok, code, signal, cancelled?}` — a background job (`cancelled`: `cancelled`, `paused`, `plugin-removed`, `plugin-restarted`, `shutdown`) |
+| `event.raised` / `event.cleared` | `{plugin, key: "<plugin>:<key>", status?, title?}` — from plugins' `event=` and `plugin-error`; `title` (raised only, when the row has one) — the sanitized text of the first row carrying the key, ≤ 120 graphemes |
+| `push.notify` | `{notifyId, title, subtitle, body, plugin, key, digest, actions, href}` — show a macOS notification (the push service, [`daemon/lib/push/README.md`](../daemon/lib/push/README.md)); the shell shows a banner and answers `POST /push/ack`. `actions` — up to 2 banner buttons `[{offer, label, level}]`: the offers of the direct children of the line with `event=` (no typed-input offers), taken from the plugin's current frame when the banner is sent; pressing one is `POST /actions/:offer` exactly like the panel button (not `immediate` — the app's confirmation sheet first). `href` — the click target: the event line's `href=` when `open.url` would accept it (http/https, no credentials), else `null` (click — the plugin page). Both are empty (`[]`, `null`) for hub events, the digest and banners without the row text (untrusted plugins; a community event only with its reviewed rule). An older daemon sends neither: no buttons, click — the plugin page |
+| `secrets.changed` | `{plugin, key, state}` — a declared secret was set or removed in the app (section "Secrets"); never the value |
+| `extensions.changed` | `{extensions: <as in /state>}` — a file in `<home>/Extensions` appeared, changed or disappeared, or an approval, load or revocation happened (below, "Extensions") |
 | `hook.card` / `hook.card.removed` / `hook.paused` | session answer cards, metadata only ([`hook.md`](hook.md)) |
 | `app-pin.changed` | `{appPin: <as in /state>, old: "<fingerprint>"}` — `requirements.app` changed (a build was re-pinned) |
 | `app-pin.path-changed` | `{appPin: <as in /state, with path>, old: "<previous path>"\|null}` — `appPin.path` changed with the same requirement (the bundle the daemon launches); connections are not dropped |
 | `hub.stopping` | `{reason: "shutdown"}` — the daemon is stopping on `POST /shutdown` (the app is quitting); connections close next |
 | `app.restart-stopped` | `{restarts, windowMs}` — the app keeps crashing, supervision (the app service) stopped restarting it; the push service → a notification |
-| `settings.changed` | `{lang: {setting, effective, system}}` — the hub language changed; `{checkPluginUpdates: bool}` — the "Check for plugin updates" switch; `{notifications: <as in /state>}` — "Settings → Notifications" |
+| `settings.changed` | `{lang: {setting, effective, system, locales}}` — the hub language changed; `{checkPluginUpdates: bool}` — the "Check for plugin updates" switch; `{notifications: <as in /state>}` — "Settings → Notifications" |
 | `hub-update.status` | `{hubUpdate: <as in /state>}` — something in the hub update changed: the check, the available version, installation progress, the hub pause (`blocked`) |
 | `hub-update.available` | `{version, tag, from}` — a new release was found; once per version (`HubUpdate/check.json`), push "A new Agent Hub version is available" |
 | `hub-update.restarting` | `{label, op}` — the hub is switching to another version: the app quits by itself **without** `POST /shutdown` |
@@ -341,7 +402,8 @@ always below the new instance's start, so after a daemon restart the client gets
 ignored) **or** a primitive name (`open.url`) with arguments in the body. A declared plugin action (`<agenthub.action>`)
 can only be called through an offer.
 
-Body: `{"args": {...}, "confirmToken": "…"}` (both optional).
+Body: `{"args": {...}, "input": "…", "confirmToken": "…"}` (all optional). `input` — the text a human typed into the
+field of an offer with `input` (see below); for any other target it is ignored.
 
 The order of core checks: target → peer class → hub pause (estop) → arguments of a direct primitive call → `verifyFacts`
 → confirmation → run. Arguments are checked **after** the peer class: `POST /actions/session.stop` with an empty body from
@@ -352,15 +414,36 @@ cli gets `403 peer:cli`, not `400 args:…` (UI pass 2026-11-05).
   **`app` only**; otherwise `403 peer:cli`. Actions of non-built-in plugins — **always `app` only**, at any level (the
   offer has `"appOnly": true`): an official (or own) plugin without declared network access may declare `immediate`
   (since 2026-11-09 — for example, a mode toggle) — then without a confirmation window, but not from cli; with network
-  access or a price on the action (`cost=`) — at least `confirm-cost`.
+  access or a price on the action (`cost=`) — at least `confirm-cost`, unless the action declares `net="none"` (then
+  the network floor is lifted for it; a `cost=` still counts). A community plugin's action — at least `confirm`. The one
+  exception to "app only": a test hub started with `AGENTHUB_TEST_TIER=own` (and `AGENTHUB_HOME` other than the live
+  directory) lets cli press actions of its test-tier plugins (`plugins[].testTier`) at any level; the 428 token is not
+  bound to the requester's pid there.
+- **Input actions** (`offer.input`, contract 3 additive): app only, any tier. The text is checked like an argument —
+  `400 input:required|too-long|control|option-like|pattern` (empty, over `maxLength` characters, control or format
+  characters including line breaks, a leading `-`, not matching the declared pattern). It goes to the action process on
+  **stdin** — the text, one `\n`, end of input — never into argv; the journal records `inputLength`, never the text; a
+  streamable plugin's `actionResult` gets `arg: null` and `inputLength`. An `immediate` input action needs `input` in the
+  request. At `confirm`/`confirm-cost` the app may send the request without `input`: the 428 then carries
+  `"input": {placeholder, maxLength, pattern}` and the text says it is typed in the window — the app shows the field in the
+  confirmation sheet and repeats the request with `input` and `confirmToken` (such a token accepts any valid text); a
+  request with `input` gets a 428 whose text quotes it, and its token accepts only that text (`403 confirm:invalid`).
+- **Background actions** (`offer.background`): the request returns as soon as the job has started —
+  `200 {"ok":true,"result":{"ok":true,"job":"<16 hex>","pid":…}}`; `409 facts:jobs-limit` — the plugin already has
+  `plugins.maxJobsPerPlugin` (4) jobs (jobs still starting count too). The job is listed in `plugins[].jobs` and in the idle verdict, journaled
+  (`job-start`, `job-exit`), has no timeout, and is stopped by `job.cancel`, the hub pause, removing/disabling/updating
+  the plugin and the daemon stopping — not by a restart of the plugin's streamable process.
 - The core decides on confirmation: the first request without a token →
   `428 {"error":"confirm-required","needsConfirm":true,"token":"…","level":"confirm","text":"<core text>","cost":null|"…","expiresInMs":120000}`.
   The app shows `text`/`cost` in an `NSAlert` and repeats the request with `confirmToken`. The token is single-use,
   lives 120 s, and is bound to the action with its arguments, to the plugin action fingerprint (command, level, argument
   pattern, plugin version and tier) and to the requester's pid: a token issued for one version's text gives
-  `403 confirm:invalid` after the plugin is updated.
+  `403 confirm:invalid` after the plugin is updated. Extra 428 fields (additive): `row` — the sanitized title of the
+  row that carries the button (≤ 120 graphemes, control characters replaced), also quoted at the end of `text`;
+  `input` (above); `background: true` — the action starts a job.
 - Success: `200 {"ok":true|false,"result":{…scalars only…}}`. After the action a standard plugin is restarted, a
-  streamable one gets `actionResult` on stdin.
+  streamable one gets `{"type":"actionResult","id","actionId","primitive","arg","ok","code","inputLength"?,"job"?}` on
+  stdin (`arg` — the checked argument value from the offer or `null`).
 - A plugin action: the core writes the confirmation text in the hub language (`lib/i18n.mjs`) —
   `«<название>» (<уровень>) просит: «<title>» для <значение>. Выполнится: <команда>` / `"<title>" (<tier>) asks to: …`,
   where the command is shown as it will run: the value replaces the word `{name}`, or without it goes at the end
@@ -395,11 +478,17 @@ still receive `SessionStart`, `SessionEnd` and `Stop` while paused — the inter
 Claude). Statuses, plugin polling, notifications, opening links and files, and removing plugins keep working.
 
 ### `GET /settings` — app, cli; `PUT /settings/lang`, `PUT /settings/plugin-updates`, `PUT /settings/hub-updates`, `PUT /settings/launch-at-login`, `PUT /settings/notifications` — app only
-The hub language (UI pass 2026-11-05). `GET` → `{"lang": {"setting": "system"|"ru"|"en", "effective": "ru"|"en", "system": "ru"|"en"}, "checkPluginUpdates": {"setting": true}}`
+The hub language (UI pass 2026-11-05). `GET` → `{"lang": {"setting": "system"|"ru"|"en", "effective": "ru"|"en", "system": "ru"|"en", "locales": ["de-DE", "en-US"]}, "checkPluginUpdates": {"setting": true}}`
 (the same as `GET /state.lang`). `PUT /settings/lang {"lang": "system"|"ru"|"en"}` → `200 {"lang": {...}}`;
 cli — `403`, an invalid value — `400 args:lang:enum`. Stored in `<home>/settings.json` (0600) — not in `config.json`,
 which the build pin watches. "system" = ru if the first macOS language (`defaults read -g AppleLanguages`) is Russian,
-otherwise en; re-checked once a minute. On a change — the journal record `settings-changed`, the SSE event
+otherwise en; re-checked once a minute together with `locales` (one `defaults` call for both). The UI has only ru and en (a third UI language is out of scope); `locales` — the
+system preferred languages as BCP-47 tags in order (at most 8; `AGENTHUB_SYSTEM_LOCALES="de-DE,en-US"` overrides them for
+checks): plugins get them in `AGENTHUB_LOCALE`, and they choose plugin metadata translations in any language (
+`lib/i18n.mjs` `contentLang`: the hub language if the plugin has it → the system languages up to the first ru/en one → the
+plugin's base text). A change of `locales` alone (noticed within about a minute) re-translates plugin labels from
+metadata and emits `settings.changed {lang}`, but does not restart plugins (they get the new `AGENTHUB_LOCALE` at their
+next start or run). On a change — the journal record `settings-changed`, the SSE event
 `settings.changed {lang}`, plugins get the new `AGENTHUB_LANG` (streamable ones restart — consecutive changes are chained,
 one process; interval ones run out of turn), plugin labels from metadata are translated, and the texts of
 confirmations, hook refusals and notifications are built in the new language.
@@ -435,7 +524,7 @@ unpinned build — `403`; errors — `400`: `args:body:type|keys`, `args:enabled
 **Contract 2 (2026-11-09).** There are four core kinds — `sessions`, `updates`, `problems`, `other` (plus the
 non-switchable `security`). Everything a plugin declared with `kind="plugin"` is silenced by **its own toggle** —
 `plugins.<id>`; the daemon builds the `notifications.plugins: [{id, title, on, labels, legacy?}]` lines from installed
-trusted plugins with such rules (the title in the hub language, `labels` — the labels of its rules): no plugin — no
+trusted and community plugins with such rules (the title in the hub language, `labels` — the labels of its rules): no plugin — no
 line. Migrating former settings: turned-off `kinds.runs`/`kinds.night` in `settings.json` turn off the toggle (without an
 explicit choice) of a plugin whose rule declared that kind (`kind="runs|night"` — a deprecated synonym, or
 `kind="plugin" was="runs|night"`); such an inference is fixed right away as an explicit `plugins.<id> = false` (journal
@@ -455,7 +544,7 @@ service is not turned off in config.json). macOS banners are the only channel (a
 flag for a second channel; the app ignores unknown keys). A turned-off kind does not arrive at all — no `push.notify`, no osascript, no
 digest; it stays in the plugin's `/state` and in the journal (`push-muted`).
 
-### Connections — `GET /connections` (app, cli), `POST /connections/:id/connect|cancel|disconnect` (app only), `POST /connections/:id/mcp` (a plugin process)
+### Connections — `GET /connections` (app, cli), `POST /connections/:id/connect|cancel|disconnect` (app only), `POST /connections/:id/mcp`, `POST /connections/:id/http` (a plugin process)
 The hub signs into external services via OAuth 2.1 and calls their MCP servers on behalf of plugins (the `oauth`
 service, `daemon/lib/services/oauth.mjs`, `lib/oauth.mjs`, `lib/mcp-client.mjs`; routes — `lib/routes/connections.mjs`;
 decision 2026-11-09). **The core does not know which connections exist** (contract 2): plugins declare them themselves
@@ -540,12 +629,12 @@ refreshes). No refresh token (the server did not issue one), it was revoked (`in
 `connection.error: forbidden` (`errorReason` — the error from `WWW-Authenticate`), a `why: forbidden` backoff for an
 hour.
 
-**An MCP call on behalf of a plugin** (`POST /connections/tix/mcp {tool, args}`, peer class `cli`). The core recognizes
-the plugin by the peer pid on the socket (the `pluginByPid` fact: a running standard run or a streamable process, not an
-action and not a descendant); the plugin must be **trusted** (builtin/official/own), **the one that declared the
+**An MCP call on behalf of a plugin** (`POST /connections/tix/mcp {tool, args, fresh?}`, peer class `cli`). The core
+recognizes the plugin by the peer pid on the socket (the `pluginByPid` fact with `{actions: true}`: a running standard
+run, a streamable process or an action a human started — not a descendant); the plugin must be **trusted** (builtin/official/own), **the one that declared the
 connection**, and have the service host in `<agenthub.net>`; the tool must be on the declaration's allowlist
 (`tools=`). Refusals: `403 mcp:not-a-plugin|mcp:untrusted|mcp:not-owner|mcp:net-not-declared|mcp:tool-not-allowed`,
-`400 args:tool:required|args:args:type`, `413 too-large` (arguments > 8 KB),
+`400 args:tool:required|args:args:type|args:fresh:type`, `413 too-large` (arguments > 8 KB),
 `409 oauth:not-connected|oauth:expired|oauth:unavailable` (with `connection`). A `200` response:
 `{ok, result: <the tools/call result: content, structuredContent?> | null, fetchedAt, nextAt, why, intervalMs,
 calls24h, dailyBudget, fresh, pending?, error?, errorText?}`. A result with `isError` (not a rate limit) is not a
@@ -555,11 +644,25 @@ memory until a successful call), a `why: tool-error` backoff. The protocol is St
 `notifications/initialized` once per session (`Mcp-Session-Id`, `MCP-Protocol-Version`), the response is JSON or SSE; if
 the server forgot the session (`404`) — one retry with a new one.
 
+**Writes: `fresh: true`.** A call that changes something on the service (or a refresh a human asked for) passes
+`fresh: true` (a boolean; anything else — `400 args:fresh:type`). It skips the interval cache and is not merged with an
+identical call in flight; the reply waits for the service (the call's own 20 s deadline, not `callWaitMs`). The daily
+budget and every backoff still apply: if the connection is gated, the call is **not made** —
+`429 {error: "mcp:wait", why, nextAt, intervalMs, calls24h, dailyBudget}` (no previous result is passed off as the
+answer). A `200` response has the same shape as above: success — `{ok: true, result, fetchedAt, fresh: true, nextAt:
+null, why: null, …}`; a failure — `{ok: false, result: null, fresh: false, error, errorText?}`. The result is not kept in
+memory; a tool error (`mcp:tool-error`) on a fresh call starts no backoff (it is usually the input, not the service)
+and is not repeated in later answers. A successful fresh call marks every cached result of that plugin on that
+connection **stale**: the next ordinary call goes to the service (subject to the gate; while gated it still gets the
+previous result), and a read that was in flight during the write is stored stale too. Journal: `mcp-call` with
+`fresh: true`.
+
 **The core enforces the rate, not the plugin.** The same request (plugin + tool + arguments) runs at most once per
 `intervalMs` (`interval=` from the declaration, 15 min by default; the core keeps it within 5 min … 24 h); between calls
 the plugin gets the previous result from the service's memory (`fresh: false`). Daily budget: at most `dailyBudget − 4`
 calls in 24 h (`budget=` from the declaration, 100 by default; core limits 1…10000; the core knows nothing about the
-service's plans) (`why: budget`). A service rate limit — `RATE_LIMIT_EXCEEDED` in a JSON-RPC error or in a tool result
+service's plans) (`why: budget`); a call let through is counted from that moment (before the keychain read), so
+parallel calls cannot all pass the gate before the first one is recorded. A service rate limit — `RATE_LIMIT_EXCEEDED` in a JSON-RPC error or in a tool result
 (`retryAfter` — seconds, ms or an epoch timestamp; 1 min … 24 h), `429` with `Retry-After` — backoff (`why: rate-limit`;
 without `retryAfter` — 15 min → 30 min → 1 h → 3 h → 6 h); `x-ratelimit-remaining ≤ 2` — wait for
 `x-ratelimit-reset` (`why: http-limit`); other failures — 1 → 2 → 5 → 10 min (`why: error`). If the service does not
@@ -567,11 +670,12 @@ answer within `callWaitMs` (3 s) — `pending: true`, the call completes in the 
 memory. Call timestamps, the backoff and the sign-in failure mark survive restarts: `<home>/Cache/oauth-<id>.json` (0600;
 only times — at least as many timestamps as the daily budget, otherwise a budget above 500 could not be enforced — plus
 the plugin id and title, no tokens or content). Response content lives only in daemon memory. Journal:
-`mcp-call {connector, plugin, tool, ok, error?, ms}`, `mcp-call-failed {kind, status, waitS}`, `mcp-denied`.
+`mcp-call {connector, plugin, tool, fresh?, ok, error?, ms}`, `mcp-call-failed {kind, status, waitS, fresh?}`, `mcp-denied`.
 
-`/state.connections` and `GET /connections` → `[{id, title, note, plugin, orphan?, host, tools, state, since, error,
-errorReason, scope, expiresAt, refresh, login: {startedAt, expiresAt} | null, intervalMs, dailyBudget, calls24h,
-lastOkAt, nextAt, why, keychain}]`; `state`: `unknown` (the keychain has not been read yet), `unavailable` (no keychain),
+`/state.connections` and `GET /connections` → `[{id, title, note, plugin, orphan?, host, tools, type, apiHosts?, methods?,
+paths?, state, since, error, errorReason, scope, requestedScope, expiresAt, refresh, login: {startedAt, expiresAt} | null,
+intervalMs, dailyBudget, calls24h, lastOkAt, nextAt, why, keychain}]` (`type`: `mcp` | `http`; for `http` — `apiHosts`,
+`methods`, `paths` from the declaration and `tools: []`); `state`: `unknown` (the keychain has not been read yet), `unavailable` (no keychain),
 `disconnected`, `connecting`, `connected`, `expired`; `title` and `note` come from the plugin declaration in the hub
 language (without `title=` — the plugin name). A change — the `connections.changed {connections}` event; appearance and
 disappearance — journal `connection-added`, `connection-removed`. The sign-in journal: `oauth-login-start {port,
@@ -582,8 +686,95 @@ scope}`, `oauth-client-registered {grants}`, `oauth-connected {scope, refresh, e
 Settings (`config.json → services.oauth`): `enabled`; `<id>.intervalMs` and `<id>.dailyBudget` — over the plugin
 declaration, within the same core limits; `<id>.loginTimeoutMs` (300000), `<id>.callWaitMs` (3000), `<id>.reloadMs`
 (60000 — re-read the keychain if it did not answer at startup); in test mode — `<id>.resource` and `<id>.hosts` (a double
-on 127.0.0.1; overriding is not accepted in the live hub). The service gives trusted plugins the `AGENTHUB_HUB_SOCKET`
-variable — the hub socket path.
+on 127.0.0.1; overriding is not accepted in the live hub); for `type="http"` — `<id>.authorize`, `<id>.token` (loopback
+endpoints), `<id>.api` (the loopback origin every declared API host is sent to) and `<id>.port`. The service gives
+trusted plugins the `AGENTHUB_HUB_SOCKET` variable — the hub socket path.
+
+**`type="http"`: a pre-registered public client and an HTTP proxy (contract 3 additive).** For a service without
+MCP the plugin declares `<agenthub.connection type="http" client_id=… authorize="https://…" token="https://…"
+hosts="api.example.com" scope=… methods="GET,POST" paths="/v1/" port=… interval=… budget=… title=…>` (grammar —
+`lib/meta.mjs` `parseHttpConnection`; every host — `authorize`, `token`, `hosts` — must be in `<agenthub.net>`).
+Sign-in is the same route and receiver as above, but: no discovery and no client registration — the declared endpoints
+(https on the declared hosts; test mode — loopback doubles) and the declared public `client_id` (no secret; the token
+request carries `client_id` and the PKCE verifier, no `resource`); `scope` as declared; a declared `port` is used as the
+only receiver port (busy — `409 oauth:port-busy`). Only `<id>.token` is stored (no `<id>.client`); the token is bound to
+the declaration (token endpoint, client id, API hosts): a changed declaration means `disconnected` and a new sign-in.
+Refresh, expiry, Disconnect, orphans, purge — as above.
+
+`POST /connections/:id/http {method?, host?, path, query?, headers?, body?, fresh?}` — the same callers as `/mcp` (a
+trusted plugin process that declared the connection, recognized by pid, actions included). The hub checks: `method`
+(default `GET`) in `methods`, `host` (default — the first) in `hosts` and in the plugin's `<agenthub.net>`, `path`
+absolute (not `//…`), no `?`/`#`/backslash/whitespace/control characters/dot segments, and none of `%2F`, `%5C`, `%2E`,
+`%25` (double encoding), a malformed `%` escape or `;` in any case (a server or a proxy could decode them past the prefix:
+`..%2F`, `..;/`, `%252e`) — refused, not normalized; under one of `paths` if declared; `query` — an object of
+strings/numbers/booleans (or arrays of them, ≤ 64 pairs), never the key `_method` (a method override for some frameworks:
+`403 http:query-not-allowed` with `key`); request `headers` from an allow-list only (`Accept`, `Accept-Language`,
+`Content-Type`, `If-Match`, `If-None-Match`, `If-Modified-Since`, `If-Unmodified-Since`, `Prefer`, `Idempotency-Key`,
+`Range` and API version headers `…-Version` such as `Notion-Version` or `X-GitHub-Api-Version`, except routing names;
+any other `X-…` header — `X-Override-URL`, `X-Envoy-*`, `x-middleware-subrequest`, vendor ones — is refused; ≤ 16,
+values ≤ 1024 without control characters); `body` — a string or JSON
+(`Content-Type: application/json` by default), ≤ 64 KB, not for `GET`/`HEAD`. The request goes to `https://<host><path>`
+with `Authorization: Bearer <token>`, no redirects followed, 15 s timeout. Refusals: `403 http:not-a-plugin|untrusted|
+not-owner|net-not-declared|method-not-allowed|host-not-allowed|path-not-allowed|header-not-allowed` (+`header`)|
+query-not-allowed` (+`key`),
+`400 http:not-http|args:body:type|args:path:invalid|args:query:type|args:query:too-many|args:headers:type|
+args:headers:too-many|args:headers:value|args:body:not-allowed|args:fresh:type`, `413 too-large`,
+`409 oauth:not-connected|expired|unavailable|orphan`; `/mcp` on an `http` connection — `400 mcp:not-mcp`.
+
+A `200` reply has the `/mcp` shape with `response` instead of `result`: `{ok, response: {status, headers, body, encoding:
+"utf8"|"base64", json?, truncated?} | null, fetchedAt, nextAt, why, intervalMs, calls24h, dailyBudget, fresh, pending?,
+error?}`. Response headers from an allow-list (`Content-Type`, `Content-Language`, `Content-Range`, `ETag`,
+`Last-Modified`, `Link`, `Location`, `Retry-After`, `Cache-Control`, `Date`, `Expires`, `X-Total-Count`, `X-Request-Id`,
+`X-RateLimit-*`, `RateLimit*`); the body is capped at 256 KB (`truncated: true`), text and JSON types as UTF-8 (JSON also
+parsed into `json`), anything else base64. `GET`/`HEAD` are reads: interval cache per (plugin, method, host, path, query,
+headers), merged with an identical read in flight, `fresh: true` skips the cache. Other methods are writes: always
+fresh (gated — `429 http:wait`, not sent), never cached, and a success marks the plugin's cached reads stale. Any status
+the service answers is `ok: true` (a `4xx` read is cached like any answer) except: `401` — one refresh and a retry, then
+`409 oauth:expired`; `429` or `503` with `Retry-After` — `error: http:rate-limited` (with `response`) and a rate backoff
+(`Retry-After` in seconds or a date, 1 min … 24 h); `5xx` — `error: http:server-error` (with `response`; for reads an
+`error` backoff); a network failure — `error: http:net`. `X-RateLimit-Remaining`/`RateLimit-Remaining` ≤ 2 waits for the
+reset like MCP (`why: http-limit`). Journal: `http-call {connector, plugin, method, host, path (≤120), fresh?, ok, error?,
+ms}`, `http-call-failed {request, kind: net|rate|server, status, waitS}`, `http-denied`; never query values, bodies or
+tokens.
+
+### Secrets — `GET /secrets/:plugin`, `PUT /secrets/:plugin/:key`, `DELETE /secrets/:plugin/:key` (app only)
+Entering a plugin's declared secret in the app ("Set key…" on the plugin page) instead of `security
+add-generic-password` (the `secrets` service, `daemon/lib/services/secrets.mjs`; routes — `lib/routes/secrets.mjs`).
+Only keys the plugin declares in `<agenthub.secrets>` and would actually receive (built-in — any key except `oauth.*` and
+`telegram.*`; installed — only `<plugin id>.*`; `local` — none). No service — `503 secrets:disabled`; an unknown plugin —
+`404 not-found`.
+
+`GET /secrets/tool` → `200 {plugin, keychain, secrets: [{key, why, env, state, editable, reason?, error?}], more?}` — in
+declaration order, at most 32 keys (`more` — how many further declared keys were not listed), **never values**: `env` —
+the variable it arrives as (`AGENTHUB_SECRET_TOOL_TOKEN`), `why` — the explanation through the content language chain
+(the hub language, then the system languages — as for other plugin metadata), `state` — `set` | `unset` | `denied` (`reason`: `reserved`, `foreign-namespace`,
+`untrusted`, `bad-key`) | `error` (the keychain did not answer; `error`: `timeout`, `exit-<n>`) | `unavailable` (no
+keychain: test mode without a `security` double, `keychain: false`); `editable` — the shell may offer "Set key…". A key
+the provider has cached (a plugin run looked it up within the cache time) answers from the cache; any other is an
+existence check (`security find-generic-password` without `-w` — exit code only, the value is never read), at most 4 at a
+time. A test-tier own plugin (`AGENTHUB_TEST_TIER=own`) has its own `<id>.*` keys allowed, as when it runs.
+
+`PUT /secrets/tool/tool.token {value}` (body ≤ 8 KB) → `200 {ok: true, restarted: "restart"|"refresh", secret: {…}}`.
+The value goes to the stdin of `security -i` (`add-generic-password -U -s agent-hub.tool -a token -w <value>`), never
+argv; it is stored as is (the plugin reads it raw, the same as an entry made in the terminal), so it must be printable
+ASCII without spaces, `"`, `'` and `\`, 1…3072 characters (`security -i` splits its line on whitespace and parses
+quotes) — otherwise `400 args:value:required|args:value:chars|args:value:length`; such values are entered with
+`security add-generic-password`. `DELETE /secrets/tool/tool.token` → `200 {ok: true, missing?, restarted, secret}`
+(`missing` — there was no entry). Refusals for both: `404 secrets:not-declared`,
+`403 secrets:reserved|secrets:foreign-namespace|secrets:untrusted|secrets:bad-key`, `409 secrets:no-keychain`,
+`500|503 secrets:keychain` with `reason` (`exit-<n>`, `timeout`) — nothing changed.
+
+After a write or delete the key leaves the cache at once and the plugin restarts with a fresh environment,
+`AGENTHUB_REFRESH_REASON=SecretChanged`: through the core's `ctx.restartPlugin` (a streamable plugin is stopped and started
+again; `restarted: "restart"`), or, while the core does not offer it, an extra run (`restarted: "refresh"`: enough for a
+standard plugin; a streamable one then sees the value only after its next restart). Other plugins that declare the same
+key read the new value on their next run. The bus gets `secrets.changed {plugin, key, state}`, the journal `secret-set`;
+the value reaches neither, nor any response.
+
+Cache timings (`config.json → services.secrets`): a found value is reused for `ttlMs` (300000), a missing one for
+`missTtlMs` (60000) — an entry made in the terminal reaches the plugin within a minute, a replaced one within 5 minutes;
+`timeoutMs` (5000) per `security` call. Key format: `<service>.<account>`, service `[a-z0-9][a-z0-9_-]{0,63}` (any plugin
+id fits), account `[a-z][a-z0-9_.-]{0,63}`.
 
 ### Terminal — `POST /terminal/read-screen`, `POST /terminal/send-text` (a trusted plugin process, contract 3)
 
@@ -608,7 +799,7 @@ Checks in order: the plugin and permission (`403 terminal:not-a-plugin|untrusted
 request rate (`429`, `scope: requests`), the pause (`423 estop`), the body (`400 body`, `args:sessionId:*`,
 `args:<field>:unknown`, `args:text:too-long`, `terminal:bad-text` — not printable ASCII, `\`, leading/trailing spaces),
 the line against the permission (`403 terminal:text-not-declared`), the session in the registry
-(`409 terminal:unknown-session`), the Claude Code signature now and the same start time (`409 terminal:unverified`), the
+(`409 terminal:unknown-session`; a non-Claude agent session — `409 terminal:external-session`), the Claude Code signature now and the same start time (`409 terminal:unverified`), the
 terminal knows the tab and it belongs to the same pid and start time (`409 terminal:no-tab|pid-mismatch`), the terminal
 supports the operation (`409 terminal:unsupported`, with `terminal` and `capability`), for typing —
 the session is free (`409 terminal:session-busy`: the registry status, without it — the terminal's), the process is not
@@ -666,6 +857,44 @@ not written — the switch did not start), `interrupted` (including the daemon s
 
 During the switch (`phase: switching`) a `POST /shutdown` from the departing app answers 202 but does not stop the
 daemon: it exits by itself with code **75**, and launchd brings it up from `Versions/current` (the new version).
+
+### Extensions — `GET /extensions` (app, cli), `POST /extensions/approve`, `POST /extensions/revoke` (app only)
+
+External daemon extensions ([`extension-points.md`](extension-points.md#external-extensions-homeextensions)):
+`<home>/Extensions/{services,routes,primitives,terminals}/*.mjs`. Each one is **code inside the daemon with its full rights**,
+so it loads only after a human approved the file's exact bytes in the pinned app. The app shows `consent` (the hub
+language) with the file's `path`, `kind`, `sha256` and a way to read the file (`file` — the absolute path), and asks.
+
+- `GET /extensions` → the same object as `/state.extensions` (rescanned for the request): `{dir, enabled, testAutoApprove,
+  consent, pending, items}`. `items[]`: `path` (`<folder>/<file>.mjs` — the id for the routes below), `file`, `kind`
+  (`service` | `route` | `primitive` | `terminal`), `name` (the file name; after a load — the registered name: service,
+  primitive, terminal id), `sha256`, `size`, `mtime`, `status`, `loaded`, `restartRequired`, `approvedSha256`,
+  `autoApproved`, `skipped?` (`"disabled"` — an approved service that `services.<name>.enabled: false` or
+  `AGENTHUB_SERVICES` keeps off), `error`, `errorText` (the hub language), `errorDetail?` (the exception, ≤ 160 chars).
+  `status`: `pending` — never approved: ask; `changed` — approved earlier but the bytes differ from the approved sha256
+  now: ask again, the new bytes do not load; `revoked` — the approval was revoked while the module is loaded: it keeps
+  running until the daemon restarts (`restartRequired: true`), nothing to ask (after a restart a file still in the folder
+  is `pending` again); `approved` — these bytes are approved (loaded unless `skipped`); `error`
+  — refused: `bad-name`, `unreadable`, `not-a-file`, `unsafe-file` (someone else's file, or group/other may write it),
+  `too-large` (> 1 MB), `import-failed`, `bad-module` (does not fit its kind's contract), `name-taken` (a built-in or an
+  earlier extension already has the name), `start-failed`. `restartRequired` — the running code is not what is approved
+  now (changed, re-approved or revoked while loaded): the old approved bytes keep running until the daemon restarts.
+  `pending` — how many items wait for a human (`pending` + `changed`; not `revoked`): the badge. Two approvals of the same
+  file at once load it once.
+- `POST /extensions/approve {path, sha256}` (app only; a diagnostic run — `403 peer:diagnostic`) — the human approved the
+  bytes with this sha256 (the one shown in the sheet). The current file must have it: otherwise `409 extensions:changed
+  {sha256: <current>}` (show the sheet again). Recorded in `Registry/ext-approvals.json` and loaded right away (a route
+  joins the live route table; a service starts) → `200 {ok: true, item}`. Errors: `400 args:path|args:sha256`, `404
+  extensions:not-found`, `409 extensions:<error>` for an `error` item that cannot load (`unsafe-file`, `too-large`, …),
+  `409 extensions:disabled` (`extensions.enabled: false`), `423 estop` (the hub is paused), `500 extensions:write-failed`.
+  A load failure after approval is not an HTTP error: the item comes back with `status: "error"`.
+- `POST /extensions/revoke {path}` (app only) → `200 {ok: true, item}`: the approval is gone; a loaded module keeps
+  running until the daemon restarts (`status: "revoked"`, `restartRequired: true`), the next start does not load it. `404 extensions:not-found`.
+
+Only these routes write the approvals file, and the daemon keeps every approval in memory too: an entry another process
+writes into the file while the daemon runs approves nothing (it can only revoke). The file is read as is only at daemon
+start — the same limit as for own-plugin consents and the app pin. `AGENTHUB_TEST_EXTENSIONS=1` with `AGENTHUB_HOME` (not
+the live directory) approves every file automatically (`testAutoApprove: true`, `autoApproved: true`) — tests only.
 
 ### `POST /shutdown` — app only (daemon and app lifecycle, 2026-11-06)
 "We close the hub — we close the daemon too": on quit (the "Quit Agent Hub" item in the icon menu and the popover, ⌘Q,
@@ -797,6 +1026,9 @@ still `{}`). The journal gets `hook_event_name`, `session_id`, `claudePid`, `han
 | `POST /registry/fetch`, `/registry/install`, `/registry/remove` | app | the plugin manager; installation — `428 consent-required` with a permissions window, then `consentToken` (the catalog changed the sha256 or the tier while the window was open — `409 registry:catalog-changed`; the plugin needs a newer contract than the hub — `409 registry:hub-too-old` with `need`/`have`, and the catalog marks such an entry `needsHub: {need, have}`; the consent window carries the `icon` from the archive metadata); `{id, source: "registry"}` — from the catalog over an own plugin (a window with `migrate.from: "own"`). A diagnostic shell run (`peer.diagnostic`: `--snapshot-consent` and the other `APP_DIAGNOSTIC_ARGS` flags) changes nothing: any non-GET route gives `403 peer:diagnostic`, except `install` and `own/approve` — those return only the window (`428` or `409 consent:nothing`). Without a signed app — `agenthub plugins install|remove <id>` from your own terminal: a TTY is required, and Claude Code must not be among the process ancestors (by signature or name; `CLAUDECODE` in the environment is also refused, `terminal:agent`) |
 | `POST /bridge/hello`, `GET /bridge/next`, `POST /bridge/result/:id`, `POST /bridge/bye` | bridge | the cmux bridge channel — [`bridge/README.md`](../bridge/README.md) |
 | `POST /terminal/read-screen`, `POST /terminal/send-text` | a trusted plugin process (cli by pid) | terminal, contract 3 — above, "Terminal" |
+| `GET /secrets/:plugin`, `PUT /secrets/:plugin/:key`, `DELETE /secrets/:plugin/:key` | app | a plugin's declared secrets: state without values, set (`{value}`, via stdin of `security -i`) and delete, then the plugin restarts with a fresh environment — above, "Secrets" |
+| `GET /extensions` (app, cli), `POST /extensions/approve`, `POST /extensions/revoke` (app) | | external daemon extensions and the human's approval — above, "Extensions" |
+| routes of approved extensions | as each route declares | `<home>/Extensions/routes/*.mjs` — after every built-in route; a method and path already served refuses the whole file |
 
 ## Action primitives
 
@@ -809,6 +1041,7 @@ still `{}`). The journal gets `hook_event_name`, `session_id`, `claudePid`, `han
 | `session.interrupt`, `session.stop` | confirmation, app only | `sessionId` | below, [`bridge/README.md`](../bridge/README.md) |
 | `session.launch` | priced confirmation, app only, only from the form | `cwd`, `name`, `prompt` | below, [`bridge/README.md`](../bridge/README.md) |
 | `session.respond` | immediate, app only (the card itself is the consent) | `requestId`, `decision`, `answers?` | [`hook.md`](hook.md) |
+| `job.cancel` | immediate, app only | `job` (16 hex, from `plugins[].jobs[].id`) | stop a plugin's background job: SIGTERM to its process group, SIGKILL 2 s later; `409 facts:no-job`. While the hub is paused there is nothing to cancel: the pause stops all jobs |
 
 `session.focus <sessionId>` (contract 3) — switch to the tab of a Claude Code session from the core registry. The
 terminal layer (`daemon/lib/terminals/`, `locate`) finds the tab, and the adapter switches to it (`focus`; cmux — the
@@ -819,6 +1052,10 @@ without the bridge); a switch failure — 200 `{ok: false, result: {error, termi
 (`bridge-outdated`, `bridge-timeout`, `tmux-failed`, `osascript-failed` — macOS did not allow controlling the terminal,
 `terminal-test-mode` — a test hub never touches real terminals, …). The action text: "Go to tab "<session name>"" (a
 conversation-based auto-title is not shown), otherwise "…session <first 8 characters of the id>…".
+It also takes a non-Claude agent session from `externalSessions` (hub 0.1.3+): `sessionId` is then
+`[A-Za-z0-9][A-Za-z0-9._-]{0,63}` (a UUID fits too; anything else — `400 args:sessionId:pattern`), the tab is found by the
+agent's pid (tmux, iTerm2, Terminal.app). `session.interrupt` and `session.stop` refuse such a session with 409
+`facts:external-session`, the `/terminal/*` routes with `409 terminal:external-session`.
 
 `terminal.focus <surfaceId> [workspaceId=…]` — switch to a terminal tab by its id (the `surfaceId` of a session record):
 the first adapter that knows the id (`findTab`; today cmux, through the bridge). Refusals — 409 `facts:actions-off`,
@@ -870,9 +1107,16 @@ service) — `app-supervise` (`on`, `testMode`, `launch`), `app-lost`, `app-laun
 `why`), `app-restart-stopped` (`restarts`, `windowMs`, `why?`), `app-supervise-resumed`, `app-supervise-error`,
 `app-login-gate` (`decision`: `wait` with `ms` / `retry` with `why=unknown` and `ms` / `stay` with `why` / `exit` with
 `waitedMs`; before 2026-11-07 also `app-path-seen`); pinning — `app-pin-path-changed` (`old`, `new`, `source`; in the
-audit log); push — `push-start`, `push-sent`, `push-held`, `push-deferred`, `push-suppressed`, `push-fallback`,
+audit log); push — `push-start` (`channels` — channel ids), `push-sent`, `push-held`, `push-deferred`, `push-suppressed`, `push-fallback`,
 `push-digest`, `push-error`, `push-muted` (`key`, `rule`, `kind`, `reason: kind|all`; `key: "digest"` with `count` —
-items of turned-off kinds not sent in the morning); answers — `hook-session`, `hook-session-end`, `hook-card`,
+items of turned-off kinds not sent in the morning); `push-sent`/`push-digest` carry `also` — the extra channels it went
+to; push channels — `push-channel-invalid {index, reason}` (a bad `services.push.channels` entry, at start),
+`push-channel-registered {channel, security}`, `push-channel-error {channel, key, code}` (`http-<status>`, `timeout`,
+`network`, `error`; never the channel's URL); external extensions — `extension-load {path, kind, name, sha256, auto?,
+now?, skipped?}`, `extension-denied {path, kind, sha256, status: pending|changed}` (once per file content per daemon run),
+`extension-error {path, kind, sha256, error, detail?}`, `extension-approved {path, kind, sha256, pid}`,
+`extension-approve-refused {path, sha256, now, pid}`, `extension-revoked {path, pid}`, and `service-start` of an
+extension service carries `extension: true`; answers — `hook-session`, `hook-session-end`, `hook-card`,
 `hook-answer`, `hook-cancel`, `hook-skip`, `hook-paused`; bridge — `bridge-op`, `bridge-stale`; quota — `usage-fetch`
 (when the outcome changes: `ok`, the `error` code, the number of rows), `usage-write-error`, `usage-error`; registry —
 `registry-*`, `plugin-installed`, `plugin-consent-requested`, `plugin-removed-by-user`, `plugin-installed-terminal`,
@@ -882,7 +1126,18 @@ items of turned-off kinds not sent in the morning); answers — `hook-session`, 
 `plugin-own-requested` (`plugin`, `version`, `by`, `migrate?`), `plugin-own-rejected`, `plugin-own-declined`,
 `plugin-own-updated` (`from`, `version`, `sha256`), `plugin-own-source` (`status`, `error`, `reason` — when the folder
 state changes), and `plugin-installed` carries `source: "own"` and `migrate`; secrets — `secret-lookup`,
-`secret-denied` (only the key and the outcome, never values).
+`secret-denied`, `secret-set {op: set|delete, plugin, key, ok, missing?, error?}` (only the key and the outcome, never
+values); background jobs — `job-start {plugin, actionId, job, pid}`, `job-exit {plugin, actionId, job, ok, code, signal,
+ms, cancelled?, reason?, error?}` (`reason: "orphaned"` — a cancelled job whose end could not be observed, ended by the
+hub), `job-cancel {plugin, actionId, job, peer, pid}`, `job-orphan-killed {plugin, job, actionId, pid}` /
+`job-orphan-skipped {plugin, pid, reason}` (at start: job groups left in `<home>/jobs.json` by a daemon that crashed — killed
+only when pid and start time still match), `jobs-persist-error {detail}`, and `action` carries `background`,
+`job`; `stdin-backlog {plugin}` — a streamable process stopped reading stdin, messages to it are dropped (once a minute); input actions — `action` carries `inputLength` (never the text); `plugin-restart {plugin, reason}` — a service
+restarted a plugin with a fresh environment (`ctx.restartPlugin`, e.g. `SecretChanged`); a plugin process pressing a
+button over the socket — `action`, `action-denied`, `action-confirm-requested` carry `byPlugin` (the plugin id the server
+found for the peer) next to `peer: cli`; event subscriptions — `subscribe-dropped {plugin, dropped}` (over 600 messages a
+minute); non-Claude agent sessions — `agent-session {plugin, sessionId, pid, agent}` (registered or moved),
+`agent-session-gone {plugin, sessionId, pid}` (its process ended).
 Metadata only (see [`extension-points.md`](extension-points.md), `journal.write`).
 
 ## Other files in the state directory

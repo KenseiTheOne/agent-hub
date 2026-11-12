@@ -11,7 +11,7 @@
 //                             frame (otherwise after every daemon restart the popover would first turn green with "Safe to shut down")
 //   items:   [{source, kind: busy | waiting | needs-on | unknown, text, target?, plugin?, trusted?}] — one line per
 //            obstacle, in order of importance; waiting is not an obstacle but info (the last line). plugin — the plugin's
-//            name (on plugin lines), trusted — a phrase of a builtin or official plugin: only it fits a card title ("Safe, but a run at 04:30"). Phrases of other
+//            name (on plugin lines), trusted — a phrase of a trusted plugin (builtin, official, own): only it fits a card title ("Safe, but a run at 04:30"). Phrases of other
 //            plugins come with a "<name>: " prefix so they do not pass themselves off as hub lines.
 //   checked: [names of sources that are all fine] — "Also checked: …"
 //

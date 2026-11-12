@@ -15,8 +15,15 @@ public struct ConnectionInfo: Codable, Sendable, Hashable, Identifiable {
     /// The plugin was removed (or no longer declares the connection) but the sign-in is still in the keychain: only "Disconnect".
     public var orphan: Bool?
     public var host: String?
-    /// MCP tool allowlist from the declaration (only these can be called).
+    /// MCP tool allowlist from the declaration (only these can be called); `[]` for `type="http"`.
     public var tools: [String]?
+    /// `mcp` (default) | `http` — a plain HTTP API behind a pre-registered public client: the hub proxies requests to
+    /// `apiHosts` with `methods` under `paths` (G7).
+    public var type: String?
+    public var apiHosts: [String]?
+    public var methods: [String]?
+    public var paths: [String]?
+    public var isHTTP: Bool { type == "http" }
     /// `unknown` | `unavailable` (no keychain) | `disconnected` | `connecting` | `connected` | `expired`
     public var state: String
     public var since: String?
@@ -111,12 +118,26 @@ public enum ConnectionsText {
     /// What the hub may call: the tool allowlist from the plugin's declaration (the server may not check scope —
     /// so we do not promise "read-only" based on it).
     public static func toolsLine(_ c: ConnectionInfo) -> String {
+        if c.isHTTP { return httpLine(c) }
         let tools = (c.tools ?? []).filter { !$0.isEmpty }
         if tools.isEmpty || tools.count > 4 {
             return tr("Только инструменты, объявленные плагином", "Only the tools the plugin declared")
         }
         let list = tools.joined(separator: ", ")
         return tools.count == 1 ? tr("Только инструмент \(list)", "Only the \(list) tool") : tr("Только инструменты \(list)", "Only the tools \(list)")
+    }
+
+    /// A `type="http"` connection: which hosts, methods and paths the hub sends requests to (from the declaration).
+    public static func httpLine(_ c: ConnectionInfo) -> String {
+        let hosts = (c.apiHosts ?? []).filter { !$0.isEmpty }
+        let methods = (c.methods ?? []).filter { !$0.isEmpty }
+        let paths = (c.paths ?? []).filter { !$0.isEmpty }
+        func list(_ a: [String]) -> String { a.count > 4 ? a.prefix(4).joined(separator: ", ") + "…" : a.joined(separator: ", ") }
+        let h = hosts.isEmpty ? tr("объявленные плагином адреса", "the hosts the plugin declared") : list(hosts)
+        var out = tr("Только запросы к \(h)", "Only requests to \(h)")
+        if !methods.isEmpty { out += " (" + list(methods) + ")" }
+        if !paths.isEmpty { out += tr(" по путям \(list(paths))", " under \(list(paths))") }
+        return out
     }
 
     /// An orphaned connection: what "Disconnect" means.
@@ -198,6 +219,9 @@ public enum ConnectionsText {
         case "forbidden": return tr("\(title) не даёт этому входу доступ к данным — проверьте права аккаунта в \(title)", "\(title) doesn't give this sign-in access to the data — check the account's permissions in \(title)")
         case "net": return tr("Нет связи с \(title)", "Can't reach \(title)")
         case "authorize": return tr("\(title) вернул ошибку входа", "\(title) returned a sign-in error")
+        case "port-busy":
+            return tr("Порт, который \(title) ждёт для возврата после входа, занят другой программой — закройте её и нажмите «Подключить» ещё раз",
+                      "The port \(title) returns to after sign-in is taken by another program — close it and click Connect again")
         case "token-expired", "invalid-token": return nil // this is the expired state, it has its own line
         default:
             if code.hasPrefix("http-") { return nil }
@@ -247,7 +271,9 @@ extension HubStore {
     /// A connection by id (from the plugin's declaration) from the snapshot.
     public func connectionInfo(_ id: String) -> ConnectionInfo? { state?.connections?.first { $0.id == id } }
     /// The connection that provides data to this plugin.
-    public func connectionInfo(forPlugin id: String) -> ConnectionInfo? { state?.connections?.first { $0.plugin == id && !$0.isOrphan } }
+    public func connectionInfo(forPlugin id: String) -> ConnectionInfo? { connectionInfos(forPlugin: id).first }
+    /// All connections the plugin declares (a plugin may declare several `<agenthub.connection>`), in `/state` order.
+    public func connectionInfos(forPlugin id: String) -> [ConnectionInfo] { state?.connections?.filter { $0.plugin == id && !$0.isOrphan } ?? [] }
 
     private func put(_ c: ConnectionInfo?) {
         if let c { applyConnection(c) }

@@ -4,6 +4,276 @@ Releases are git tags `vX.Y.Z` (also published as GitHub releases); the current 
 The plugin contract has its own version history in
 [`docs/extension-points.md`](docs/extension-points.md#contract-versions).
 
+## Unreleased
+
+Everything below stays within plugin contract **3**: each addition is an optional attribute, parameter, field or route
+that an older hub ignores, so plugins keep declaring `<agenthub.contract>3</agenthub.contract>`.
+
+### Security
+
+- **Escaping in plugin titles.** Foreign text printed last on a line (a log line, a PR title, a tab name) could add
+  parameters after its own `|` — `href=`, `event=`, the plugin's own `action=`/`arg=`. Now a `|` preceded by an odd
+  number of backslashes (`\|`) is a literal `|` of the title, never a separator (the backslash run shows halved); a
+  leading backslash run followed by `-`/`~` loses one backslash, so foreign `--x`, `---` or `~~~` stay text. Backslashes
+  anywhere else show as before, and `/state` carries the titles unescaped. A split whose right side starts inside a
+  quoted value (an unquoted value there holds a quote character, as in `note="a | href=…"`) now loses to a clean split
+  further left, and an unquoted value may not start with a quote. A line over the limit (now 64 KB, was 16 KB — a
+  chart line with every data key at its maximum fits) keeps only its title and no parameters, since the cut may fall
+  inside a quoted value; a streamable line over 1 MB is dropped up to its end instead of its tail becoming a new line.
+  `escapeTitle` is meant for a whole title. Copyable `escapeTitle`/`quoteValue` helpers for JS and Python are in
+  [`writing-plugins.md` 4.1](docs/writing-plugins.md#41-lines) (the hub's own `escapeTitle` is in `daemon/lib/output.mjs`).
+- **Built-in plugins audited** for foreign text: all of it already went through their `clean()` (`|` → `¦`, no leading
+  `-`/`~`, no control characters) and quoting helpers. `claude-sessions` now takes the session id of a remembered
+  stopped session from the checked key of its memory file, not the stored object, and prints a non-integer pid as `?`.
+- **Untrusted plugins on the hub socket.** The server recognizes plugin processes by the peer pid, its ancestors (at
+  any depth) and the process group of each (every plugin process leads its own group: runs, streamable processes,
+  actions and background jobs; the native `pidInfo` now reports `pgid`) and binds `peer.plugin`. A process of a
+  community or local plugin, or any child of it, gets only `GET /health` and `GET /peer`; everything else is
+  `403 peer:untrusted-plugin`, journaled (`denied` with `plugin`, once a minute per plugin and route). Before, such a
+  process was plain `cli`: it read every session with its folder, pressed `immediate` actions of built-in plugins and
+  could pause the hub. Trusted plugins (builtin, official, own) are unchanged; `GET /peer` shows `plugin: {id, trusted}`.
+  Not a hard boundary against the same UID: a process that leaves both the tree and the group (`setsid`, then a double
+  fork) is plain `cli` again ([`api.md`](docs/api.md#peer-classes)).
+- **Test switches don't follow `$HOME`.** `AGENTHUB_TEST_TIER`, `AGENTHUB_TEST_EXTENSIONS` and the self-test compare
+  `AGENTHUB_HOME` with the live directory of the account's real home too, so `HOME=/tmp/x` with `AGENTHUB_HOME` pointing
+  at the live directory no longer turns them on there.
+- **A dead plugin process loses its identity at once.** A run, action or job pid was attributed to the plugin until its
+  output closed — a descendant holding stdout kept a pid of an exited process trusted, and a reused pid could pass
+  `/connections/*/mcp|http` and `/terminal/*` as the plugin. Now the pid is dropped when the process itself exits (a
+  streamable process too), and a job whose leader exited never signals its group id again.
+- **tmux runs only a known binary.** The adapter used the executable path of the nearest ancestor whose name looked like
+  `tmux…`; now it runs one of the standard tmux paths that is that executable (after resolving links), or doesn't reach
+  the session at all.
+- **Connection budget holds under parallel calls.** A call let through the daily-budget gate is counted at once (a
+  reservation released if it never reaches the network), not after the keychain read: parallel requests of a plugin
+  could all pass the gate before the first was recorded.
+- **Stricter HTTP connection requests.** A `path` with an encoded separator, dot or percent (`%2F`, `%5C`, `%2E`, `%25`),
+  a malformed escape or `;` (`..%2F`, `..;/`, `%252e`) is `400 args:path:invalid` instead of being resolved past the
+  declared prefix by the service or a proxy; request headers are an allow-list only (fixed headers plus `…-Version`
+  API version headers — `X-Override-URL`, `X-Envoy-*`, `x-middleware-subrequest` and other `X-…` are refused); the query
+  key `_method` is `403 http:query-not-allowed`.
+
+### Plugin contract (additive, contract 3)
+
+- **Typed input for actions.** `<agenthub.action … input="Placeholder" input-ru="…" arg="name:^pattern$" maxLength="N">`:
+  the app shows a text field (`offer.input: {placeholder, maxLength, pattern}`); `POST /actions/:id {"input": "…"}` is
+  accepted from the app only, whatever the tier. The core checks the text like an argument (pattern, control
+  characters, a leading `-`, `maxLength` up to 4000, default 256 → `400 input:*`) and writes it to the action's stdin
+  (text + `\n`, EOF) — never argv; the journal and `actionResult` carry only `inputLength`. At a confirm level the text
+  may be typed in the confirmation (the 428 carries `input`).
+- **`net="none"` on an action** lifts the `confirm-cost` floor that `<agenthub.net>` puts on every action, for that
+  action only (a `cost=` still counts); it is part of the permission key, and the linter accepts `immediate` +
+  `net="none"` with a reviewer warning.
+- **Background actions** (`background="true"`): own process group, no 30 s timeout, at most 4 per plugin
+  (`409 facts:jobs-limit`), listed in `/state.plugins[].jobs` and the "Can I shut down?" verdict, journaled (`job-start`,
+  `job-exit`, `job-cancel`), SSE `job.started`/`job.exited`; at the end a streamable plugin gets
+  `{"type":"jobExit",…}`, a standard one an extra run with `AGENTHUB_REFRESH_REASON=JobExit`. Stopped by the new
+  app-only `job.cancel` primitive, the hub pause, removing/disabling/updating the plugin and the daemon stopping — not by
+  restarts of the streamable process. A `jobExit` that comes while the streamable process restarts is delivered to the
+  new process, which also starts with `{"type":"jobs","running":[…]}`. A job is its first process: when it exits, the
+  rest of its group is killed, and a descendant that left the group (`setsid`) holding stdout can't keep the job alive
+  (stdout is closed a second later); a cancelled job whose end can't be observed ends as `reason: "orphaned"`. Running
+  jobs are recorded in `<home>/jobs.json` (0600): a crashing daemon signals their groups on the way out, and the next one
+  kills groups whose first process still has the recorded pid and start time (`job-orphan-killed`). Two presses at once
+  can no longer start more jobs than the limit.
+- **Community plugins get actions and push rules.** Actions never below `confirm`, app only, journaled.
+  `kind="plugin"` push rules are taken with their key and label only (no quiet, away, hold, cooldown or other kinds), so
+  a banner shows the reviewed label and the row text under the plugin's own switch in Settings (at most 5 a minute,
+  quiet hours → the morning digest). The linter gives warnings instead of errors.
+- **The confirmation names the row** that carries the button (sanitized, ≤ 120 graphemes; also `row` in the 428).
+- **Banner buttons and click target.** Up to 2 direct children of the line with `event=` that carry an offer (not
+  `input=` actions) become notification buttons (`push.notify` `actions: [{offer, label, level}]`, pressed through
+  `POST /actions/:offer` like the panel button), and the event line's `href=` (checked like `open.url`) becomes the
+  click target (`push.notify` `href`). Only when the banner shows the row text (trusted plugins, community keys with a
+  reviewed rule).
+- **`event.raised` carries `title`** — the sanitized text of the row with the key (≤ 120 graphemes).
+- **Event subscriptions.** `<agenthub.subscribe>plugin-id:key-prefix — why</agenthub.subscribe>` (up to 16; `*` instead of
+  the id — every other plugin) for trusted streamable plugins: each matching raised/cleared event arrives on stdin as
+  `{"type":"event","plugin","key","state":"raised|cleared","title"?}`, and every (re)start of the process brings
+  `{"type":"eventSnapshot","events":[…]}` with what is raised now; at most 600 messages a minute per subscriber. A new
+  permission kind `subscribe` (needs a "why"; adding one asks for consent again; the index checks its shape and the
+  terminal installer names it); the linter warns that the tag is
+  ignored for community, local and standard plugins and flags `*` for the reviewer. Actions a plugin presses over the
+  socket are journaled with `byPlugin` (`action`, `action-denied`, `action-confirm-requested`).
+- **Other agents' sessions.** A trusted plugin's line `agentSession=<id> pid=<pid> [agent=<kind>] [agentName="…"]`
+  registers a session of kind `external` (the process must exist, its start time is recorded; no signature check):
+  `/state.externalSessions` and the `sessions.external` SSE event — `/state.sessions` stays Claude Code only. Only
+  `session.focus` works for it (the tab found by the pid in tmux, iTerm2 and Terminal.app; cmux knows only its Claude
+  Code tabs); `session.interrupt`/`session.stop` refuse with `facts:external-session`, `/terminal/*` with
+  `terminal:external-session` (they accept the external id instead of failing with `args:sessionId:pattern`). The entry
+  goes when the line disappears, the process ends or the plugin is removed.
+- **HTTP connections** — `<agenthub.connection type="http">`: OAuth 2.1 for services without MCP with a pre-registered
+  public `client_id` (no secret, no dynamic registration), declared `authorize`/`token` endpoints, PKCE S256, the same
+  loopback sign-in in the app (optional fixed `port`), the token in the keychain, refreshed by the hub.
+  `POST /connections/:id/http {method, host?, path, query?, headers?, body?, fresh?}` proxies a request to a declared API
+  host (`hosts`, all hosts in `<agenthub.net>`) with the bearer token: declared `methods` and `paths` only, request and
+  response headers from allow-lists, no redirects followed, the response body capped at 256 KB (base64 for binary).
+  Reads (`GET`/`HEAD`) use the interval cache unless `fresh`; other methods are writes (sent within budget and backoff —
+  else `429 http:wait` — and they make cached reads stale). `/connections` items carry `type`, `apiHosts`, `methods`,
+  `paths`; the linter warns the reviewer about the token hosts and write methods.
+- **MCP from action processes and writes.** A button the human pressed can call its connection too, not only a run or
+  a streamable process. `POST /connections/:id/mcp {…, fresh: true}` — a write or an explicit refresh: past the interval
+  cache, waits for the service, still within the daily budget and backoff (`429 mcp:wait` — not sent); the result is not
+  cached, a tool error starts no backoff, and a successful fresh call makes the plugin's cached reads of that connection
+  stale.
+- **Plugin content in any language.** Plugins get `AGENTHUB_LOCALE` (the system preferred languages, BCP-47, in order);
+  `lang="…"` and `title-…`/`cost-…`/`input-…` accept any BCP-47 tag (malformed — a journal and linter warning);
+  translations are picked by hub language → system languages (up to the first ru/en one) → base text, so ru/en users see
+  no change. `/state.lang.locales` lists the system languages. The hub UI itself stays ru/en. A change of the system
+  languages alone re-translates plugin labels within a minute (no plugin restart); the daemon reads the OS language
+  list once a minute for both the hub language and the locales.
+- **`<agenthub.watch>`**: `$AGENTHUB_PLUGIN_DATA_PATH`/`$AGENTHUB_PLUGIN_CACHE_PATH` are substituted for every tier, `~`
+  is the plugins' HOME (`AGENTHUB_PLUGIN_HOME` on a test bench), and `recursive="true"` watches subdirectories — a
+  separate permission (`watch:<path> recursive`), so an update that adds it asks for consent.
+- **Streamable lifecycle.** Before SIGTERM the process gets `{"type":"stopping","reason":…}` (`restart` with `cause`,
+  `updated`, `policy`, `removed`, `shutdown`) and has 200 ms; every automatic restart builds the environment again (a
+  secret written meanwhile is seen); `actionResult` carries `arg` (the checked value, `null` without one).
+- **Rendering keys.** `max=` on `chart=bars` and `sparkMax=` on the header sparkline fix the scale top (taller bars
+  clipped; without them the scale follows the tallest bar or `avg=`); `until=<ISO-8601>` on the first header line is a
+  live countdown the app runs in the tile and the page header; `font=mono` draws a line in a monospaced font.
+- **Chart elements** for any plugin ([`writing-plugins.md` 4.4](docs/writing-plugins.md#44-charts)): `chart=bars` — a
+  bar chart card (captions under and above the bars, a dashed average with bars above it tinted, a highlighted bar in
+  the plugin color, a multi-line hover tooltip per bar, stacked series with a 2 pt minimum per visible layer, an optional
+  legend, a segment or popup child in the title row); `chart=share` — one bar of shares with a legend; `bar=0…100` — a
+  thin progress bar on a body line or, with `barColumn=`, in a table column; `spark=` on the first header line — a
+  sparkline in the page header (which then shows the tile value large) and in the popover tile. The chart data keys
+  (`values`, `labels`, `valueLabels`, `tips`, `series`, `spark`) may be up to 8000 characters instead of 2000.
+- **Chart data over 8000 characters keeps the newest entries.** Entries are dropped from the start, the lists of one
+  chart line (`values`, `labels`, `valueLabels`, `tips`, each `series` row) lose the same count so bars stay aligned, a
+  numeric `highlight=` moves with them, `spark=` is trimmed on its own, and each trimmed key leaves a journal warning.
+  Before, the keys were cut at the end, dropping the newest days silently.
+
+### Daemon
+
+- **Frame rate.** `plugin` SSE events are coalesced per plugin to at most one per 250 ms (`plugins.emitMinIntervalMs`),
+  the latest state always delivered; the first change after a quiet period and the first frame after an action or a
+  job's end go out at once.
+- **Plugin secrets from the app.** `GET /secrets/:plugin` (declared keys with `set`/`unset`/`denied`, never values),
+  `PUT /secrets/:plugin/:key {value}` (written via the stdin of `security -i`) and `DELETE …` — app only, only declared
+  keys the plugin would receive. The cached value is dropped and the plugin restarts with
+  `AGENTHUB_REFRESH_REASON=SecretChanged` through the new `ctx.restartPlugin(id, reason)`; SSE `secrets.changed`, journal
+  `secret-set` (no values). The service part of a key may now be up to 64 characters (any plugin id; it was 32). The
+  list never reads a value: a cached key answers from the cache, any other is an existence check (`security` without
+  `-w`); at most 32 keys (`more` counts the rest); "why" follows the content language chain; a test-tier own plugin's
+  own keys are not shown as denied.
+- **Test tier.** `AGENTHUB_TEST_TIER=own` on a test hub (an `AGENTHUB_HOME` other than the live directory) gives
+  `Plugins/local` plugins the own tier (`plugins[].testTier`) and lets cli press their actions — to test actions, push
+  rules and secrets without the pinned app. Never on the live hub.
+- **Daemon extensions outside the source tree.** `<home>/Extensions/{services,routes,primitives,terminals}/*.mjs` — the
+  same modules as the built-in ones, kept in the state directory (they survive hub updates). Each file is code inside
+  the daemon with its full rights, so it loads only after a human approved its sha256 in the app: `/state.extensions`
+  (and `GET /extensions`) lists the files with `pending`/`changed`/`approved`/`revoked`/`error` and the consent text;
+  the app-only `POST /extensions/approve {path, sha256}` records the approval in `Registry/ext-approvals.json` and loads
+  it right away (two approvals at once load it once), `POST /extensions/revoke {path}` drops it (a module still loaded
+  is `revoked` until the restart, not counted as waiting). One self-contained file, imported from a `data:` URL; names of
+  built-ins are refused; files must be the user's and not group/world-writable; every decision is journaled
+  (`extension-*`); SSE `extensions.changed`. `extensions.enabled: false` turns the folder off;
+  `AGENTHUB_TEST_EXTENSIONS=1` auto-approves on a test hub only.
+- **Push channels.** Delivery goes through a channel list: the macOS banner always, plus `services.push.channels` in
+  `config.json` (`webhook` — POST JSON; `ntfy` — publish to a topic; `https://`, or `http://` only to this Mac; an
+  optional `events` filter by kind or key prefix) and channels services register through the `push.channels` fact.
+  Security banners (a re-pinned app build, tampering signals) go only to channels marked `security: true` — also when
+  held overnight: the morning digest reaches other channels without them, and they follow as a separate `security`
+  message. Channel URLs never reach the journal (`push-channel-error {channel, key, code}`); a bad channel (an ntfy
+  topic with a broken `%` escape) is skipped on its own, not the whole push service.
+- **Terminal adapters are found by a directory scan** (`order`, `autoLaunch` exports) and may come from
+  `Extensions/terminals`; an adapter can ship its own ru/en error texts (`messages`) and say "needs setup"
+  (`available()` → `{error, setup: true}`): `/state.terminals.adapters[]` gains `reasonText`, `needsSetup`, `messages`,
+  `source`.
+- **A streamable process that doesn't read stdin** no longer grows the daemon's memory: past 1 MB waiting in the pipe its
+  messages are dropped until it reads again (`stdin-backlog` in the journal, once a minute).
+- **Index entries gated by feature.** An entry whose plugin uses an attribute added after hub 0.1.2 (`background`,
+  `input`, `net="none"`, community actions, `subscribe`, `type="http"`, recursive watch) writes `contract` as
+  `{"version": 3, "features": [...]}`; hub 0.1.2 reads any non-integer `contract` as "Requires a newer hub" (instead of
+  `registry:archive-permissions` or a silently broken install), and this hub checks each feature it knows
+  (`needsHub.features` lists unknown ones). The registry's `build-index` adopts it after syncing `perms.mjs`
+  ([`plugins-registry.md`](docs/plugins-registry.md#contract-3-additions-after-hub-012-2026-11-12-gating-index-entries)).
+- **Several plugin registries.** `services.plugins.registries: [{name, indexUrl, publicKey, trust: official|community}]`
+  after the old scalar pair (still the registry `default`, trust official). Each registry has its own key, files
+  (`Registry/sources/<name>/`) and rollback protection; a community registry never makes a plugin official; the same id
+  in two registries — the earlier one wins in the catalog (`shadowed`, journal `registry-shadowed`), and an installed
+  plugin stays pinned to its registry (`plugins.lock` `registry`); a registry's blocklist covers its own plugins, an
+  official registry's — all. The catalog, installed list, updates, the consent window and `/state.plugins[]` carry
+  `registry`, `registryLabel` (null with only `default`) and `tierLabel` ("official plugin · corp"); a running plugin
+  picks up a new label without a restart.
+
+### App
+
+- **Typed input.** An immediate action with `input` draws a text field and a send button in place of its capsule on the
+  plugin page; at a confirm level (and wherever there is no room for a field — table rows, the popover, banner
+  buttons) the field is in the confirmation (the 428 `input` flow: the token is reused when the core refuses the text
+  with `400 input:*`, and the confirmation reopens with the reason). One line, no leading `-` and `maxLength` are checked
+  as you type; `input:*` refusals read in ru/en. Input offers are app only, so an unpinned copy disables them.
+- **The confirmation names the row** (`row` from the 428) unless the core's text already quotes it.
+- **Running in the background.** The plugin page lists `plugins[].jobs` with the elapsed time and "Stop"
+  (`job.cancel`); `job.started`/`job.exited` update the list between frames; a button that starts a job has an
+  hourglass mark.
+- **Popover buttons.** The expanded tile card shows up to three offers of the plugin's header as buttons — the same
+  gate, confirmation and spinner as on the page (tiles keep their fixed height). `--open-tile <plugin id>` starts the
+  popover with that tile expanded (snapshots).
+- **Banner buttons.** `push.notify` `actions` become notification buttons (a category per button set, registered before
+  the banner; a button that asks first brings the app forward for the confirmation); a click on the banner opens `href`
+  when given, otherwise the plugin page. Without the fields — the plain "Open" banner as before.
+- **Keys.** The plugin page has a "Keys" section for the keys a plugin declares (`GET /secrets/:plugin`): state, "Set
+  key…" (a secure field with the value rules checked as you type) and "Remove" (asks first); re-read on
+  `secrets.changed`.
+- **Rendering.** `max=`, `sparkMax=`, `until=` (a live countdown in the tile and the page header) and `font=mono`; the
+  plugin page shows every connection the plugin declares, not just the first. The chart elements are drawn in
+  `app/Sources/AgentHub/PluginCharts.swift`, with parsing and layer arithmetic in AgentHubKit (`PluginBarChart`,
+  `PluginShareChart`, `Item.bar`/`spark`).
+- **Other agents.** Sessions shows `externalSessions` as a separate "Other agents" group with only "Go to tab"
+  (`session.focus`); they are not counted with Claude sessions. The permission kind `subscribe` reads "Event
+  subscription".
+- **Community plugins.** The manager and Settings → Notifications say they run their own commands (each asks first) and
+  notify under their own switch (at most 5 a minute, quiet hours → the morning digest).
+- **Hub extensions.** Plugins shows "Hub extensions" (`/state.extensions`, `extensions.changed`): each file with its
+  kind and state, a "waiting" badge (also on "Plugins" in the sidebar), "Review…" — a sheet with the core's consent text
+  verbatim, the kind, name, file, size and full SHA-256, "Show in Finder" and "Approve these bytes" (no Return shortcut;
+  `409 extensions:changed` says to look again) — "Revoke" with a confirmation, and the "restart required" note. Never
+  from the popover.
+- **Terminal adapters** in Settings → Terminal show the adapter's own `reasonText` (a setup hint when `needsSetup`) and
+  mark adapters from `Extensions/terminals`.
+- **Several registries.** When more than one registry is configured (`registryLabel` non-null), the tier label in the
+  manager, the catalog cards and the install consent sheet names the registry ("official · corp"), and the catalog shows
+  one status line per registry (its error or when it was fetched) plus the ids hidden as duplicates. With only the
+  default registry everything looks as before.
+- **HTTP connections.** A `type="http"` connection says which hosts, methods and paths the hub calls instead of the MCP
+  tools line; `409 oauth:port-busy` reads in ru/en.
+
+### Built-in plugins
+
+- **New: Spend (`spend`)** — a journal of Claude Code token spend ([`plugins/spend`](plugins/spend/README.md)), built on
+  the chart elements: a header with today's cost large, its tokens and requests, yesterday's total and a 14-day
+  sparkline with the average; cards for yesterday (flagged when it is over 1.5× the average), the last 7 days and this
+  month; "By day" cost bars for 14 or 30 days (a switch on the page) with the average and a tooltip per day; "Tokens by
+  day" stacked by cache read, cache write and output with a per-day breakdown in the tooltip, and a table of the token
+  types with their share of the cost; where the 7-day cost goes (background Workflow runs, the sessions themselves,
+  subagents); models over 7 days with bars. Numbers are short ("$3.0k", "1.75B").
+  - Read-only, from the transcripts in `~/.claude/projects` (main sessions, subagents, Workflow agents): only usage
+    numbers, model, time and request id are taken; message text never reaches the output or the index. Requests are
+    deduplicated across lines and files; days are local.
+  - Incremental indexing in `PluginData/spend/index.json`: files older than the month start and 30 days are not opened,
+    the first run shows progress, later runs read only appended bytes.
+  - The cost is an API list price equivalent with a price table and an as-of date inside the plugin — not a bill.
+    Unknown models are counted in tokens only.
+  - An optional notification when today's cost passes a threshold picked on the page (`daily-over`, its own switch).
+  - The plugin uses the generic contract only (two actions, the chart elements, a table, a popup); no effects.
+
+### Docs
+
+- [`writing-plugins.md`](docs/writing-plugins.md) now covers the process lifecycle (process groups killed when a run or
+  action ends, background jobs, restarts of a streamable process, the `stopping` message), the frame cost and the
+  ≤ 4/s coalescing, secret cache timings (5 min found, 1 min missing) and key limits, chart autoscale vs `max=`, the
+  banner click target and buttons, `effect=` arguments with spaces (nested quotes), foreign text in titles with the
+  `escapeTitle`/`quoteValue` helpers, the test tiers (`AGENTHUB_TEST_TIER`, `AGENTHUB_TEST_EXTENSIONS`) and which hub
+  APIs a plugin process may call.
+- Corrected: contract examples declare 3; "trusted" lists include `own` everywhere; the menu bar icon reacts only to
+  `block`/`error` of plugins (its orange "waiting" counts sessions and question cards, not `status=wait`);
+  `session.focus` reaches other agents' sessions by pid except in cmux; the README no longer presents the demo plugins
+  of the screenshots as part of the repository.
+- [`plugins-registry.md`](docs/plugins-registry.md): reviewer rules for foreign text in output, community actions and
+  push rules, `net="none"`, `background="true"`, `input=`, `<agenthub.subscribe>` and the hub socket.
+
 ## 0.1.2 — 2026-11-11
 
 ### Terminal layer: cmux is one terminal among several (AH-33)
@@ -34,10 +304,10 @@ The plugin contract has its own version history in
 ### Notifications: macOS banners only (the chat-bot channel is removed)
 
 - The Telegram channel is gone from the hub: the bot module and its manual check (`daemon/lib/push/telegram.mjs`,
-  `send-test.mjs`), the `services.push.telegram.*` settings, the reserved `telegram` keychain service for secrets and
-  the `agent-hub.telegram` entry in `agenthub uninstall`'s keychain list, the `telegram` flag in
-  `/state.notifications`, and the Settings line "Telegram is off (config.json)". An existing bot entry in the keychain
-  is not touched; delete it yourself if you set one up.
+  `send-test.mjs`), the `services.push.telegram.*` settings, the `agent-hub.telegram` entry in `agenthub uninstall`'s
+  keychain list, the `telegram` flag in `/state.notifications`, and the Settings line "Telegram is off
+  (config.json)". An existing bot entry in the keychain is not touched; delete it yourself if you set one up. The
+  `telegram` secrets service stays reserved, so no plugin can read a leftover bot token.
 - Old keys in `config.json` are ignored without errors: any key of `services.push` the service doesn't know gives one
   `push-config-ignored {keys}` journal line at startup.
 - What quiet hours do now: while you are away from the Mac (no keyboard or mouse for `idleThresholdMs`, 10 min), banners

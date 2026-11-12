@@ -43,6 +43,9 @@ struct HoverTip: NSViewRepresentable {
         UserDefaults.standard.register(defaults: ["NSInitialToolTipDelay": 1])
     }()
 
+    /// The same instant tooltips for other tooltip views (`ChartTipsView`).
+    static func enableInstantTips() { _ = instantTips }
+
     func makeNSView(context: Context) -> HoverTipView {
         _ = Self.instantTips
         let v = HoverTipView()
@@ -123,9 +126,13 @@ enum TooltipProbe {
         guard let m = manager, let root = window.contentView?.superview ?? window.contentView else { return [] }
         var out: [(NSView, NSRect, String, NSObject)] = []
         func walk(_ v: NSView) {
-            if v.toolTip != nil, let raw = m.perform(NSSelectorFromString("_toolTipsForView:"), with: v)?.takeUnretainedValue() as? NSObject {
+            if v.toolTip != nil || v is ChartTipsView, let raw = m.perform(NSSelectorFromString("_toolTipsForView:"), with: v)?.takeUnretainedValue() as? NSObject {
                 for t in (raw as? [NSObject]) ?? [raw] {
-                    if let s = t.value(forKey: "string") as? String { out.append((v, v.convert(v.bounds, to: nil), s, t)) }
+                    // a rectangle tooltip (`addToolTip`, `ChartTipsView`) keeps its text in the owner; its frame here is the whole view
+                    let owner = t.responds(to: NSSelectorFromString("owner")) ? t.value(forKey: "owner") as? String : nil
+                    if let s = (t.value(forKey: "string") as? String) ?? owner {
+                        out.append((v, v.convert(v.bounds, to: nil), s, t))
+                    }
                 }
             }
             v.subviews.forEach(walk)

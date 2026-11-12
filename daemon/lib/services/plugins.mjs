@@ -11,6 +11,8 @@
 // Config (config.json → services.plugins):
 //   indexUrl       — https://…/index.json (or a path / file:// for a mirror); null — the catalog isn't configured
 //   publicKey      — the registry's minisign public key (contents of the .pub file or a base64 string)
+//   registries     — more registries (G19): [{ name, indexUrl, publicKey, trust: "official" | "community" }] after the scalar pair
+//                    (= the registry "default", trust official); lib/plugins.mjs registrySources
 //   allowNetwork   — false forbids https:// entirely
 //   maxArchiveBytes — plugin archive size limit (5 MB by default)
 //   checkUpdates   — false disables the background update check (on by default; there's also the shell

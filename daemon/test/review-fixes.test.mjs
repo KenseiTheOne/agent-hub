@@ -255,7 +255,11 @@ test("policy: actions for an installed plugin only with official from lock (sign
   try {
     const pl = { ...fakePlugin("off", { actions: [{ id: "a", level: "confirm", command: "x" }], extra: { official: "true" } }), source: "installed" };
     h.core.setPluginPolicy(async () => ({ allowed: true, effects: [] }));
-    assert.equal((await h.core.policyFor(pl)).actions, false, "official in metadata does not grant actions");
+    // G3: a community plugin has actions too, but official in metadata does not make it official (the confirm floor stays)
+    const community = await h.core.policyFor(pl);
+    assert.equal(community.actions, true);
+    assert.equal(community.tier, "community");
+    assert.equal(community.official, false, "official in metadata does not make the plugin official");
     h.core.setPluginPolicy(async () => ({ allowed: true, effects: [], official: true }));
     const p = await h.core.policyFor(pl);
     assert.equal(p.actions, true);

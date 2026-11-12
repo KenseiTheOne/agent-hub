@@ -204,7 +204,7 @@ test("/state.hub: directory, test mode, where built-ins come from; plugin author
 });
 
 test("repository built-in plugins: author Kensei and login KenseiTheOne", () => {
-  for (const f of ["agents/agents.mjs", "claude-sessions/claude-sessions.mjs", "quota/quota.5m.mjs"]) {
+  for (const f of ["agents/agents.mjs", "claude-sessions/claude-sessions.mjs", "quota/quota.5m.mjs", "spend/spend.mjs"]) {
     const s = readFileSync(join(REPO_DIR, "plugins", f), "utf8");
     assert.match(s, /<agenthub\.author\.name>Kensei<\/agenthub\.author\.name>/, f);
     assert.match(s, /<agenthub\.author\.github>KenseiTheOne<\/agenthub\.author\.github>/, f);
@@ -232,7 +232,7 @@ test("install --apply: copy of built-in plugins in the state directory and built
       assert.match(r.stdout, /built-in plugins copied/);
       const dest = join(state, "Builtin");
       assert.equal(mode(dest), "700");
-      for (const f of ["agents/agents.mjs", "claude-sessions/claude-sessions.mjs", "quota/quota.5m.mjs"]) {
+      for (const f of ["agents/agents.mjs", "claude-sessions/claude-sessions.mjs", "quota/quota.5m.mjs", "spend/spend.mjs"]) {
         assert.equal(readFileSync(join(dest, f), "utf8"), readFileSync(join(REPO_DIR, "plugins", f), "utf8"), f);
         assert.equal(mode(join(dest, f)), "600");
       }

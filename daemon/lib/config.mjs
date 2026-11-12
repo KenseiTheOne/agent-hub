@@ -9,7 +9,7 @@ import { existsSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { standardPath as platformPath, stateDir, transportPath } from "./platform.mjs";
+import { isLiveStateDir, standardPath as platformPath, stateDir, transportPath } from "./platform.mjs";
 import { isLabel } from "./version.mjs";
 import { msg } from "./i18n.mjs";
 
@@ -67,14 +67,23 @@ export const DEFAULTS = Object.freeze({
   plugins: {
     standardTimeoutMs: 5000,
     actionTimeoutMs: 30000,
+    // Background actions (<agenthub.action background="true">): at most this many jobs per plugin at once.
+    maxJobsPerPlugin: 4,
+    // `plugin` SSE events of one plugin are coalesced to at most one per this interval (≤ 4/s), the latest state always
+    // arrives (trailing edge); the first frame after a quiet period and the first after an action go out at once. 0 — off.
+    emitMinIntervalMs: 250,
     maxOutputBytes: 1024 * 1024,
     minIntervalMs: 1000,
     // Safety rescan of plugin directories: fs.watch (FSEvents) sometimes loses events.
     rescanIntervalMs: 60_000,
   },
   journal: { maxBytes: 8 * 1024 * 1024 },
-  // services.<name>.enabled = false — the service does not start.
+  // services.<name>.enabled = false — the service does not start. services.push.channels — extra push delivery channels
+  // (lib/push/channels.mjs): [{type: "webhook"|"ntfy", url, id?, label?, events?, security?, enabled?}], none by default.
   services: {},
+  // External daemon extensions <home>/Extensions/{services,routes,primitives,terminals}/*.mjs (G4, lib/extensions.mjs): loaded
+  // only after a human approved the file's sha256 in the app. enabled: false — the folder is not even scanned.
+  extensions: { enabled: true, rescanMs: 30_000 },
 });
 
 function isObj(v) {
@@ -162,10 +171,28 @@ export function loadConfig({ env = process.env, overrides = null } = {}) {
   cfg.paths = paths;
   cfg.configLoadedSig = loadedSig;
   cfg.testMode = Boolean(env.AGENTHUB_HOME);
+  cfg.testTier = testTierOf(env, home);
+  cfg.testExtensions = testExtensionsOf(env, home);
   // AGENTHUB_PLUGIN_HOME=<dir> — plugins' HOME (a synthetic ~ for checks). Test mode only.
   cfg.pluginHome = cfg.testMode && env.AGENTHUB_PLUGIN_HOME ? resolve(env.AGENTHUB_PLUGIN_HOME) : null;
   cfg.systemLang = systemLangOverride(env);
   return cfg;
+}
+
+// AGENTHUB_TEST_TIER=own (G15): plugins from Plugins/local of a TEST hub get the own tier — actions, own push rules, hub
+// variables — and their actions may also be pressed by cli (scripts, curl), so a plugin can be tested end to end without the
+// pinned app. Honoured only when AGENTHUB_HOME points to a directory other than the live state directory: the live hub never
+// has it. → "own" | null
+export function testTierOf(env = process.env, home = defaultHome(env)) {
+  if (env.AGENTHUB_TEST_TIER !== "own" || !env.AGENTHUB_HOME) return null;
+  return isLiveStateDir(home, { env }) ? null : "own";
+}
+
+// AGENTHUB_TEST_EXTENSIONS=1 (G4): every file in <home>/Extensions counts as approved — for tests of extensions only. Honoured
+// only when AGENTHUB_HOME points to a directory other than the live state directory: the live hub always asks a human.
+export function testExtensionsOf(env = process.env, home = defaultHome(env)) {
+  if (env.AGENTHUB_TEST_EXTENSIONS !== "1" || !env.AGENTHUB_HOME) return false;
+  return !isLiveStateDir(home, { env });
 }
 
 // The "system" language (lib/settings.mjs): AGENTHUB_SYSTEM_LANG=ru|en overrides the OS language, =os — ask the OS.

@@ -19,6 +19,9 @@ public protocol ConfirmPresenter: AnyObject {
     func report(title: String, detail: String)
     /// Plugin permissions window (`428 consent-required`): permissions with "why", new ones marked. true — the human agreed.
     func consent(_ request: ConsentRequest) async -> Bool
+    /// Typed text for an input action (G1): the field alone (immediate) or inside the core's confirmation (`request.confirm`).
+    /// nil — the human cancelled. Default (PluginInput.swift): nil.
+    func prompt(_ request: InputPrompt) async -> String?
 }
 
 /// Shell store: daemon snapshot, live stream, log, action calls.
@@ -34,6 +37,36 @@ public final class HubStore {
     public private(set) var activeEvents: Set<String> = []
     /// The action currently running (offer.id or primitive name) — for the indicator.
     public private(set) var busyAction: String?
+    /// Plugin keys (G8, `GET /secrets/:plugin`) by plugin id, loaded when its page opens; nil entry — not loaded or refused
+    /// (an unpinned copy, no secrets service): the "Keys" section is not shown.
+    public private(set) var secrets: [String: SecretsList] = [:]
+    /// The key being written or removed right now (`<plugin>/<key>`).
+    public private(set) var secretBusy: String?
+    /// Text typed into inline input fields (G1) by offer id. The field reads and writes it here, not in its own view
+    /// state: rows above it may come and go on a refresh (the page lists blocks by position), which recreates the field —
+    /// the text must survive that. Offer ids are content hashes, stable across refreshes. Cleared once sent.
+    public private(set) var inputDrafts: [String: String] = [:]
+
+    /// The draft of an inline input field ("" — nothing typed).
+    public func inputDraft(_ offerId: String) -> String { inputDrafts[offerId] ?? "" }
+
+    /// Keep the field's text; "" drops the draft. At most `maxInputDrafts` offers keep text (the oldest typed into is
+    /// dropped first) — drafts of offers that left the page don't pile up.
+    public func setInputDraft(_ offerId: String, _ text: String) {
+        if text.isEmpty {
+            inputDrafts[offerId] = nil
+            draftOrder.removeAll { $0 == offerId }
+            return
+        }
+        if inputDrafts[offerId] == text { return }
+        inputDrafts[offerId] = text
+        draftOrder.removeAll { $0 == offerId }
+        draftOrder.append(offerId)
+        while draftOrder.count > Self.maxInputDrafts { inputDrafts[draftOrder.removeFirst()] = nil }
+    }
+
+    public static let maxInputDrafts = 32
+    @ObservationIgnored private var draftOrder: [String] = []
     /// When the last event or ping arrived — for the "updated" caption.
     public private(set) var lastEventAt: Date?
 
@@ -198,6 +231,20 @@ public final class HubStore {
         return nil
     }
 
+    /// "Go to tab" for a non-Claude agent session (`externalSessions`): only when the core found its tab; nil — no button.
+    public func focusRequest(external s: ExternalSession) -> (primitive: String, args: [String: JSONValue])? {
+        guard sessionFocusPrimitive, s.focusable else { return nil }
+        return ("session.focus", ["sessionId": .string(s.sessionId)])
+    }
+
+    /// Why "Go to tab" won't work for an external session right now (connection, pin, pause, its terminal, the cmux bridge).
+    public func gate(external s: ExternalSession) -> ActionBlock? {
+        if let b = gate(primitive: "session.focus", needsBridge: false) { return b }
+        if let t = s.terminalInfo, !t.supports("focus") { return .unsupported(terminal: t.label, capability: "focus") }
+        if s.terminalInfo?.needsBridge == true, !bridgeOnline { return .noBridge }
+        return nil
+    }
+
     /// "Go to tab" will work for this session right now.
     public func canFocus(_ s: SessionInfo) -> Bool {
         guard let req = focusRequest(sessionId: s.sessionId) else { return false }
@@ -254,7 +301,8 @@ public final class HubStore {
         return ActionBlock.check(primitive: offer.kind == "action" ? nil : offer.primitive, level: offer.level, pluginAction: offer.kind == "action",
                           primitives: state?.primitives ?? [], live: connection.isLive, peer: peer, estop: estop, bridgeOnline: bridgeOnline,
                           needsBridge: !(sessionPrim && state?.terminals != nil),
-                          actionAppOnly: offer.kind == "action" && offer.appOnly)
+                          // an input action is pressed only in the app, whatever the tier (G1)
+                          actionAppOnly: offer.kind == "action" && (offer.appOnly || offer.input != nil))
     }
 
     public func plugin(_ id: String) -> PluginState? { state?.plugins.first { $0.id == id } }
@@ -407,6 +455,8 @@ public final class HubStore {
             if case .estop(true) = hub { cards = [] }
         case .pushNotify(let n):
             onNotify?(n)
+        case .secretsChanged(let plugin, _):
+            if secrets[plugin] != nil { Task { await loadSecrets(plugin) } }
         case .pluginUpdates:
             if managerVisible { Task { await loadRegistry() } }
         case .hookCard:
@@ -446,6 +496,9 @@ public final class HubStore {
             }
             // OAuth connections (oauth service): login started, finished, expired, "Disconnect"
             if type == "connections.changed", let list = ConnectionInfo.list(from: data["connections"]) { state?.connections = list }
+            // external extensions (G4): a file appeared, changed or went, an approval or a revocation
+            if type == "extensions.changed", let e = data["extensions"], let raw = try? JSONEncoder().encode(e),
+               let info = try? JSONDecoder().decode(ExtensionsInfo.self, from: raw) { state?.extensions = info }
             if type.hasPrefix("plugins."), managerVisible { Task { await loadRegistry() } }
             // an own plugin request or an own plugin folder changed: the popover shows requests even without the manager
             else if type == "plugins.own-request" || type == "plugins.own" { Task { await loadRegistry() } }
@@ -752,33 +805,200 @@ public final class HubStore {
 
     /// Run a plugin offer. Whether confirmation is needed is decided by the core (428 reply),
     /// the shell only shows its text and passes consent via a token.
-    public func perform(offer: Offer, label: String) async {
-        await perform(id: offer.id, args: nil, label: offer.label ?? label)
+    /// `input` — text the human already typed into the offer's inline field (G1); an input offer without it asks for the
+    /// text in a sheet (immediate) or in the confirmation sheet (the 428 carries the field). true — the action ran and
+    /// succeeded.
+    @discardableResult
+    public func perform(offer: Offer, label: String, input: String? = nil) async -> Bool {
+        if let spec = offer.input { return await performInput(offer, spec: spec, label: offer.label ?? label, typed: input) }
+        return await perform(id: offer.id, args: nil, label: offer.label ?? label)
+    }
+
+    /// An input action (G1): the text goes in the request body, never into the offer. A confirm-level action may be sent
+    /// without text — the 428 then carries `input` and the sheet shows the field; the token accepts any valid text, and a
+    /// `400 input:*` refusal (checked before the token is spent) reopens the sheet with the reason.
+    private func performInput(_ offer: Offer, spec: OfferInput, label: String, typed: String?) async -> Bool {
+        guard busyAction == nil else { return false }
+        busyAction = offer.id
+        defer { busyAction = nil }
+        var text = typed
+        var token: String?
+        var asked: ConfirmRequest?
+        do {
+            if text == nil, offer.level == .immediate {
+                guard let presenter, let t = await presenter.prompt(InputPrompt(actionLabel: label, input: spec)) else { return false }
+                text = t
+            }
+            var outcome = try await client.invoke(offer.id, input: text)
+            for _ in 0..<6 {
+                switch outcome {
+                case .needsConfirm(let req):
+                    guard token == nil, let presenter else {
+                        presenter?.report(title: tr("Хаб снова просит подтверждение", "The hub asks to confirm again"), detail: tr("\(label): повторите действие.", "\(label): try again."))
+                        return false
+                    }
+                    if req.input != nil || text == nil {
+                        // the field is in the confirmation sheet; the token accepts any valid text typed there
+                        guard let t = await presenter.prompt(InputPrompt(actionLabel: label, input: req.input ?? spec, confirm: req, text: text ?? "")) else { return false }
+                        text = t
+                    } else {
+                        guard await presenter.confirm(req, actionLabel: label) else { return false }
+                    }
+                    token = req.token
+                    asked = req
+                    outcome = try await client.invoke(offer.id, input: text, confirmToken: token)
+                case .denied(400, let code) where code.hasPrefix("input:"):
+                    // the core refused the text (its own pattern, for example): ask again with the reason; the token is
+                    // still valid — input is checked before the confirmation
+                    guard let presenter, let t = await presenter.prompt(InputPrompt(actionLabel: label, input: asked?.input ?? spec, confirm: asked,
+                                                                                    text: text ?? "", error: InputCheck.message(code, maxLength: spec.maxLength))) else { return false }
+                    text = t
+                    outcome = try await client.invoke(offer.id, input: text, confirmToken: token)
+                default:
+                    return finish(outcome, label: label)
+                }
+            }
+            // out of retries (a refusal after every attempt, or the core asking again and again): say why instead of
+            // stopping silently — the last refusal reads like any other
+            return finish(outcome, label: label)
+        } catch {
+            reportOffline(error)
+            return false
+        }
+    }
+
+    /// Show the end of an action: a refusal or a failure; true — it ran and succeeded.
+    private func finish(_ outcome: ActionOutcome, label: String) -> Bool {
+        switch outcome {
+        case .done(let ok, let result):
+            // a plugin action checks its own facts and names the refusal reason with a `reason=<code>` line
+            if !ok { presenter?.report(title: tr("Не получилось: \(label)", "Couldn't: \(label)"), detail: Explain.failure(result: result, label: label)) }
+            return ok
+        case .needsConfirm:
+            presenter?.report(title: tr("Хаб снова просит подтверждение", "The hub asks to confirm again"), detail: tr("\(label): повторите действие.", "\(label): try again."))
+        case .denied(let status, let code):
+            deny(label, status: status, code: code)
+        }
+        return false
+    }
+
+    /// "Stop" on a background job (G6): the `job.cancel` primitive (immediate, app only).
+    public func cancelJob(_ job: PluginJob) async {
+        await perform(id: "job.cancel", args: ["job": .string(job.id)], label: tr("Остановить: \(job.title ?? job.actionId ?? job.id)", "Stop: \(job.title ?? job.actionId ?? job.id)"))
     }
 
     /// Call a primitive directly (panel forms: session launch, etc.).
-    public func perform(id: String, args: [String: JSONValue]?, label: String) async {
-        guard busyAction == nil else { return }
+    @discardableResult
+    public func perform(id: String, args: [String: JSONValue]?, label: String) async -> Bool {
+        guard busyAction == nil else { return false }
         busyAction = id
         defer { busyAction = nil }
         do {
             var outcome = try await client.invoke(id, args: args)
             if case .needsConfirm(let req) = outcome {
-                guard let presenter, await presenter.confirm(req, actionLabel: label) else { return }
-                outcome = try await client.invoke(id, args: args, confirmToken: req.token)
+                // an input action reached without its field (a banner button): the confirmation sheet asks for the text
+                if let field = req.input, let presenter {
+                    guard let t = await presenter.prompt(InputPrompt(actionLabel: label, input: field, confirm: req)) else { return false }
+                    outcome = try await client.invoke(id, args: args, input: t, confirmToken: req.token)
+                } else {
+                    guard let presenter, await presenter.confirm(req, actionLabel: label) else { return false }
+                    outcome = try await client.invoke(id, args: args, confirmToken: req.token)
+                }
             }
-            switch outcome {
-            case .done(let ok, let result):
-                // a plugin action checks its own facts and names the refusal reason with a `reason=<code>` line
-                if !ok { presenter?.report(title: tr("Не получилось: \(label)", "Couldn't: \(label)"), detail: Explain.failure(result: result, label: label)) }
-            case .needsConfirm:
-                presenter?.report(title: tr("Хаб снова просит подтверждение", "The hub asks to confirm again"), detail: tr("\(label): повторите действие.", "\(label): try again."))
-            case .denied(let status, let code):
-                deny(label, status: status, code: code)
-            }
+            return finish(outcome, label: label)
+        } catch {
+            reportOffline(error)
+            return false
+        }
+    }
+
+    // MARK: - external extensions (G4)
+
+    /// The extension being approved or revoked right now (its path).
+    public var extensionBusy: String? { busyAction.flatMap { $0.hasPrefix("extension:") ? String($0.dropFirst(10)) : nil } }
+
+    /// Approve the exact bytes the human saw (`sha256` from the sheet). true — approved; the file changed meanwhile →
+    /// re-read the list and say so (the sheet must be shown again with the new fingerprint).
+    @discardableResult
+    public func approveExtension(_ item: ExtensionItem) async -> Bool {
+        guard busyAction == nil, let sha = item.sha256 else { return false }
+        busyAction = "extension:" + item.path
+        defer { busyAction = nil }
+        do {
+            try await client.approveExtension(path: item.path, sha256: sha)
+            await reloadExtensions()
+            return true
+        } catch let e as HubError {
+            let code = e.code ?? ""
+            await reloadExtensions()
+            presenter?.report(title: tr("Расширение не одобрено: \(item.path)", "Extension not approved: \(item.path)"),
+                              detail: (code == "extensions:changed"
+                                       ? tr("Файл изменился после того, как вы его посмотрели, — откройте одобрение снова и проверьте новый отпечаток.",
+                                            "The file changed after you looked at it — open the approval again and check the new fingerprint.")
+                                       : Explain.text(code: code, status: 0, label: item.path)) + Self.codeNote(code))
         } catch {
             reportOffline(error)
         }
+        return false
+    }
+
+    public func revokeExtension(_ item: ExtensionItem) async {
+        guard busyAction == nil else { return }
+        busyAction = "extension:" + item.path
+        defer { busyAction = nil }
+        do {
+            try await client.revokeExtension(path: item.path)
+            await reloadExtensions()
+        } catch let e as HubError {
+            presenter?.report(title: tr("Одобрение не снято: \(item.path)", "Approval not revoked: \(item.path)"),
+                              detail: Explain.text(code: e.code ?? "", status: 0, label: item.path) + Self.codeNote(e.code ?? ""))
+        } catch {
+            reportOffline(error)
+        }
+    }
+
+    /// `GET /extensions` into the snapshot (the event follows too; this makes the sheet's next look current at once).
+    public func reloadExtensions() async {
+        if let info = try? await client.extensions() { state?.extensions = info }
+    }
+
+    // MARK: - plugin keys (G8)
+
+    /// Re-read the plugin's declared keys (`GET /secrets/:plugin`). A refusal (cli copy, no service, unknown plugin) drops
+    /// the entry: no "Keys" section.
+    public func loadSecrets(_ plugin: String) async {
+        do {
+            let list = try await client.secrets(plugin: plugin)
+            secrets[plugin] = list
+        } catch {
+            secrets[plugin] = nil
+        }
+    }
+
+    /// "Set key…" → `PUT`; "Remove" → `DELETE` (value nil). true — done; refusals are reported in words.
+    @discardableResult
+    public func writeSecret(plugin: String, key: String, value: String?) async -> Bool {
+        guard secretBusy == nil else { return false }
+        secretBusy = "\(plugin)/\(key)"
+        defer { secretBusy = nil }
+        do {
+            let updated = value == nil ? try await client.deleteSecret(plugin: plugin, key: key) : try await client.setSecret(plugin: plugin, key: key, value: value ?? "")
+            if let u = updated, var list = secrets[plugin], let i = list.secrets.firstIndex(where: { $0.key == u.key }) {
+                list.secrets[i] = u
+                secrets[plugin] = list
+            } else {
+                await loadSecrets(plugin)
+            }
+            return true
+        } catch let e as HubError {
+            let code = e.code ?? ""
+            presenter?.report(title: value == nil ? tr("Ключ не удалён: \(key)", "Key not removed: \(key)") : tr("Ключ не сохранён: \(key)", "Key not saved: \(key)"),
+                              detail: Explain.text(code: code, status: 0, label: key) + Self.codeNote(code))
+            await loadSecrets(plugin)
+        } catch {
+            reportOffline(error)
+        }
+        return false
     }
 
     /// Core refusal: the title says what failed, the text is human-readable, the code is the last line.

@@ -282,7 +282,7 @@ test("official plugin: immediate without network — no confirmation window, but
   }
 });
 
-test("third-party plugin: effects are cut down to open.*, cmux.focus and session.focus, no actions", async () => {
+test("third-party plugin: effects are cut down to open.*, cmux.focus and session.focus; community actions at least confirm, local — none", async () => {
   const state = { who: "app" };
   const plugins = tempHome("ah-pl-");
   const h = await startHub({ pluginsDir: plugins, overrides, sys: sysAs(state) });
@@ -300,13 +300,17 @@ test("third-party plugin: effects are cut down to open.*, cmux.focus and session
     assert.equal(t.source, "installed");
     assert.equal(t.trusted, false);
     assert.deepEqual(t.effects, ["open.url", "cmux.focus", "session.focus"]);
-    assert.deepEqual(t.actions, []);
+    // G3: a community plugin has actions — immediate raised to confirm, app only
+    assert.deepEqual(t.actions, [{ id: "x", level: "confirm", title: null, arg: null }]);
     assert.equal(t.body.find((b) => b.title === "A").offer, undefined);
-    assert.equal(t.body.find((b) => b.title === "B").offer, undefined);
+    const b = t.body.find((x) => x.title === "B").offer;
+    assert.equal(b.level, "confirm");
+    assert.equal(b.appOnly, true);
     assert.equal(t.body.find((b) => b.title === "C").offer.primitive, "open.url");
     const l = h.core.pluginState("loc");
     assert.equal(l.source, "local");
     assert.deepEqual(l.effects, ["open.url"]);
+    assert.deepEqual(l.actions, [], "local — no actions");
     const warn = h.core.journal.tail(200).filter((e) => e.type === "warning" && e.plugin === "third").map((e) => e.detail);
     assert.ok(warn.some((w) => w.includes("session.stop")));
   } finally {

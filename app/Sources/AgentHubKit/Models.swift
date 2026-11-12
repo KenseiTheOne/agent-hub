@@ -53,9 +53,16 @@ public struct Offer: Codable, Sendable, Hashable {
     public var label: String?
     /// An action of a non-built-in plugin: the core accepts it only from the app (class app), even if immediate.
     public var appOnly: Bool = false
+    /// `input=` (contract 3 additive): the human types the value — the app draws a text field (immediate) or asks for it in
+    /// the confirmation sheet (confirm levels). nil — an ordinary button.
+    public var input: OfferInput? = nil
+    /// `background="true"`: pressing starts a job listed in `plugins[].jobs` (the request returns at once).
+    public var background: Bool = false
 
-    public init(id: String, kind: String, primitive: String? = nil, action: String? = nil, level: ActionLevel, label: String? = nil, appOnly: Bool = false) {
+    public init(id: String, kind: String, primitive: String? = nil, action: String? = nil, level: ActionLevel, label: String? = nil, appOnly: Bool = false,
+                input: OfferInput? = nil, background: Bool = false) {
         self.id = id; self.kind = kind; self.primitive = primitive; self.action = action; self.level = level; self.label = label; self.appOnly = appOnly
+        self.input = input; self.background = background
     }
 
     public init(from decoder: Decoder) throws {
@@ -67,6 +74,71 @@ public struct Offer: Codable, Sendable, Hashable {
         level = (try? c.decode(ActionLevel.self, forKey: .level)) ?? .unknown
         label = try? c.decodeIfPresent(String.self, forKey: .label)
         appOnly = (try? c.decodeIfPresent(Bool.self, forKey: .appOnly)) ?? false
+        input = try? c.decodeIfPresent(OfferInput.self, forKey: .input)
+        background = (try? c.decodeIfPresent(Bool.self, forKey: .background)) ?? false
+    }
+}
+
+/// The text field of an input action (`offer.input`, the 428 `input`): what the human types goes to the action's stdin.
+/// `pattern` is the plugin's JavaScript pattern — a hint only: the core checks the text itself (`400 input:*`).
+public struct OfferInput: Codable, Sendable, Hashable {
+    public var placeholder: String?
+    public var maxLength: Int
+    public var pattern: String?
+
+    public static let defaultMaxLength = 256
+
+    public init(placeholder: String? = nil, maxLength: Int = OfferInput.defaultMaxLength, pattern: String? = nil) {
+        self.placeholder = placeholder; self.maxLength = maxLength; self.pattern = pattern
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        placeholder = (try? c.decodeIfPresent(String.self, forKey: .placeholder)).flatMap { $0?.isEmpty == false ? $0 : nil }
+        let m = (try? c.decodeIfPresent(Int.self, forKey: .maxLength)) ?? nil
+        maxLength = m.map { min(4000, max(1, $0)) } ?? Self.defaultMaxLength
+        pattern = (try? c.decodeIfPresent(String.self, forKey: .pattern)) ?? nil
+    }
+
+    enum CodingKeys: String, CodingKey { case placeholder, maxLength, pattern }
+}
+
+/// A running background job of a plugin (`plugins[].jobs`, `background="true"` actions): stopped by `job.cancel`.
+public struct PluginJob: Codable, Sendable, Hashable, Identifiable {
+    public var id: String
+    public var actionId: String?
+    public var title: String?
+    public var startedAt: String?
+    public var pid: Int?
+
+    public init(id: String, actionId: String? = nil, title: String? = nil, startedAt: String? = nil, pid: Int? = nil) {
+        self.id = id; self.actionId = actionId; self.title = title; self.startedAt = startedAt; self.pid = pid
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        actionId = try? c.decodeIfPresent(String.self, forKey: .actionId)
+        title = try? c.decodeIfPresent(String.self, forKey: .title)
+        startedAt = try? c.decodeIfPresent(String.self, forKey: .startedAt)
+        pid = try? c.decodeIfPresent(Int.self, forKey: .pid)
+    }
+
+    enum CodingKeys: String, CodingKey { case id, actionId, title, startedAt, pid }
+
+    /// When the job started (nil — unknown or unparsable).
+    public var startDate: Date? { startedAt.flatMap(ISODate.parse) }
+}
+
+/// ISO 8601 with or without fractional seconds (`2026-11-12T10:00:00.000Z`, `2026-11-12T13:00:00+03:00`).
+public enum ISODate {
+    public static func parse(_ s: String) -> Date? {
+        let t = s.trimmingCharacters(in: .whitespaces)
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let d = f.date(from: t) { return d }
+        f.formatOptions = [.withInternetDateTime]
+        return f.date(from: t)
     }
 }
 
@@ -174,6 +246,60 @@ public struct Item: Codable, Sendable, Hashable {
     /// `header=true` on a direct child of a table with an offer: a button to the right of the table title.
     public var isHeader: Bool { params["header"] == "true" }
 
+    // Charts (hub 0.1.3, optional within contract 3: an older hub draws the lines as plain text).
+    /// `chart=bars` (no children needed) or `chart=share` (the children are the parts); nil — no chart or an unknown kind.
+    public var chartKind: PluginChartKind? { params["chart"].flatMap(PluginChartKind.init(rawValue:)) }
+    /// `bar=0…100`: a thin progress bar on a body line or a table row (`color=` tints it); nil — none or not a number.
+    public var bar: Double? {
+        guard let v = params["bar"].flatMap({ Double($0.trimmingCharacters(in: .whitespaces)) }), v.isFinite else { return nil }
+        return min(100, max(0, v))
+    }
+    /// `barColumn=<n>` on a table or a table row: the 1-based column (1 is the title column) that holds the row's `bar=`.
+    public var barColumn: Int? { params["barColumn"].flatMap { Int($0.trimmingCharacters(in: .whitespaces)) }.flatMap { $0 >= 1 ? $0 : nil } }
+    /// `spark="v1,v2,…"` on the first header line: a mini bar sparkline in the page header and the popover tile.
+    public var spark: [Double] { Item.splitNumbers(params["spark"]) }
+    /// `sparkAvg=<number>`: a dashed average line on the header sparkline; bars above it are tinted.
+    public var sparkAvg: Double? { params["sparkAvg"].flatMap { Double($0.trimmingCharacters(in: .whitespaces)) }.flatMap { $0.isFinite && $0 > 0 ? $0 : nil } }
+    /// `sparkLabel=` / `sparkNote=`: small captions left and right above the header sparkline ("14 days", "avg $342 a day").
+    public var sparkLabel: String? { params["sparkLabel"].flatMap { $0.isEmpty ? nil : $0 } }
+    public var sparkNote: String? { params["sparkNote"].flatMap { $0.isEmpty ? nil : $0 } }
+    /// `sparkMax=<number>`: a fixed top for the header sparkline (bars above it are clipped at the top); nil — autoscale.
+    public var sparkMax: Double? { Item.positive(params["sparkMax"]) }
+    /// `until=<ISO-8601>` on the first header line: the app counts down to that moment (tile value, page header).
+    public var until: Date? { params["until"].flatMap(ISODate.parse) }
+    /// `font=mono`: the line title in a monospaced font.
+    public var isMono: Bool { params["font"]?.trimmingCharacters(in: .whitespaces).lowercased() == "mono" }
+
+    /// A positive finite number from a parameter value; anything else — nil.
+    public static func positive(_ raw: String?) -> Double? {
+        raw.flatMap { Double($0.trimmingCharacters(in: .whitespaces)) }.flatMap { $0.isFinite && $0 > 0 ? $0 : nil }
+    }
+
+    /// `"3,1.5,,x"` → [3, 1.5, 0, 0]: comma-separated numbers; an empty or broken entry keeps its place as 0, negative and
+    /// non-finite values are 0. nil or "" → [].
+    public static func splitNumbers(_ raw: String?) -> [Double] {
+        guard let raw, !raw.trimmingCharacters(in: .whitespaces).isEmpty else { return [] }
+        return raw.split(separator: ",", omittingEmptySubsequences: false).map { s in
+            let v = Double(s.trimmingCharacters(in: .whitespaces)) ?? 0
+            return v.isFinite && v > 0 ? v : 0
+        }
+    }
+
+    /// Short labels: `¦`-separated when the value has a `¦`, otherwise comma-separated (`"29,30,31"`).
+    public static func splitLabels(_ raw: String?) -> [String] {
+        guard let raw, !raw.isEmpty else { return [] }
+        if raw.contains(cellSeparator) { return splitCells(raw) }
+        return raw.split(separator: ",", omittingEmptySubsequences: false).map { $0.trimmingCharacters(in: .whitespaces) }
+    }
+
+    /// Tooltips: entries separated by `¦`, a line break inside an entry written as the two characters `\n`.
+    public static func splitTips(_ raw: String?) -> [String] {
+        guard let raw, !raw.isEmpty else { return [] }
+        return raw.split(separator: cellSeparator, omittingEmptySubsequences: false).map {
+            $0.replacingOccurrences(of: "\\n", with: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+    }
+
     /// The cell separator in `columns=`, `cells=`, `cellColors=`: `¦` (U+00A6), the same character plugins already use
     /// in place of `|` in titles.
     public static let cellSeparator: Character = "\u{00A6}"
@@ -189,6 +315,12 @@ public struct PluginAction: Codable, Sendable, Hashable {
     public var id: String
     public var level: ActionLevel
     public var title: String?
+    /// `input=`: the human types the value (contract 3 additive).
+    public var input: OfferInput?
+    /// `background="true"`: a job, not a click-and-done command.
+    public var background: Bool?
+    /// `net="none"`: the action promised not to use the plugin's network.
+    public var net: String?
 }
 
 /// Plugin tier. The daemon decides it: install location (app directory, `Plugins/local`) and the signed registry
@@ -244,6 +376,11 @@ public struct PluginState: Codable, Sendable, Hashable, Identifiable {
     public var icon: PluginIcon?
     /// Minimum contract version the plugin declared (1 if not declared); an older daemon gives nil.
     public var contract: Int?
+    /// Running background jobs (`background="true"` actions); an older daemon — empty.
+    public var jobs: [PluginJob] = []
+    /// An installed registry plugin: the registry it came from (G19); `registryLabel` nil — only the default registry.
+    public var registry: String? = nil
+    public var registryLabel: String? = nil
 
     public init(id: String, title: String, status: HubStatus, header: [Item] = [], body: [Item] = [], source: String = "builtin", icon: PluginIcon? = nil) {
         self.id = id; self.source = source; self.tier = PluginTier(tier: nil, source: source, official: false)
@@ -282,6 +419,9 @@ public struct PluginState: Codable, Sendable, Hashable, Identifiable {
         events = (try? c.decode([String].self, forKey: .events)) ?? []
         header = (try? c.decode([Item].self, forKey: .header)) ?? []
         body = (try? c.decode([Item].self, forKey: .body)) ?? []
+        jobs = (try? c.decode([PluginJob].self, forKey: .jobs)) ?? []
+        registry = try? c.decodeIfPresent(String.self, forKey: .registry)
+        registryLabel = RegistrySource.label(try? c.decodeIfPresent(String.self, forKey: .registryLabel))
     }
 
     /// Menu line: the first non-empty header row, otherwise the plugin name.
@@ -533,6 +673,12 @@ public struct HubState: Codable, Sendable, Hashable {
     /// Own plugins from local folders (`GET /state.ownPlugins`, plugins service, 2026-11-09): install requests waiting
     /// for a human in the app, and own plugins whose folder is gone or broken. nil means an older daemon.
     public var ownPlugins: OwnPluginsInfo?
+    /// Sessions of other (non-Claude) agents that trusted plugins report (`GET /state.externalSessions`, event
+    /// `sessions.external`; hub 0.1.3+). Only "Go to tab" applies to them. Empty — none or an older daemon.
+    public var externalSessions: [ExternalSession] = []
+    /// External daemon extensions waiting for or holding a human's approval (`GET /state.extensions`, event
+    /// `extensions.changed`; G4). nil — an older daemon.
+    public var extensions: ExtensionsInfo?
 
     public init(plugins: [PluginState] = [], sessions: [SessionInfo] = [], estop: Bool = false, seq: Int = 0) {
         self.version = nil; self.contract = nil; self.now = nil; self.pid = nil; self.seq = seq; self.estop = estop
@@ -571,6 +717,8 @@ public struct HubState: Codable, Sendable, Hashable {
         idle = try? c.decodeIfPresent(IdleVerdict.self, forKey: .idle)
         connections = try? c.decodeIfPresent([ConnectionInfo].self, forKey: .connections)
         ownPlugins = try? c.decodeIfPresent(OwnPluginsInfo.self, forKey: .ownPlugins)
+        externalSessions = c.lossyList(ExternalSession.self, forKey: .externalSessions) ?? []
+        extensions = try? c.decodeIfPresent(ExtensionsInfo.self, forKey: .extensions)
         status = (try? c.decode(HubStatus.self, forKey: .status)) ?? HubStatus.worst(plugins.map(\.status))
         waitingSessions = (try? c.decode(Int.self, forKey: .waitingSessions)) ?? sessions.filter(\.isWaiting).count
     }
@@ -583,6 +731,44 @@ public struct HubState: Codable, Sendable, Hashable {
             }
             .map(\.element)
     }
+}
+
+/// A non-Claude agent session (`/state.externalSessions[]`): a trusted plugin's `agentSession=<id> pid=<pid>` line. No
+/// signature check, so the only operation is `session.focus` (when `focusable`).
+public struct ExternalSession: Codable, Sendable, Hashable, Identifiable {
+    public var sessionId: String
+    public var pid: Int?
+    public var agent: String?
+    public var name: String?
+    /// The plugin that reports it.
+    public var owner: String?
+    public var terminal: String?
+    public var focusable: Bool
+    public var terminalInfo: SessionTerminal?
+    public var id: String { sessionId }
+
+    public init(sessionId: String, pid: Int? = nil, agent: String? = nil, name: String? = nil, owner: String? = nil, terminal: String? = nil,
+                focusable: Bool = false, terminalInfo: SessionTerminal? = nil) {
+        self.sessionId = sessionId; self.pid = pid; self.agent = agent; self.name = name; self.owner = owner; self.terminal = terminal
+        self.focusable = focusable; self.terminalInfo = terminalInfo
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        sessionId = try c.decode(String.self, forKey: .sessionId)
+        pid = try? c.decodeIfPresent(Int.self, forKey: .pid)
+        agent = (try? c.decodeIfPresent(String.self, forKey: .agent)).flatMap { $0?.isEmpty == false ? $0 : nil }
+        name = (try? c.decodeIfPresent(String.self, forKey: .name)).flatMap { $0?.isEmpty == false ? $0 : nil }
+        owner = try? c.decodeIfPresent(String.self, forKey: .owner)
+        terminal = try? c.decodeIfPresent(String.self, forKey: .terminal)
+        focusable = (try? c.decodeIfPresent(Bool.self, forKey: .focusable)) ?? false
+        terminalInfo = try? c.decodeIfPresent(SessionTerminal.self, forKey: .terminalInfo)
+    }
+
+    enum CodingKeys: String, CodingKey { case sessionId, pid, agent, name, owner, terminal, focusable, terminalInfo }
+
+    /// The row title: the name, else the agent and the short id.
+    public var displayName: String { name ?? "\(agent ?? tr("агент", "agent")) · \(sessionId.prefix(8))" }
 }
 
 /// `sessions[].terminalInfo` in `/state`: the terminal the core found the session's tab in. `capabilities` — what the hub can do
@@ -628,10 +814,19 @@ public struct TerminalsInfo: Codable, Sendable, Hashable {
         public var available: Bool
         public var reason: String?
         public var sessions: Int
+        /// The adapter's own text for `reason` in the hub language; nil — the shell's own text for the code.
+        public var reasonText: String?
+        /// A human must set something up first (`reasonText` is the setup hint).
+        public var needsSetup: Bool = false
+        /// `builtin` | `extension` (`<home>/Extensions/terminals`).
+        public var source: String?
+        public var isExtension: Bool { source == "extension" }
 
-        public init(id: String, label: String? = nil, capabilities: [String], via: String? = nil, installed: Bool? = nil, available: Bool = true, reason: String? = nil, sessions: Int = 0) {
+        public init(id: String, label: String? = nil, capabilities: [String], via: String? = nil, installed: Bool? = nil, available: Bool = true, reason: String? = nil, sessions: Int = 0,
+                    reasonText: String? = nil, needsSetup: Bool = false, source: String? = nil) {
             self.id = id; self.label = label ?? id; self.capabilities = capabilities; self.via = via; self.installed = installed
             self.available = available; self.reason = reason; self.sessions = sessions
+            self.reasonText = reasonText; self.needsSetup = needsSetup; self.source = source
         }
 
         public init(from decoder: Decoder) throws {
@@ -644,9 +839,12 @@ public struct TerminalsInfo: Codable, Sendable, Hashable {
             available = (try? c.decode(Bool.self, forKey: .available)) ?? true
             reason = try? c.decodeIfPresent(String.self, forKey: .reason)
             sessions = (try? c.decode(Int.self, forKey: .sessions)) ?? 0
+            reasonText = ((try? c.decodeIfPresent(String.self, forKey: .reasonText)) ?? nil).flatMap { $0.isEmpty ? nil : $0 }
+            needsSetup = (try? c.decodeIfPresent(Bool.self, forKey: .needsSetup)) ?? false
+            source = try? c.decodeIfPresent(String.self, forKey: .source)
         }
 
-        enum CodingKeys: String, CodingKey { case id, label, capabilities, via, installed, available, reason, sessions }
+        enum CodingKeys: String, CodingKey { case id, label, capabilities, via, installed, available, reason, sessions, reasonText, needsSetup, source }
 
         public func supports(_ capability: String) -> Bool { capabilities.contains(capability) }
     }
@@ -1002,6 +1200,9 @@ public struct PluginUpdate: Codable, Sendable, Hashable, Identifiable {
     public var version: String
     /// The new version asks for more permissions: the manager will show the permission window with the diff.
     public var permissionsGrow: Bool
+    /// The registry the update comes from (G19); nil label — only the default registry.
+    public var registry: String? = nil
+    public var registryLabel: String? = nil
 
     public init(id: String, title: String? = nil, installed: String, version: String, permissionsGrow: Bool = false) {
         self.id = id; self.title = title; self.installed = installed; self.version = version; self.permissionsGrow = permissionsGrow
@@ -1014,9 +1215,11 @@ public struct PluginUpdate: Codable, Sendable, Hashable, Identifiable {
         installed = (try? c.decode(String.self, forKey: .installed)) ?? "?"
         version = try c.decode(String.self, forKey: .version)
         permissionsGrow = (try? c.decode(Bool.self, forKey: .permissionsGrow)) ?? false
+        registry = try? c.decodeIfPresent(String.self, forKey: .registry)
+        registryLabel = RegistrySource.label(try? c.decodeIfPresent(String.self, forKey: .registryLabel))
     }
 
-    enum CodingKeys: String, CodingKey { case id, title, installed, version, permissionsGrow }
+    enum CodingKeys: String, CodingKey { case id, title, installed, version, permissionsGrow, registry, registryLabel }
 }
 
 /// `lang` in `/state` and the `settings.changed` event.
@@ -1099,13 +1302,29 @@ public struct ConfirmRequest: Decodable, Sendable, Hashable {
     public var title: String? = nil
     public var button: String? = nil
     public var details: String? = nil
+    /// G10: the sanitized title of the row that carries the button (≤ 120 graphemes). The core also quotes it at the end of
+    /// `text` when it says more than the action title — `extraRow` tells whether the sheet still has to show it.
+    public var row: String? = nil
+    /// G1: the action takes typed text and none was sent yet — the sheet shows a field; the token accepts any valid text.
+    public var input: OfferInput? = nil
+    /// G6: pressing starts a background job.
+    public var background: Bool? = nil
 
-    public init(token: String, level: ActionLevel, text: String, cost: String? = nil, expiresInMs: Int? = nil, title: String? = nil, button: String? = nil, details: String? = nil) {
+    public init(token: String, level: ActionLevel, text: String, cost: String? = nil, expiresInMs: Int? = nil, title: String? = nil, button: String? = nil, details: String? = nil,
+                row: String? = nil, input: OfferInput? = nil) {
         self.token = token; self.level = level; self.text = text; self.cost = cost; self.expiresInMs = expiresInMs
-        self.title = title; self.button = button; self.details = details
+        self.title = title; self.button = button; self.details = details; self.row = row; self.input = input
     }
 
-    enum CodingKeys: String, CodingKey { case token, level, text, cost, expiresInMs }
+    enum CodingKeys: String, CodingKey { case token, level, text, cost, expiresInMs, row, input, background }
+
+    /// The row to show under the text: nil when the core already quoted it in `text`, or when it only repeats the
+    /// button title (the core leaves it out of `text` then, and the alert already names the button).
+    public func extraRow(actionLabel: String) -> String? {
+        guard let r = row?.trimmingCharacters(in: .whitespacesAndNewlines), !r.isEmpty else { return nil }
+        if text.contains(r) || r == actionLabel { return nil }
+        return r
+    }
 }
 
 /// A daemon error `{"error": "<code>"}`.

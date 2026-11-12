@@ -72,6 +72,11 @@ export function makeCtx(core, name) {
     // NDJSON into stdin for streamable plugins (inbound from the hook etc.).
     sendToPlugin: (pluginId, obj) => core.host.send(pluginId, obj),
     refreshPlugin: (pluginId, reason = "Manual") => core.host.refresh(pluginId, reason),
+    // Restart a plugin with a fresh environment (G8: a secret was written): streamable — stop and start again, standard — an
+    // extra run. reason — AGENTHUB_REFRESH_REASON ([A-Z][A-Za-z]{1,31}, e.g. "SecretChanged"). → Promise<boolean>
+    restartPlugin: (pluginId, reason = "Manual") => core.restartPlugin(pluginId, reason),
+    // Stop a background job (G6; the job.cancel primitive). → { ok, error? }
+    cancelJob: (jobId, requester = null) => core.cancelJob(jobId, requester),
     // Rescan the plugin directories now (after install/removal/blocklist) and re-evaluate the policy
     // of plugins already running. → Promise.
     rescanPlugins: () => core.host.rescan(),

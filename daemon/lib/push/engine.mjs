@@ -1,7 +1,9 @@
 // Push logic: plugin events → deciding "to whom, when and how many times".
 //
 // Input — bus events `event.raised` / `event.cleared` (key `<pluginId>:<key>`) and the timer tick.
-// Output — a macOS notification (shell or osascript) or a morning digest item. macOS banners are the only channel.
+// Output — a notification through the channel set (lib/push/channels.mjs: the macOS banner — shell or osascript — plus the
+// configured and registered channels) or a morning digest item. The engine sees one `mac.notify(msg)`; msg.kind — the rule's
+// kind (channels route by it), msg.actions / msg.href — banner buttons and the click target (G5, below).
 //
 // Rules (design section 6):
 //   - one state, one message: while the key is raised there are no repeats; after it's cleared a repeat within
@@ -14,6 +16,9 @@
 //   - awayDelayMs (a session is waiting): at the Mac — a banner right away; away — a banner once the human is back at the
 //     Mac or the event has been pending longer than awayDelayMs, whichever comes first (during quiet hours — the digest);
 //   - third-party plugin events — without the plugin's text;
+//   - banner buttons and click target (G5): the push.notify of a plugin event carries `actions` — up to 2 offers of the
+//     children of the line with event= (taken at send time, so they are the live offers) — and `href` — the line's href=,
+//     http(s) only; only when the banner shows the row text (trusted plugins, a community event its reviewed rule describes);
 //   - Settings toggles (lib/push/prefs.mjs): an event of a disabled kind goes nowhere — not macOS,
 //     osascript or the digest; the journal gets push-muted. Decided on raise and before every send
 //     (evening blocker, waiting session, digest): disabled at send time — not sent (enabled before sending —
@@ -117,6 +122,8 @@ export class PushEngine {
     this.journal({ type: "push-timezone", timezone: tz });
   }
   kindOf(rule, e) {
+    // a community plugin's own reviewed rule (G3): its own switch, like a trusted plugin's kind="plugin"
+    if (rule?.community === true) return "plugin";
     return kindOf(rule, { trusted: e.trusted !== false, bare: e.bare, hub: e.plugin === HUB });
   }
   // A digest item's kind: recorded when deferred; items from a file older than 2026-11-09 have no kind — derive it from the key (otherwise
@@ -289,8 +296,14 @@ export class PushEngine {
   // Core security exceptions (kind "security" in DEFAULT_RULES): for a hub event — the table rule as is, without
   // config.json (neither hold, awayDelayMs, cooldownMs, label nor someone else's alias can silence it); for a plugin event
   // with the same key — without the kind, the banner bypassing the shell, quiet hours and the hub label.
+  // An untrusted plugin with own rules — a community plugin (G3; the core gives rules to no other untrusted tier): only its
+  // kind="plugin" rules count, and only the label — no quiet-hours exception, away, evening hold, own cooldown or security.
   ruleFor(bare, trusted, own = null, plugin = null) {
-    if (!trusted) return { name: "untrusted", label: null, cooldownMs: this.cfg.flapCooldownMs };
+    if (!trusted) {
+      const mine = own?.length ? matchRule(pluginRules(own.filter((r) => r?.kind === "plugin")), bare) : null;
+      if (mine && mine.name !== "default") return { name: mine.name, label: mine.label || null, cooldownMs: this.cfg.flapCooldownMs, community: true };
+      return { name: "untrusted", label: null, cooldownMs: this.cfg.flapCooldownMs };
+    }
     const core = matchRule(DEFAULT_RULES, bare);
     if (plugin === HUB && core.kind === SECURITY) return { ...core, aliases: [...(core.aliases || [])] };
     const mine = own?.length ? matchRule(pluginRules(own), bare) : null;
@@ -305,7 +318,6 @@ export class PushEngine {
   }
 
   ownRules(e) {
-    if (e.trusted === false) return null;
     try {
       return this.lookup(e.plugin, e.bare)?.rules || null;
     } catch {
@@ -319,7 +331,8 @@ export class PushEngine {
     const def = DEFAULT_RULES.find((r) => r.name === rule.name);
     // info.label — the title the hub itself supplies for its own events (first pin, unpin)
     const label = (def && rule.label === def.label ? (info.label || tr(lang, `push.rule.${rule.name}`)) : rule.label) || tr(lang, "push.event", { key: clean(bare, 60) });
-    const detail = info.trusted ? clean(info.itemTitle || info.error || "", 160) : "";
+    // the row text: trusted plugins, and a community plugin's event its reviewed rule describes (G3)
+    const detail = info.trusted || rule.community === true ? clean(info.itemTitle || info.error || "", 160) : "";
     // the hub's own events: the notification title is "Agent Hub" anyway — the subtitle doesn't repeat it but carries the gist
     // (label), the body is the detail; no detail — no subtitle, the label becomes the body
     if (info.hub === true) return detail && detail !== label ? { subtitle: clean(label, 80), body: detail } : { subtitle: "", body: label };
@@ -368,7 +381,7 @@ export class PushEngine {
       this.noteDrop(plugin, t);
       return;
     }
-    const rule = this.ruleFor(bare, trusted, trusted ? info.rules : null, plugin);
+    const rule = this.ruleFor(bare, trusted, info.rules || null, plugin);
     if (e && e.lastSentAt != null && rule.cooldownMs > 0 && t - e.lastSentAt < rule.cooldownMs) {
       e.active = true;
       e.stale = false;
@@ -407,7 +420,7 @@ export class PushEngine {
       // remember but don't notify: while the key is raised there are no repeats anyway; once cleared — the next state follows the usual rules
       e.muted = true;
       if (admit === "first") {
-        const { done } = this.mac.notify({ title: "Agent Hub", subtitle: e.msg.subtitle, body: tr(this.lang(), "push.throttled"), plugin, key: `${plugin}:push-throttled` });
+        const { done } = this.mac.notify({ title: "Agent Hub", subtitle: e.msg.subtitle, body: tr(this.lang(), "push.throttled"), plugin, key: `${plugin}:push-throttled`, kind: this.kindOf(rule, e), actions: [], href: null });
         this.macPending.push(done);
         this.journal({ type: "push-throttled", plugin, key });
       }
@@ -474,20 +487,42 @@ export class PushEngine {
   deliverAway(e, rule, t, quiet) {
     if (quiet && !rule.quietException) {
       e.queued = true;
-      this.digest.push({ key: e.key, subtitle: e.msg.subtitle, body: e.msg.body, at: t, kind: this.kindOf(rule, e) });
+      const kind = this.kindOf(rule, e);
+      // security: a security exception or a bannerAlways event — in the morning it goes to extra channels only as its own
+      // kind "security" message (security channels), never inside the plain digest (sendDigest)
+      this.digest.push({ key: e.key, subtitle: e.msg.subtitle, body: e.msg.body, at: t, kind, ...(kind === "security" || rule.bannerAlways === true ? { security: true } : {}) });
       this.journal({ type: "push-deferred", key: e.key, rule: rule.name });
       return;
     }
     this.sendMac(e, rule, t);
   }
 
+  // Banner buttons and click target of a plugin event (G5) — asked at send time: an event held for the evening or for the
+  // human's return gets the offers of the current frame, not of the one it was raised in. Only when the banner shows the row
+  // text (trusted plugins; a community event its reviewed rule describes). → { actions, href }
+  extrasOf(e, rule) {
+    const none = { actions: [], href: null };
+    if (e.plugin === HUB || !(e.trusted !== false || rule.community === true)) return none;
+    let info = null;
+    try {
+      info = this.lookup(e.plugin, e.bare);
+    } catch {}
+    if (!info) return none;
+    const actions = (Array.isArray(info.actions) ? info.actions : [])
+      .filter((a) => a && typeof a.offer === "string" && typeof a.label === "string")
+      .slice(0, 2)
+      .map((a) => ({ offer: a.offer, label: clean(a.label, 60), level: typeof a.level === "string" ? a.level : "confirm" }));
+    return { actions, href: typeof info.href === "string" ? info.href : null };
+  }
+
   sendMac(e, rule, t) {
-    const { done } = this.mac.notify({ title: "Agent Hub", subtitle: e.msg.subtitle, body: e.msg.body, plugin: e.plugin, key: e.key, bannerAlways: rule.bannerAlways === true });
+    const kind = this.kindOf(rule, e);
+    const { done, channels } = this.mac.notify({ title: "Agent Hub", subtitle: e.msg.subtitle, body: e.msg.body, plugin: e.plugin, key: e.key, kind, bannerAlways: rule.bannerAlways === true, ...this.extrasOf(e, rule) });
     this.macPending.push(done);
     if (this.macPending.length > 100) this.macPending.splice(0, 50);
     e.sentMac = true;
     e.lastSentAt = t;
-    this.journal({ type: "push-sent", key: e.key, channel: "mac", rule: rule.name });
+    this.journal({ type: "push-sent", key: e.key, channel: "mac", rule: rule.name, ...(channels?.length ? { also: channels } : {}) });
   }
 
   // ---------- tick ----------
@@ -528,14 +563,20 @@ export class PushEngine {
       return;
     }
     this.lastDigestAt = t;
-    const body = clean(items.slice(0, this.cfg.digestMaxItems).map((it) => it.body).join("; "), 240);
-    const { done } = this.mac.notify({ title: "Agent Hub", subtitle: tr(this.lang(), "push.digest.subtitle", { n: items.length }), body, plugin: null, key: "push:digest", digest: true });
+    const digestOf = (list, extra = {}) => ({ title: "Agent Hub", subtitle: tr(this.lang(), "push.digest.subtitle", { n: list.length }), body: clean(list.slice(0, this.cfg.digestMaxItems).map((it) => it.body).join("; "), 240), plugin: null, key: "push:digest", digest: true, kind: null, actions: [], href: null, ...extra });
+    // The banner on the Mac lists everything. Extra channels (lib/push/channels.mjs, msg.extra) get the plain items as the
+    // digest and the security ones (a security exception or bannerAlways event held overnight, older files: kind
+    // "security") as a separate kind "security" message — so only channels marked security: true ever see them.
+    const secure = items.filter((it) => it.security === true || this.digestKind(it) === "security");
+    const plain = items.filter((it) => !secure.includes(it));
+    const extra = secure.length ? [...(plain.length ? [digestOf(plain)] : []), digestOf(secure, { digest: false, kind: "security" })] : undefined;
+    const { done, channels } = this.mac.notify({ ...digestOf(items), ...(extra ? { extra } : {}) });
     this.macPending.push(done);
     for (const it of items) {
       const e = this.entries.get(it.key);
       if (e) e.lastSentAt = t;
     }
-    this.journal({ type: "push-digest", count: items.length, channel: "mac" });
+    this.journal({ type: "push-digest", count: items.length, channel: "mac", ...(channels?.length ? { also: channels } : {}) });
   }
 
   gc(t) {

@@ -14,6 +14,8 @@ import { bridgeOf, cfgOf, findSurface, readCmuxSessions, UUID_RE } from "../prim
 
 export const id = "cmux";
 export const label = "cmux";
+// The place in the adapter list (lib/terminals/index.mjs): a session two adapters could claim goes to the lower one.
+export const order = 10;
 // The adapter's operations run through the cmux bridge: the shell shows the bridge state and its start command for it.
 export const via = "bridge";
 export const capabilities = Object.freeze(["focus", "read-screen", "send-text", "send-esc", "launch"]);

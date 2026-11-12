@@ -38,6 +38,8 @@ export const TEXT_MAX = 200;
 // Printable ASCII without "\"; no spaces at the edges (like the bridge's SEND_TEXT_RE).
 export const TEXT_RE = /^[\x21-\x5B\x5D-\x7E](?:[\x20-\x5B\x5D-\x7E]{0,198}[\x21-\x5B\x5D-\x7E])?$/;
 const UUID_RE = /^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$/;
+// The id grammar of non-Claude agent sessions (G13, lib/core.mjs EXTERNAL_SESSION_ID_RE).
+const EXTERNAL_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 const DEFAULTS = Object.freeze({ requestsPerMin: 60, sendPerMin: 12, sendPerTabPerMin: 4 });
 const MINUTE = 60_000;
 
@@ -121,7 +123,8 @@ export class TerminalService {
     if (this.ctx.estop()) return { res: this.deny(pl, op, sid, 423, "estop") };
     if (!body || typeof body !== "object" || Array.isArray(body)) return { res: err(400, "body") };
     if (!sid) return { res: err(400, "args:sessionId:required") };
-    if (!UUID_RE.test(sid)) return { res: err(400, "args:sessionId:pattern") };
+    // a UUID or an external agent session id (G13): the latter is refused with terminal:external-session (session(), B8)
+    if (!UUID_RE.test(sid) && !EXTERNAL_ID_RE.test(sid)) return { res: err(400, "args:sessionId:pattern") };
     const allowedKeys = op === "read-screen" ? ["sessionId", "lines"] : ["sessionId", "text"];
     for (const k of Object.keys(body)) if (!allowedKeys.includes(k)) return { res: err(400, `args:${k.slice(0, 32)}:unknown`) };
     return { pl, grants, sid };
@@ -129,6 +132,8 @@ export class TerminalService {
 
   async session(pl, op, sid, cap) {
     const s = this.ctx.sessions.get(sid) || this.ctx.sessions.list().find((x) => typeof x.sessionId === "string" && x.sessionId.toLowerCase() === sid.toLowerCase()) || null;
+    // a non-Claude agent session (G13, kind "external"): only session.focus works for it — no reading, no typing
+    if (!s && this.ctx.sessions.external?.(sid)) return { res: this.deny(pl, op, sid, 409, "terminal:external-session") };
     if (!s || !Number.isInteger(s.pid)) return { res: this.deny(pl, op, sid, 409, "terminal:unknown-session") };
     let v = null;
     try {

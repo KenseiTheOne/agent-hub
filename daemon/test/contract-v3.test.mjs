@@ -420,7 +420,7 @@ test("permissions: fsWrite into a hijack location — risk in the list (same key
 });
 
 test("built-in plugins do not write to hijack locations (their permissions are not shown in the window, but the rule is the same for all)", () => {
-  for (const f of [["claude-sessions", "claude-sessions.mjs"], ["agents", "agents.mjs"], ["quota", "quota.5m.mjs"]]) {
+  for (const f of [["claude-sessions", "claude-sessions.mjs"], ["agents", "agents.mjs"], ["quota", "quota.5m.mjs"], ["spend", "spend.mjs"]]) {
     const pm = readPluginMeta(join(REPO_DIR, "plugins", ...f));
     for (const e of permissionList(permissionsFromMeta(pm.meta))) assert.equal(e.risk, undefined, `${f[0]}: ${e.what}`);
   }

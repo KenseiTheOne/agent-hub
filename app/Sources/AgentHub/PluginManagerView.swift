@@ -110,6 +110,8 @@ struct PluginManagerView: View {
 
     @ViewBuilder private var banners: some View {
         ownRequestsList
+        // daemon extensions from <home>/Extensions (G4): approved here, like own plugins
+        ExtensionsSection(store: store)
         if let e = store.registryError {
             Notice(color: .orange, icon: "exclamationmark.triangle", title: e)
         }
@@ -208,6 +210,8 @@ struct PluginManagerView: View {
         var permissions: [PluginPermission]
         /// Own plugin: the folder and its state.
         var own: OwnSourceInfo? = nil
+        /// The registry it came from, only when several exist (G19).
+        var registry: String? = nil
         var removable: Bool { tier.removable }
     }
 
@@ -225,7 +229,7 @@ struct PluginManagerView: View {
                            version: i.version, tier: i.officialPending ? .official : (live?.tier ?? i.tier), sfimage: live?.header.first?.sfImage,
                            update: c?.updateKind != nil ? c : nil, officialPending: i.officialPending,
                            note: i.disabled.map { tr("Заблокирован реестром: \($0)", "Blocked by the registry: \($0)") } ?? i.own?.statusText ?? (live == nil ? tr("не запущен", "not running") : nil),
-                           permissions: i.permissions, own: i.own))
+                           permissions: i.permissions, own: i.own, registry: i.registryLabel ?? live?.registryLabel))
         }
         for l in store.installed?.local ?? [] {
             let live = store.plugin(l.id)
@@ -263,7 +267,7 @@ struct PluginManagerView: View {
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 6) {
                     Text(r.title).font(.system(size: 13, weight: .semibold))
-                    TierBadge(tier: r.tier, pending: r.officialPending, path: r.own?.shownPath, fullPath: r.own?.path)
+                    TierBadge(tier: r.tier, pending: r.officialPending, path: r.own?.shownPath, fullPath: r.own?.path, registry: r.registry)
                     if let v = r.version { Text(v).font(.system(size: 11.5)).foregroundStyle(.white.opacity(0.5)) }
                 }
                 if !r.desc.isEmpty { Text(r.desc).font(.system(size: 12)).foregroundStyle(.white.opacity(0.62)).lineLimit(1) }
@@ -312,6 +316,22 @@ struct PluginManagerView: View {
     // MARK: catalog
 
     @ViewBuilder private var catalogArea: some View {
+        // several registries (G19): one status line each — its error or when it was fetched
+        if let c = catalog, c.multiRegistry {
+            VStack(alignment: .leading, spacing: 3) {
+                ForEach(c.registries) { r in
+                    Label(r.statusLine, systemImage: r.error != nil ? "exclamationmark.triangle" : r.configured ? "checkmark.seal" : "questionmark.circle")
+                        .font(.system(size: 11.5))
+                        .foregroundStyle(r.error != nil ? hexColor(0xFFC56B) : .white.opacity(0.6))
+                        .lineLimit(2)
+                        .help(r.tierLabel ?? "")
+                }
+                if !c.shadowed.isEmpty {
+                    Text(tr("Скрыты как дубли: ", "Hidden as duplicates: ") + c.shadowed.map { "\($0.id) (\($0.registry) → \($0.by))" }.joined(separator: ", "))
+                        .font(.system(size: 11)).foregroundStyle(.white.opacity(0.45)).fixedSize(horizontal: false, vertical: true)
+                }
+            }
+        }
         if let c = catalog, c.configured {
             if store.fetching {
                 HStack(spacing: 10) {
@@ -350,8 +370,8 @@ struct PluginManagerView: View {
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { catalogWidth = $0 }
-                Text(tr("Плагины сообщества могут только показывать статусы, открывать ссылки и файлы и переводить во вкладку. Одобрять, останавливать и запускать агентов умеют только встроенные, официальные и свои (из вашей папки).",
-                        "Community plugins can only show statuses, open links and files and switch to a tab. Only built-in, official and your own plugins (from your folder) can approve, stop or launch agents."))
+                Text(tr("Плагины сообщества показывают статусы, открывают ссылки и файлы, переводят во вкладку и запускают свои команды — каждая с подтверждением. Одобрять, останавливать и запускать агентов умеют только встроенные, официальные и свои (из вашей папки).",
+                        "Community plugins show statuses, open links and files, switch to a tab and run their own commands — each one asks you first. Only built-in, official and your own plugins (from your folder) can approve, stop or launch agents."))
                     .font(.system(size: 11.5)).foregroundStyle(.white.opacity(0.5))
             }
         } else if catalog == nil {
@@ -367,7 +387,9 @@ struct PluginManagerView: View {
                 HStack(alignment: .firstTextBaseline, spacing: 6) {
                     Text(p.displayTitle).font(.system(size: 14, weight: .bold))
                     Text(p.version).font(.system(size: 12)).foregroundStyle(.secondary)
-                    if p.tier == .official { TierBadge(tier: .official) }
+                    // the registry name joins the tier label only when several registries exist (registryLabel non-nil)
+                    if let reg = p.registryLabel { TierBadge(tier: p.tier, registry: reg, note: p.capped ? RegistryText.cappedHelp : nil) }
+                    else if p.tier == .official { TierBadge(tier: .official) }
                 }
                 if let a = p.author { AuthorLine(author: a) }
                 if let d = p.desc { Text(d).font(.system(size: 12)).lineSpacing(3).fixedSize(horizontal: false, vertical: true) }
@@ -685,6 +707,10 @@ struct TierBadge: View {
     /// Own plugin: the folder path for the "own · <path>" label (with "~") and the full one for the tooltip.
     var path: String? = nil
     var fullPath: String? = nil
+    /// The registry name (only when several registries exist): "official · corp".
+    var registry: String? = nil
+    /// An extra tooltip line (a registry that caps its entries at community).
+    var note: String? = nil
 
     var body: some View {
         Text(text)
@@ -700,18 +726,19 @@ struct TierBadge: View {
     private var text: String {
         if pending { return tr("официальный · доступно обновление", "official · update available") }
         if tier == .own, let path { return tier.label + " · " + path }
-        return tier.label
+        return tier.label + (registry.map { " · " + $0 } ?? "")
     }
 
     private var help: String {
         if pending {
-            return tr("Установлена не та сборка, что в подписанном каталоге: до обновления плагин работает с правами плагина сообщества (без своих действий и уведомлений).",
-                      "The installed build differs from the signed catalog: until you update, the plugin runs with community permissions (no actions or notifications).")
+            return tr("Установлена не та сборка, что в подписанном каталоге: до обновления плагин работает с правами плагина сообщества (каждая своя команда — с подтверждением, уведомления — только по проверенным правилам).",
+                      "The installed build differs from the signed catalog: until you update, the plugin runs with community permissions (each own command asks first, notifications only by reviewed rules).")
         }
         if tier == .own {
             return tr("Свой плагин: вы сами подтвердили его установку из папки \(fullPath ?? path ?? "?"). Работает копия; правки без новых прав хаб ставит сам.",
                       "Your own plugin: you approved installing it from \(fullPath ?? path ?? "?"). A copy runs; edits without new permissions install by themselves.")
         }
+        if let registry { return [RegistryText.from(registry), note].compactMap { $0 }.joined(separator: "\n") }
         return ""
     }
 

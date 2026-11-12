@@ -1,4 +1,5 @@
 // macOS notification: first via the shell (the `push.notify` event in SSE), without an acknowledgement — osascript.
+// It is the always-on channel of the channel set (lib/push/channels.mjs).
 
 import { randomUUID } from "node:crypto";
 
@@ -48,6 +49,11 @@ export function createMacNotifier({ emit, waitAck, exec, ackTimeoutMs = 3000, jo
         plugin: msg.plugin ?? null,
         key: msg.key ?? null,
         digest: Boolean(msg.digest),
+        // G5: banner buttons — up to 2 offers {offer, label, level} of the event line's children; pressing one is POST /actions/:offer
+        // like a panel button (not immediate — the app's confirmation). href — the event line's href= (http/https, checked like
+        // open.url): the banner click opens it, null — the plugin page. Both are absent for hub events and third-party text.
+        actions: Array.isArray(msg.actions) ? msg.actions.slice(0, 2) : [],
+        href: typeof msg.href === "string" ? msg.href : null,
       });
       const done = waitAck(notifyId, ackTimeoutMs).then((acked) => (acked ? { channel: "app", ok: true } : banner(msg)));
       return { notifyId, done };

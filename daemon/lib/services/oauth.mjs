@@ -31,7 +31,12 @@
 // 24 h), the declared daily budget (1…10000, minus a reserve), backoff on RATE_LIMIT_EXCEEDED / retryAfter, on 429
 // and on x-ratelimit-*; between allowed calls the plugin gets the previous result from service memory with nextAt and
 // a reason (why). The call counter and backoff survive a restart: <home>/Cache/oauth-<id>.json (timestamps only,
-// no tokens or content).
+// no tokens or content). An action process (a human pressed the plugin's button) may call too (pluginByPid with actions).
+// A write or an explicit refresh: `fresh: true` in the request — no interval cache, no merging with an identical call in
+// flight, the reply waits for the service (up to 20 s); the daily budget and backoff still apply (gated — 429 mcp:wait,
+// the call is not made); a tool error does not start a backoff (it is usually the input, not the service). The result
+// is not kept in memory, and a successful fresh call marks this plugin's cached results of the connection stale: the next
+// ordinary call goes to the service (read after write), while a gated one still gets the previous result.
 //
 // Expiry and revocation: 401 from MCP — token refresh if the server issued a refresh token; none or an invalid_grant refusal —
 // state expired ("Connect again"), the plugin gets 409 oauth:expired. A network or server failure during
@@ -42,15 +47,26 @@
 // "Disconnect" deletes both keychain entries; on failure the state is unchanged, error keychain-delete. The hub doesn't attempt to revoke
 // granted access on the service side (MCP servers usually don't declare revocation_endpoint).
 //
+// type="http" connections (G7, lib/meta.mjs parseHttpConnection): a pre-registered PUBLIC client declared by the plugin
+// (client_id, authorize and token endpoints) — no discovery, no dynamic registration, PKCE S256, the same loopback receiver,
+// tokens in the same keychain entry (<id>.token; no <id>.client entry). The token is bound to the declaration (endpoint, client
+// id, API hosts): a changed declaration needs a new login. Calls: POST /connections/:id/http {method, host?, path, query?,
+// headers?, body?, fresh?} — the hub sends the request to a declared API host over https with the bearer token and returns
+// {status, headers (allow-list), body (≤256 KB), encoding, json?}. Same caller rules, budget and backoff as MCP; GET/HEAD are
+// served from the interval cache unless fresh; other methods are writes (always fresh, they mark the plugin's cached reads
+// stale). 401 — one refresh and a retry, then expired; 429/503 with Retry-After — a rate backoff; 5xx — an error backoff.
+//
 // Settings (config.json → services.oauth): enabled; <id>.intervalMs and <id>.dailyBudget — on top of the plugin's declaration
 // (within the same limits), <id>.loginTimeoutMs (300000), <id>.callWaitMs (3000), <id>.reloadMs (60000: if the keychain didn't
 // answer at startup — re-read after this long). Test mode: <id>.resource and <id>.hosts — a double on
-// 127.0.0.1/localhost (URL substitution isn't accepted in live mode).
+// 127.0.0.1/localhost (URL substitution isn't accepted in live mode); for type http — <id>.authorize, <id>.token (loopback
+// endpoints) and <id>.api (the loopback origin every declared API host is sent to), <id>.port (a fixed redirect port).
 
+import { createHash } from "node:crypto";
 import { mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { authorizeUrl, discover, exchangeCode, OAuthError, pkcePair, randomState, refreshAccess, registerClient, startLoopback, urlAllowed } from "../oauth.mjs";
-import { McpError, McpSession } from "../mcp-client.mjs";
+import { authorizeUrl, discover, exchangeCode, normalizeHttpRequest, OAuthError, pkcePair, proxyFetch, randomState, refreshAccess, registerClient, startLoopback, staticMeta, urlAllowed } from "../oauth.mjs";
+import { McpError, McpSession, retryAfterMs } from "../mcp-client.mjs";
 import { VERSION } from "../version.mjs";
 import { CONNECTION_ID_RE } from "../meta.mjs";
 
@@ -74,6 +90,8 @@ export function defFromDeclared(pluginId, pluginTitle, c) {
     tools: [...(c.tools || [])],
     intervalMs: c.intervalMs,
     dailyBudget: c.budget,
+    type: c.type === "http" ? "http" : "mcp",
+    http: c.type === "http" && c.http ? { ...c.http, hosts: [...c.http.hosts], methods: [...c.http.methods], paths: [...(c.http.paths || [])] } : null,
   };
 }
 const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
@@ -143,9 +161,19 @@ class Connector {
     this.ctx = svc.ctx;
     this.def = def;
     const live = !this.ctx.config.testMode;
+    this.kind = def.type === "http" && def.http ? "http" : "mcp";
     this.resource = !live && typeof cfg.resource === "string" ? cfg.resource : def.resource;
     this.hosts = !live && Array.isArray(cfg.hosts) ? cfg.hosts.map(String) : [...def.hosts];
     this.loopback = !live;
+    if (this.kind === "http") {
+      // declared endpoints (test mode: loopback doubles); the token is bound to the declaration — endpoint, client, API hosts
+      const loop = (v) => (!live && typeof v === "string" ? v : null);
+      this.endpoints = { authorize: loop(cfg.authorize) || def.http.authorize, token: loop(cfg.token) || def.http.token };
+      this.apiBase = loop(cfg.api);
+      this.redirectPort = (!live && Number.isInteger(cfg.port) ? cfg.port : null) ?? def.http.port ?? null;
+      this.resource = `http|${this.endpoints.token}|${def.http.clientId}|${[...def.http.hosts].sort().join(",")}`;
+      this.httpRate = null;
+    }
     // interval and budget — from the plugin declaration (or config.json on top) within core limits
     ({ intervalMs: this.intervalMs, dailyBudget: this.dailyBudget } = connectorLimits(def, cfg, { live }));
     this.loginTimeoutMs = Math.max(1000, Number(cfg.loginTimeoutMs) || 300_000);
@@ -164,6 +192,9 @@ class Connector {
     this.cache = new Map(); // request key → { at, result }
     this.errors = new Map(); // request key → { error, errorText?, at } — the last error until a successful call
     this.inflight = new Map();
+    // calls let through the gate whose network request has not been counted yet (the keychain read, a refresh in between):
+    // gate() counts them, so parallel requests cannot all pass before the first one is recorded (review 2026-11-12)
+    this.reservedCalls = 0;
     this.file = join(this.ctx.config.paths.pluginCache, `oauth-${def.id}.json`);
     this.orphan = false; // plugin removed, login stayed (Service.orphan)
     this.persist = this.loadPersist();
@@ -249,7 +280,7 @@ class Connector {
   // The token was issued for this resource URL. An entry predating contract 2 doesn't remember the URL: pinLegacy pins it (only for
   // built-in and official); if it didn't get pinned (the keychain didn't write) — accepted for those and only those.
   tokenFits(token) {
-    if (!token?.resource) return LEGACY_TOKEN_TIERS.has(this.def.tier);
+    if (!token?.resource) return this.kind === "mcp" && LEGACY_TOKEN_TIERS.has(this.def.tier);
     return token.resource === this.resource;
   }
   // A login predating contract 2 (no resource URL): trust on first use. If a built-in or official plugin (signed index)
@@ -257,7 +288,7 @@ class Connector {
   // will require a new login. An own plugin may have taken the same id after the official one was removed — it doesn't
   // get the login. → token (with resource if pinned)
   async pinLegacy(store, token) {
-    if (!LEGACY_TOKEN_TIERS.has(this.def.tier)) return token;
+    if (this.kind !== "mcp" || !LEGACY_TOKEN_TIERS.has(this.def.tier)) return token;
     const next = { ...token, resource: this.resource };
     let w = { ok: false };
     try {
@@ -287,6 +318,23 @@ class Connector {
   calls24h(now) {
     return this.persist.calls.filter((t) => now - t < DAY_MS).length;
   }
+  // Reserve one call right after gate() let it through, before any await. → release() (idempotent): the call was counted
+  // (recordCall) or never reached the network.
+  reserveCall() {
+    this.reservedCalls++;
+    let held = true;
+    return () => {
+      if (!held) return;
+      held = false;
+      this.reservedCalls--;
+    };
+  }
+  // A request goes to the service now: count it (and turn the reservation, if any, into the real mark).
+  recordCall(release) {
+    release?.();
+    this.persist.calls.push(Date.now());
+    this.persist.calls = this.persist.calls.filter((t) => Date.now() - t < DAY_MS).slice(-callsCap(this.dailyBudget));
+  }
   // The earliest time the service may be called, and the reason. → { until, why }
   gate(now) {
     let until = 0;
@@ -296,13 +344,14 @@ class Connector {
       until = b.until;
       why = b.reason;
     }
-    const r = this.session.httpRate;
+    const r = this.kind === "http" ? this.httpRate : this.session.httpRate;
     if (r && r.remaining !== null && r.remaining <= 2 && r.resetMs && r.resetMs > now && r.resetMs > until) {
       until = r.resetMs;
       why = "http-limit";
     }
     const limit = Math.max(1, this.dailyBudget - BUDGET_RESERVE);
-    const recent = this.persist.calls.filter((t) => now - t < DAY_MS).sort((a, b) => a - b);
+    // reserved calls are about to be made: they count as made now
+    const recent = [...this.persist.calls.filter((t) => now - t < DAY_MS), ...Array(this.reservedCalls).fill(now)].sort((a, b) => a - b);
     if (recent.length >= limit) {
       const at = recent[recent.length - limit] + DAY_MS;
       if (at > until) {
@@ -324,6 +373,9 @@ class Connector {
       ...(this.orphan ? { orphan: true } : {}),
       host: this.def.hosts[0] || this.hosts[0] || null,
       tools: [...this.def.tools],
+      // mcp | http (G7); for http — the API hosts the token goes to, allowed methods and path prefixes
+      type: this.kind,
+      ...(this.kind === "http" ? { apiHosts: [...this.def.http.hosts], methods: [...this.def.http.methods], paths: [...(this.def.http.paths || [])] } : {}),
       state: this.state,
       since: iso(this.since),
       error: this.error,
@@ -348,6 +400,11 @@ class Connector {
   async discovery() {
     const now = Date.now();
     if (this.meta && now - this.meta.at < META_TTL_MS) return this.meta.value;
+    if (this.kind === "http") {
+      const value = staticMeta(this.endpoints, { hosts: this.hosts, loopback: this.loopback });
+      this.meta = { value, at: now };
+      return value;
+    }
     const value = await discover(this.resource, { hosts: this.hosts, loopback: this.loopback, fetchImpl: this.fetchImpl });
     this.meta = { value, at: now };
     return value;
@@ -374,7 +431,8 @@ class Connector {
     }
     let client;
     try {
-      client = await store.get(`${this.id}.client`);
+      // a pre-registered client (http) is the declaration itself: nothing is stored
+      client = this.kind === "http" ? null : await store.get(`${this.id}.client`);
     } catch {
       throw new OAuthError("keychain-read");
     }
@@ -396,13 +454,23 @@ class Connector {
       wantPort = client ? Number(new URL(client.redirectUri).port) || 0 : 0;
     } catch {}
     let lb;
-    try {
-      lb = await startLoopback({ ...opts, port: wantPort });
-    } catch {
-      lb = await startLoopback({ ...opts, port: 0 });
+    if (this.kind === "http" && this.redirectPort) {
+      // the service registered an exact redirect URI: that port or nothing
+      try {
+        lb = await startLoopback({ ...opts, port: this.redirectPort });
+      } catch {
+        throw new OAuthError("port-busy", { reason: String(this.redirectPort) });
+      }
+    } else {
+      try {
+        lb = await startLoopback({ ...opts, port: wantPort });
+      } catch {
+        lb = await startLoopback({ ...opts, port: 0 });
+      }
     }
     try {
-      if (!client || client.redirectUri !== lb.redirectUri) {
+      if (this.kind === "http") client = { clientId: this.def.http.clientId, redirectUri: lb.redirectUri, issuer: null, grantTypes: ["authorization_code", "refresh_token"] };
+      else if (!client || client.redirectUri !== lb.redirectUri) {
         client = await registerClient(meta, { redirectUri: lb.redirectUri, scope: this.def.scope, fetchImpl: this.fetchImpl });
         const w = await store.set(`${this.id}.client`, client);
         if (!w.ok) throw new OAuthError("keychain");
@@ -429,7 +497,8 @@ class Connector {
     this.ctx.journal.write({ type: "oauth-login-start", connector: this.id, port: lb.port, scope: this.def.scope });
     this.setState("connecting", { error: null });
     // declared scope words that the server lists for itself (if the server lists none — we ask for nothing special)
-    const scope = String(this.def.scope || "").split(" ").filter((w) => w && meta.scopes.includes(w)).join(" ") || null;
+    // http: no server metadata — the declared scope as is
+    const scope = this.kind === "http" ? this.def.scope || null : String(this.def.scope || "").split(" ").filter((w) => w && meta.scopes.includes(w)).join(" ") || null;
     return { authorizeUrl: authorizeUrl(meta, client, { state, challenge, scope }), expiresAt: iso(login.expiresAt) };
   }
   async finishLogin(code, client, verifier, meta) {
@@ -535,7 +604,7 @@ class Connector {
         let client;
         try {
           t = token || (await store.get(`${this.id}.token`));
-          client = await store.get(`${this.id}.client`);
+          client = this.kind === "http" ? { clientId: this.def.http.clientId, redirectUri: null } : await store.get(`${this.id}.client`);
         } catch {
           return { error: "keychain-read" };
         }
@@ -579,7 +648,7 @@ class Connector {
     this.svc.changed();
     return { error: `oauth:${code}` };
   }
-  async doCall(tool, args, key) {
+  async doCall(tool, args, key, { fresh = false, release = null } = {}) {
     const now = Date.now();
     const a = await this.accessToken(now);
     if (a.expired) {
@@ -591,23 +660,30 @@ class Connector {
     const deadlineAt = now + 20_000;
     let attempt = 0;
     for (;;) {
-      this.persist.calls.push(Date.now());
-      this.persist.calls = this.persist.calls.filter((t) => Date.now() - t < DAY_MS).slice(-callsCap(this.dailyBudget));
+      this.recordCall(release);
       try {
         const { result } = await this.session.callTool(token, tool, args, { deadlineAt });
         const at = Date.now();
         if (result.isError) {
           // a tool error (not a limit) is not a successful refresh: the previous result stays, lastOkAt untouched
           const errorText = toolErrorText(result);
+          if (fresh) {
+            // a write refused by the tool (validation and the like): the service is fine — no backoff, nothing remembered
+            this.ctx.journal.write({ type: "mcp-call-failed", connector: this.id, tool, kind: "tool", status: null, reason: null, waitS: 0, fresh: true });
+            return { error: "mcp:tool-error", errorText };
+          }
           this.errors.set(key, { error: "mcp:tool-error", errorText, at });
           this.backoff("tool");
           this.ctx.journal.write({ type: "mcp-call-failed", connector: this.id, tool, kind: "tool", status: null, reason: null, waitS: Math.round((this.persist.backoff.until - Date.now()) / 1000) });
           this.svc.changed();
           return { error: "mcp:tool-error", errorText };
         }
-        this.cache.set(key, { at, result });
-        if (this.cache.size > MAX_CACHE) this.cache.delete(this.cache.keys().next().value);
-        this.errors.delete(key);
+        if (!fresh) {
+          // a write finished while this read was in flight: the result may predate it — keep it, but stale
+          this.cache.set(key, { at, result, ...(this.freshAt > now ? { stale: true } : {}) });
+          if (this.cache.size > MAX_CACHE) this.cache.delete(this.cache.keys().next().value);
+          this.errors.delete(key);
+        }
         this.persist.backoff = null;
         this.persist.lastOkAt = at;
         this.savePersist();
@@ -645,14 +721,68 @@ class Connector {
       }
     }
   }
-  // A call on behalf of a plugin. → { status, body }
-  async call(plugin, tool, args) {
+  // A fresh call (a write or an explicit refresh): gated — 429 <kind>:wait; otherwise straight to the service. → { status, body }
+  // o — { exec(fresh) → {result, at} | {error, …}, what (journal fields), field (reply key: result | response) }
+  async callFresh(plugin, key, now, o) {
+    const meta = (t = Date.now()) => ({ intervalMs: this.intervalMs, calls24h: this.calls24h(t), dailyBudget: this.dailyBudget });
+    const g = this.gate(now);
+    if (g.until > now) return { status: 429, body: { error: `${this.kind}:wait`, why: g.why, nextAt: iso(g.until), ...meta(now) } };
+    // reserved before the first await: parallel fresh calls see each other in gate()
+    const release = this.reserveCall();
+    const started = Date.now();
+    let r;
+    try {
+      r = await o.exec(true, release);
+    } finally {
+      release();
+    }
+    this.ctx.journal.write({ type: `${this.kind}-call`, connector: this.id, plugin: plugin.id, ...o.what, fresh: true, ok: !r.error, ...(r.error ? { error: r.error } : {}), ms: Date.now() - started });
+    if (r.error === "oauth:expired") return { status: 409, body: { error: r.error, connection: this.info() } };
+    if (r.error) return { status: 200, body: { ok: false, [o.field]: r.result ?? null, fetchedAt: null, nextAt: null, why: null, fresh: false, error: r.error, ...(r.errorText ? { errorText: r.errorText } : {}), ...meta() } };
+    this.invalidate(plugin.id);
+    return { status: 200, body: { ok: true, [o.field]: r.result, fetchedAt: iso(r.at), nextAt: null, why: null, fresh: true, ...meta() } };
+  }
+  // A plugin's cached results of this connection become stale (after a successful fresh call): the next ordinary call
+  // goes to the service, a gated one still gets the previous result.
+  invalidate(pluginId) {
+    this.freshAt = Date.now();
+    const prefix = `${pluginId}|`;
+    for (const [k, e] of this.cache) if (k.startsWith(prefix)) e.stale = true;
+  }
+  // A call on behalf of a plugin. fresh — a write or an explicit refresh (see the header). → { status, body }
+  async call(plugin, tool, args, { fresh = false } = {}) {
     if (this.orphan) return { status: 409, body: { error: "oauth:orphan" } };
+    if (this.kind !== "mcp") return { status: 400, body: { error: "mcp:not-mcp" } };
     if (!this.def.tools.includes(tool)) return { status: 403, body: { error: "mcp:tool-not-allowed" } };
     const argsObj = args === undefined || args === null ? {} : args;
     if (typeof argsObj !== "object" || Array.isArray(argsObj)) return { status: 400, body: { error: "args:args:type" } };
     const key = `${plugin.id}|${tool}|${stable(argsObj)}`;
     if (Buffer.byteLength(key) > MAX_ARGS_BYTES) return { status: 413, body: { error: "too-large" } };
+    return this.serve(plugin, key, { fresh, field: "result", what: { tool }, exec: (f, release) => this.doCall(tool, argsObj, key, { fresh: f, release }) });
+  }
+  // An HTTP request on behalf of a plugin (type http, G7). body — {method, host?, path, query?, headers?, body?, fresh?}.
+  // GET/HEAD — reads (interval cache unless fresh); other methods — writes (always fresh). → { status, body }
+  async httpRequest(plugin, body) {
+    if (this.orphan) return { status: 409, body: { error: "oauth:orphan" } };
+    if (this.kind !== "http") return { status: 400, body: { error: "http:not-http" } };
+    if (body?.fresh !== undefined && typeof body.fresh !== "boolean") return { status: 400, body: { error: "args:fresh:type" } };
+    const rq = normalizeHttpRequest(body, this.def.http);
+    if (rq.error) {
+      const st = rq.error === "too-large" ? 413 : rq.error.startsWith("http:") ? 403 : 400;
+      return { status: st, body: { error: rq.error, ...(rq.header ? { header: rq.header } : {}), ...(rq.key ? { key: rq.key } : {}) } };
+    }
+    // the plugin's own network permission covers the host it asks for (the core checked it at declaration; checked again here)
+    const net = (plugin.net || []).map((e) => String(e).split(/\s+[—–-]{1,2}\s+/)[0].trim().toLowerCase());
+    if (!net.includes(rq.host)) return { status: 403, body: { error: "http:net-not-declared" } };
+    const read = rq.method === "GET" || rq.method === "HEAD";
+    const key = `${plugin.id}|${rq.method}|${rq.host}|${rq.path}|${stable(rq.query)}|${stable(rq.headers)}${read ? "" : `|${createHash("sha256").update(rq.body || "").digest("hex").slice(0, 16)}`}`;
+    if (Buffer.byteLength(key) > 4 * MAX_ARGS_BYTES) return { status: 413, body: { error: "too-large" } };
+    const what = { method: rq.method, host: rq.host, path: rq.path.slice(0, 120) };
+    return this.serve(plugin, key, { fresh: body.fresh === true || !read, field: "response", what, exec: (f, release) => this.doHttp(rq, key, { fresh: f, release }) });
+  }
+  // The shared call flow: state checks, the interval cache, merging identical calls in flight, fresh calls. → { status, body }
+  async serve(plugin, key, o) {
+    const fresh = o.fresh === true;
     if (this.state === "unknown") {
       await this.svc.loaded;
       await this.loading;
@@ -664,13 +794,13 @@ class Connector {
       const err = this.errors.get(key) || null;
       const t = Date.now();
       const gg = this.gate(t);
-      const due = e ? e.at + this.intervalMs : t;
+      const due = e && !e.stale ? e.at + this.intervalMs : t;
       const nextAt = Math.max(due, gg.until);
       return {
         status: 200,
         body: {
           ok: Boolean(e),
-          result: e ? e.result : null,
+          [o.field]: e ? e.result : null,
           fetchedAt: iso(e?.at),
           nextAt: iso(nextAt),
           why: gg.until >= due && gg.until > t ? gg.why : "interval",
@@ -689,15 +819,17 @@ class Connector {
       const error = this.state === "expired" ? "oauth:expired" : this.state === "unavailable" ? "oauth:unavailable" : "oauth:not-connected";
       return { status: 409, body: { error, connection: this.info(now) } };
     }
+    if (fresh) return this.callFresh(plugin, key, now, o);
     const entry = this.cache.get(key) || null;
     const g = this.gate(now);
-    if (entry && now - entry.at < this.intervalMs) return reply({ fresh: false });
+    if (entry && !entry.stale && now - entry.at < this.intervalMs) return reply({ fresh: false });
     if (g.until > now) return reply({ fresh: false });
     let p = this.inflight.get(key);
     if (!p) {
       const started = Date.now();
-      p = this.doCall(tool, argsObj, key).then((r) => {
-        this.ctx.journal.write({ type: "mcp-call", connector: this.id, plugin: plugin.id, tool, ok: !r.error, ...(r.error ? { error: r.error } : {}), ms: Date.now() - started });
+      const release = this.reserveCall();
+      p = o.exec(false, release).finally(release).then((r) => {
+        this.ctx.journal.write({ type: `${this.kind}-call`, connector: this.id, plugin: plugin.id, ...o.what, ok: !r.error, ...(r.error ? { error: r.error } : {}), ms: Date.now() - started });
         return r;
       });
       p.finally(() => this.inflight.delete(key)).catch(() => {});
@@ -710,6 +842,86 @@ class Connector {
     if (r.error === "oauth:expired") return { status: 409, body: { error: r.error, connection: this.info() } };
     if (r.error) return reply({ fresh: false, error: r.error, ...(r.errorText ? { errorText: r.errorText } : {}) });
     return reply({ fresh: true });
+  }
+  // One proxied HTTP request with the token (type http): 401 — one refresh and a retry, then expired; 429 and 503 with
+  // Retry-After — a rate backoff; 5xx and network failures — an error backoff (not for a fresh write: the reply says what
+  // happened); other statuses are the service's answer — a read is cached (a 4xx too: "not found" is an answer).
+  // → { result, at } | { error, result? }
+  async doHttp(rq, key, { fresh = false, release = null } = {}) {
+    const label = `${rq.method} ${rq.host}`;
+    const now = Date.now();
+    const a = await this.accessToken(now);
+    if (a.expired) {
+      this.markExpired(a.expired);
+      return { error: "oauth:expired" };
+    }
+    if (a.error) return this.softFail(label, a.error);
+    let token = a.token;
+    let attempt = 0;
+    const base = this.apiBase || `https://${rq.host}`;
+    for (;;) {
+      this.recordCall(release);
+      let res;
+      try {
+        res = await proxyFetch(rq, token, { base, fetchImpl: this.fetchImpl });
+      } catch (e) {
+        if (!fresh) this.backoff("error");
+        this.ctx.journal.write({ type: "http-call-failed", connector: this.id, request: label, kind: "net", status: null, reason: e?.reason || null, waitS: fresh ? 0 : Math.round((this.persist.backoff.until - Date.now()) / 1000) });
+        if (!fresh) this.errors.set(key, { error: "http:net", at: Date.now() });
+        this.svc.changed();
+        return { error: "http:net" };
+      }
+      if (res.rate) {
+        const r = res.rate.reset;
+        const resetMs = !r ? null : r > 1e12 ? r : r > 1e9 ? r * 1000 : Date.now() + r * 1000;
+        this.httpRate = { remaining: res.rate.remaining, resetMs, at: Date.now() };
+      }
+      const { rate, retryAfter, ...response } = res;
+      if (res.status === 401) {
+        if (attempt === 0 && this.tokenMeta?.refresh) {
+          attempt++;
+          const r = await this.refresh(null);
+          if (r.token) {
+            token = r.token;
+            continue;
+          }
+          if (r.error) return this.softFail(label, r.error);
+        }
+        this.savePersist();
+        this.markExpired("http-401");
+        return { error: "oauth:expired" };
+      }
+      if (res.status === 429 || (res.status === 503 && retryAfter)) {
+        // Retry-After: seconds or an HTTP date (→ epoch ms); retryAfterMs clamps it to 1 min … 24 h
+        const ra = retryAfter ? (/^\d+$/.test(retryAfter.trim()) ? retryAfterMs(Number(retryAfter)) : retryAfterMs(Date.parse(retryAfter))) : null;
+        this.backoff("rate", { retryAfterMs: ra });
+        this.ctx.journal.write({ type: "http-call-failed", connector: this.id, request: label, kind: "rate", status: res.status, reason: null, waitS: Math.round((this.persist.backoff.until - Date.now()) / 1000) });
+        if (!fresh) this.errors.set(key, { error: "http:rate-limited", at: Date.now() });
+        this.svc.changed();
+        return { error: "http:rate-limited", result: response };
+      }
+      if (res.status >= 500) {
+        if (!fresh) {
+          this.backoff("error");
+          this.errors.set(key, { error: "http:server-error", at: Date.now() });
+        }
+        this.ctx.journal.write({ type: "http-call-failed", connector: this.id, request: label, kind: "server", status: res.status, reason: null, waitS: fresh ? 0 : Math.round((this.persist.backoff.until - Date.now()) / 1000) });
+        this.svc.changed();
+        return { error: "http:server-error", result: response };
+      }
+      const at = Date.now();
+      if (!fresh) {
+        this.cache.set(key, { at, result: response, ...(this.freshAt > now ? { stale: true } : {}) });
+        if (this.cache.size > MAX_CACHE) this.cache.delete(this.cache.keys().next().value);
+        this.errors.delete(key);
+      }
+      this.persist.backoff = null;
+      this.persist.lastOkAt = at;
+      this.savePersist();
+      if (CALL_ERRORS.has(this.error)) this.error = null;
+      this.svc.changed();
+      return { result: response, at };
+    }
   }
 }
 
@@ -760,7 +972,7 @@ class Service {
         this.orphan(c);
         continue;
       }
-      if (d && JSON.stringify([d.resource, d.hosts, d.scope, d.tools, d.intervalMs, d.dailyBudget]) === JSON.stringify([c.def.resource, c.def.hosts, c.def.scope, c.def.tools, c.def.intervalMs, c.def.dailyBudget])) {
+      if (d && JSON.stringify([d.resource, d.hosts, d.scope, d.tools, d.intervalMs, d.dailyBudget, d.type, d.http]) === JSON.stringify([c.def.resource, c.def.hosts, c.def.scope, c.def.tools, c.def.intervalMs, c.def.dailyBudget, c.def.type, c.def.http])) {
         c.def = d; // title and description — in the hub language
         want.delete(id);
         continue;
@@ -856,7 +1068,7 @@ class Service {
       } catch {}
       const plugin = typeof o.plugin === "string" && /^[a-z0-9][a-z0-9-]{0,63}$/.test(o.plugin) ? o.plugin : m[1].split(".")[0];
       const title = typeof o.title === "string" && o.title.trim() && o.title.length <= 64 ? o.title.trim() : m[1];
-      const c = new Connector(this, { id: m[1], tier: null, title, note: null, plugin, resource: "https://invalid.invalid/", hosts: [], scope: null, tools: [], intervalMs: null, dailyBudget: null }, {});
+      const c = new Connector(this, { id: m[1], tier: null, title, note: null, plugin, resource: "https://invalid.invalid/", hosts: [], scope: null, tools: [], intervalMs: null, dailyBudget: null, type: "mcp", http: null }, {});
       c.orphan = true;
       this.connectors.set(m[1], c);
       out.push(c);

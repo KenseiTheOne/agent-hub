@@ -12,11 +12,21 @@ import { parseMsg as msg } from "./messages/parse.mjs";
 export const XATTR_NAME = "com.kensei.agenthub.meta";
 export const LEVELS = ["immediate", "confirm", "confirm-cost"];
 const UNIT_MS = { ms: 1, s: 1000, m: 60_000, h: 3_600_000, d: 86_400_000 };
-const LANG_RE = /^[a-z]{2}$/;
+// A lang="…" code (G14): any BCP-47 tag — primary language 2–3 letters, optional script/region/variant subtags (de, pt-BR,
+// zh-Hant); stored in canonical case (normLangTag). Malformed — a warning (journal and linter), the tag is skipped.
+const LANG_RE = /^[A-Za-z]{2,3}(?:[-_][A-Za-z0-9]{1,8})*$/;
+export function normLangTag(v) {
+  const s = String(v ?? "").trim();
+  if (s.length > 35 || !LANG_RE.test(s)) return null;
+  return s
+    .split(/[-_]/)
+    .map((x, i) => (i === 0 ? x.toLowerCase() : /^[A-Za-z]{4}$/.test(x) ? x[0].toUpperCase() + x.slice(1).toLowerCase() : /^(?:[A-Za-z]{2}|\d{3})$/.test(x) ? x.toUpperCase() : x.toLowerCase()))
+    .join("-");
+}
 const IGNORED_EXT = new Set(["md", "txt", "json", "lock", "log", "orig", "bak", "swp"]);
 
 // Multi-value tags (repeated → array).
-const MULTI = new Set(["watch", "fsRead", "fsWrite", "exec", "secrets", "net", "terminal"]);
+const MULTI = new Set(["watch", "fsRead", "fsWrite", "exec", "secrets", "net", "terminal", "subscribe"]);
 // Comma-separated list tags.
 const CSV = new Set(["effects", "platforms"]);
 
@@ -59,6 +69,10 @@ function parseAttrs(text) {
 // The pattern must be anchored at both ends (^…$): otherwise a substring "match" would let anything through.
 // The core checks the argument value against the pattern and passes it as a separate argv element, without a shell (lib/core.mjs).
 export const ACTION_ARG_NAME_RE = /^[A-Za-z][A-Za-z0-9_]{0,31}$/;
+// Typed input of an input action (input="…"): default and maximum length (characters). The value goes on stdin, so it may be
+// longer than an argv argument (ARG_MAX in lib/core.mjs, 256).
+export const INPUT_DEFAULT_MAX = 256;
+export const INPUT_MAX = 4000;
 export function parseActionArg(text) {
   const m = /^([^:]+):(.+)$/.exec(String(text ?? ""));
   if (!m || !ACTION_ARG_NAME_RE.test(m[1])) return null;
@@ -82,6 +96,19 @@ export function parseActionArg(text) {
 // A plugin declares the minimum version it needs; anything newer than this one — install and update refuse with "a newer hub is required"
 // (rather than a linter error).
 export const CONTRACT_VERSION = 3;
+
+// Event subscription (G11, contract 3 additive): <agenthub.subscribe>builds:failed — why</agenthub.subscribe>.
+// "<plugin id>:<event key prefix>": the events of that plugin whose key (event=<key> in its output, without the "<id>:" the bus
+// adds) starts with the prefix; an empty prefix — all its events; "*" instead of the id — every other plugin. Taken only from
+// trusted streamable plugins (builtin, official, own, test tier); delivered as {"type":"event",…} on stdin (lib/core.mjs).
+// → { plugin, prefix } | null
+export const SUBSCRIBE_RE = /^(\*|[A-Za-z0-9][A-Za-z0-9._-]{0,63}):([\w.:/-]{0,128})$/;
+export const SUBSCRIBE_MAX = 16;
+export function parseSubscription(entry) {
+  const what = splitWhy(String(entry ?? "")).what;
+  const m = SUBSCRIBE_RE.exec(what);
+  return m ? { plugin: m[1], prefix: m[2] } : null;
+}
 
 // Push rule for a plugin event key:
 //   <agenthub.push key="build-blocked" hold="evening" quiet="true" cooldown="7d" away="5m" kind="plugin">Label</agenthub.push>
@@ -177,6 +204,7 @@ export function parseConnection(attrs, note) {
   const id = attrs.id === undefined ? null : String(attrs.id).trim();
   if (id !== null && !CONNECTION_ID_RE.test(id)) return msg("meta.conn.id");
   const type = attrs.type === undefined ? "mcp" : String(attrs.type).trim();
+  if (type === "http") return parseHttpConnection(id, attrs, note);
   if (type !== "mcp") return msg("meta.conn.type", { id: id || "?" });
   let url;
   try {
@@ -207,6 +235,97 @@ export function parseConnection(attrs, note) {
   const title = attrs.title === undefined ? null : String(attrs.title).trim();
   if (title !== null && (!title || title.length > 64 || /[\p{Cc}\p{Cf}]/u.test(title))) return msg("meta.conn.title", { id: id || "?" });
   return { id, type, url: url.href, host: url.hostname, hosts, scope, tools: [...new Set(tools)], intervalMs, budget, title, note: note ? note.slice(0, 300) : null };
+}
+
+// type="http" (G7, contract 3 additive): OAuth 2.1 with a PRE-REGISTERED PUBLIC client (no secret, no dynamic registration) and
+// PKCE S256, then the hub proxies the plugin's HTTP requests to the declared API hosts with the bearer token
+// (POST /connections/:id/http, lib/services/oauth.mjs):
+//   <agenthub.connection id="example.api" type="http" client_id="Iv1.abc123" authorize="https://auth.example.com/oauth/authorize"
+//     token="https://auth.example.com/oauth/token" hosts="api.example.com" scope="read write" methods="GET,POST" paths="/v1/"
+//     interval="15m" budget="500" title="Example">why</agenthub.connection>
+// client_id — the public client id the service issued to the plugin author (1–256 of A-Z a-z 0-9 . _ ~ : @ + = / -);
+// authorize, token — https on host names (authorize may carry fixed query parameters, e.g. access_type=offline); hosts — the API
+// hosts the hub may send the token to (1–8, required); methods — allowed HTTP methods (GET by default; GET HEAD POST PUT PATCH
+// DELETE); paths — optional allowed path prefixes (1–16, "/v1/"); port — optional fixed loopback redirect port (1024–65535) for
+// services that register an exact redirect URI (http://127.0.0.1:<port>/oauth/callback; otherwise any port, RFC 8252 §7.3);
+// scope, interval, budget, title — as for mcp. Every host (authorize, token, API) must be in <agenthub.net>. → as for mcp, with
+// url = the token endpoint, host = its host, hosts = the authorize and API hosts, tools = [], http = { clientId, authorize, token,
+// hosts, methods, paths, port }.
+export const HTTP_METHODS = ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE"];
+function connUrl(raw, { query = false } = {}) {
+  let u;
+  try {
+    u = new URL(String(raw || ""));
+  } catch {
+    return null;
+  }
+  if (u.protocol !== "https:" || u.username || u.password || (u.port && u.port !== "443") || !hostNameOk(u.hostname) || u.hash) return null;
+  if (!query && u.search) return null;
+  return u;
+}
+function parseHttpConnection(id, attrs, note) {
+  const who = { id: id || "?" };
+  const clientId = String(attrs.client_id ?? "").trim();
+  if (!/^[A-Za-z0-9._~:@+=/-]{1,256}$/.test(clientId)) return msg("meta.conn.clientId", who);
+  const authorize = connUrl(attrs.authorize, { query: true });
+  if (!authorize) return msg("meta.conn.endpoint", { ...who, attr: "authorize" });
+  const token = connUrl(attrs.token);
+  if (!token) return msg("meta.conn.endpoint", { ...who, attr: "token" });
+  const api = [];
+  for (const h of String(attrs.hosts || "").split(",").map((x) => x.trim().toLowerCase()).filter(Boolean)) {
+    if (!hostNameOk(h)) return msg("meta.conn.hosts", who);
+    if (!api.includes(h)) api.push(h);
+  }
+  if (!api.length || api.length > 8) return msg("meta.conn.apiHosts", who);
+  const methods = [];
+  for (const m of String(attrs.methods ?? "GET").split(",").map((x) => x.trim().toUpperCase()).filter(Boolean)) {
+    if (!HTTP_METHODS.includes(m)) return msg("meta.conn.methods", { ...who, list: HTTP_METHODS.join(",") });
+    if (!methods.includes(m)) methods.push(m);
+  }
+  if (!methods.length) return msg("meta.conn.methods", { ...who, list: HTTP_METHODS.join(",") });
+  const paths = [];
+  if (attrs.paths !== undefined) {
+    for (const p of String(attrs.paths).split(",").map((x) => x.trim()).filter(Boolean)) {
+      if (!/^\/[A-Za-z0-9._~:@%+/-]{0,127}$/.test(p) || p.split("/").some((seg) => seg === ".." || seg === ".")) return msg("meta.conn.paths", who);
+      if (!paths.includes(p)) paths.push(p);
+    }
+    if (!paths.length || paths.length > 16) return msg("meta.conn.paths", who);
+  }
+  let port = null;
+  if (attrs.port !== undefined) {
+    port = /^\d{4,5}$/.test(attrs.port) ? Number(attrs.port) : NaN;
+    if (!Number.isInteger(port) || port < 1024 || port > 65535) return msg("meta.conn.port", who);
+  }
+  const scope = attrs.scope === undefined ? null : String(attrs.scope).trim();
+  if (scope !== null && !/^[\w:./-]+(?: [\w:./-]+){0,31}$/.test(scope)) return msg("meta.conn.scope", who);
+  let intervalMs = 15 * 60_000;
+  if (attrs.interval !== undefined) {
+    intervalMs = parseInterval(attrs.interval);
+    if (intervalMs === null) return msg("meta.interval", { what: `connection ${id || "?"}: interval` });
+  }
+  let budget = 100;
+  if (attrs.budget !== undefined) {
+    budget = Number(attrs.budget);
+    if (!Number.isInteger(budget) || budget < 1 || budget > 10_000) return msg("meta.conn.budget", who);
+  }
+  const title = attrs.title === undefined ? null : String(attrs.title).trim();
+  if (title !== null && (!title || title.length > 64 || /[\p{Cc}\p{Cf}]/u.test(title))) return msg("meta.conn.title", who);
+  const host = token.hostname;
+  const hosts = [...new Set([authorize.hostname, ...api])].filter((h) => h !== host);
+  return {
+    id,
+    type: "http",
+    url: token.href,
+    host,
+    hosts,
+    scope,
+    tools: [],
+    intervalMs,
+    budget,
+    title,
+    note: note ? note.slice(0, 300) : null,
+    http: { clientId, authorize: authorize.href, token: token.href, hosts: api, methods, paths, port },
+  };
 }
 
 // Plugin dependency: <agenthub.requires name="Tool" url="https://…" check="~/.tool">why</agenthub.requires>.
@@ -241,6 +360,8 @@ export function parseMetaText(text) {
     schedule: null,
     platforms: [],
     watch: [],
+    // <agenthub.watch recursive="true">: those entries (the same strings as in watch) also cover subdirectories
+    watchRecursive: [],
     fsRead: [],
     fsWrite: [],
     exec: [],
@@ -248,6 +369,8 @@ export function parseMetaText(text) {
     net: [],
     // Terminal (contract 3): <agenthub.terminal>read-screen | send <words>|* — why</agenthub.terminal> (lib/registry/perms.mjs)
     terminal: [],
+    // Event subscriptions (G11): <agenthub.subscribe>plugin:prefix — why</agenthub.subscribe> (parseSubscription)
+    subscribe: [],
     effects: [],
     actions: [],
     push: [],
@@ -278,10 +401,11 @@ export function parseMetaText(text) {
     const tag = m[1];
     const attrs = parseAttrs(m[2] || "");
     const value = unescapeXml(m[3].replace(/\s*\n\s*(?:#|\/\/|--|;)?\s*/g, " ").trim());
-    const lang = attrs.lang !== undefined && tag !== "action" ? attrs.lang : null;
-    if (lang !== null) {
-      if (!LANG_RE.test(lang)) {
-        warnings.push(msg("meta.lang.code", { tag, lang: lang.slice(0, 10) }));
+    const rawLang = attrs.lang !== undefined && tag !== "action" ? attrs.lang : null;
+    if (rawLang !== null) {
+      const lang = normLangTag(rawLang);
+      if (!lang) {
+        warnings.push(msg("meta.lang.code", { tag, lang: String(rawLang).slice(0, 16) }));
         continue;
       }
       if (tag === "title" || tag === "desc") loc(lang)[tag] = value;
@@ -338,12 +462,46 @@ export function parseMetaText(text) {
           continue;
         }
       }
+      // Human input (G1): input="placeholder" — the app shows a text field, the typed value is checked against arg's pattern
+      // and goes to the action process on stdin (never argv). Requires arg=; maxLength= 1…INPUT_MAX (default INPUT_DEFAULT_MAX).
+      let input = null;
+      if (attrs.input !== undefined) {
+        if (!arg) {
+          warnings.push(msg("meta.action.inputArg", { id }));
+          continue;
+        }
+        let maxLength = INPUT_DEFAULT_MAX;
+        if (attrs.maxLength !== undefined) {
+          maxLength = /^\d{1,5}$/.test(attrs.maxLength) ? Number(attrs.maxLength) : NaN;
+          if (!Number.isInteger(maxLength) || maxLength < 1 || maxLength > INPUT_MAX) {
+            warnings.push(msg("meta.action.maxLength", { id, max: INPUT_MAX }));
+            continue;
+          }
+        }
+        input = { placeholder: String(attrs.input).replace(/[\p{Cc}\p{Cf}]/gu, " ").trim().slice(0, 80), maxLength };
+      } else if (attrs.maxLength !== undefined) warnings.push(msg("meta.action.maxLengthNoInput", { id }));
+      // net="none" (G2): this action does not use the network the plugin declares — the core lifts the confirm-cost floor
+      // that <agenthub.net> puts on every action. A promise checked by the registry reviewer, not a sandbox. Other values — ignored.
+      let net = null;
+      if (attrs.net !== undefined) {
+        if (attrs.net === "none") net = "none";
+        else warnings.push(msg("meta.action.net", { id }));
+      }
+      // background="true" (G6): a long job — own process group, no timeout, listed in /state.plugins[].jobs.
+      let background = false;
+      if (attrs.background !== undefined) {
+        if (attrs.background === "true") background = true;
+        else if (attrs.background !== "false") warnings.push(msg("meta.action.background", { id }));
+      }
       const i18n = {};
       for (const [k, v] of Object.entries(attrs)) {
-        const lm = /^(title|cost)-([a-z]{2})$/.exec(k);
-        if (lm && v) (i18n[lm[2]] ||= {})[lm[1]] = v;
+        // title-de, cost-pt-BR, input-zh-Hant (G14: any BCP-47 tag); a malformed suffix — a warning
+        const lm = /^(title|cost|input)-(.+)$/.exec(k);
+        const lt = lm ? normLangTag(lm[2]) : null;
+        if (lm && !lt) warnings.push(msg("meta.lang.code", { tag: `action ${id} ${lm[1]}-`, lang: lm[2].slice(0, 16) }));
+        if (lt && v) (i18n[lt] ||= {})[lm[1]] = lm[1] === "input" ? v.replace(/[\p{Cc}\p{Cf}]/gu, " ").trim().slice(0, 80) : v;
       }
-      meta.actions.push({ id, level, command: value, title: attrs.title || null, cost: attrs.cost || null, ...(arg ? { arg } : {}), ...(Object.keys(i18n).length ? { i18n } : {}) });
+      meta.actions.push({ id, level, command: value, title: attrs.title || null, cost: attrs.cost || null, ...(arg ? { arg } : {}), ...(input ? { input } : {}), ...(net ? { net } : {}), ...(background ? { background: true } : {}), ...(Object.keys(i18n).length ? { i18n } : {}) });
     } else if (tag === "push") {
       const r = parsePushRule(attrs, value);
       if (typeof r === "string") warnings.push(`push: ${r}`);
@@ -382,6 +540,7 @@ export function parseMetaText(text) {
       else warnings.push(msg("meta.type", { value }));
     } else if (MULTI.has(tag)) {
       meta[tag].push(value);
+      if (tag === "watch" && attrs.recursive === "true") meta.watchRecursive.push(value);
     } else if (CSV.has(tag)) {
       meta[tag].push(...value.split(",").map((s) => s.trim()).filter(Boolean));
     } else if (tag === "title" || tag === "version" || tag === "desc" || tag === "schedule") {

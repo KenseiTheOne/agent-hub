@@ -1,8 +1,9 @@
 # Push (stage 4)
 
 The `lib/services/push.mjs` service listens on the bus for `event.raised` / `event.cleared` (key `<pluginId>:<key>` from
-`event=<key>` in plugin output, plus `plugin-error` from the core) and decides when to call the human. The only channel is a
-macOS banner (the shell's, or `osascript` without it); quiet hours hold banners for a morning digest.
+`event=<key>` in plugin output, plus `plugin-error` from the core) and decides when to call the human. Delivery goes through a
+channel list (below "Channels"): the macOS banner (the shell's, or `osascript` without it) always, plus the channels from
+`services.push.channels` and those other services register; quiet hours hold banners for a morning digest.
 
 | Module | What |
 |---|---|
@@ -12,6 +13,7 @@ macOS banner (the shell's, or `osascript` without it); quiet hours hold banners 
 | `clock.mjs` | local time in a given time zone (Intl), quiet hours, the "night day" |
 | `idle.mjs` | HID idle time: `ioreg -c IOHIDSystem -d 4` → `HIDIdleTime` |
 | `macos.mjs` | `push.notify` on the bus → the shell; without an acknowledgement — `osascript display notification` |
+| `channels.mjs` | the channel set the engine sends through: `mac` first, then webhook/ntfy from `config.json` and registered channels; routing by kind, security banners only to `security: true` |
 | `acks.mjs` | waiting for `POST /push/ack` (route `lib/routes/push.mjs`) |
 | `store.mjs` | `<home>/push-state.json` (0600): what was sent, the digest queue |
 | `config.mjs` | `services.push` from `config.json` over the defaults; unknown keys are ignored (`push-config-ignored`) |
@@ -47,7 +49,9 @@ contract 1 kind — if the user turned it off, it turns this toggle off, see "Mi
 `kind="plugin" was="<kind>"`, and the linter warns. The service takes such rules **only from built-in, official and
 own** plugins (`trusted`: the tier comes from the signed registry index or from the human's consent to an own plugin
 from a folder — [`docs/plugins-registry.md`](../../../docs/plugins-registry.md), "Own sources"); they go ahead of the
-shared table. Other plugins' tags are ignored. This way the core knows no plugin's keys: official plugins' rules live in
+shared table. A **community** plugin's `kind="plugin"` rules are taken with their key and label only (hub 0.1.3+; `quiet`,
+`away`, `hold`, `cooldown` and other kinds are ignored): such a key notifies under the plugin's own toggle with the
+reviewed label and the row text, within the third-party limits below. `local` plugins' tags are ignored. This way the core knows no plugin's keys: official plugins' rules live in
 their metadata (registry `agent-hub-plugins`), own plugins' rules in their metadata in the tool's repository; built-in
 plugins (`agents`, `claude-sessions`) declare theirs the same way. For an own plugin, rules with `kind="security"` and
 `quiet="true"` are `push` permissions: they are shown in the consent window, and their appearance is a permission
@@ -56,7 +60,8 @@ increase (not a silent update from the folder).
 The shared table (`rules.mjs`) contains only the core's shared keys (since contract 2 it no longer has `blocker`,
 `session-died`, `workflow-failed`, `workflow-orphaned` or the quota keys: the plugins that need them declare them —
 `claude-sessions` (`died`), `agents` (`wf-failed`, `wf-orphaned`), `quota` (`week-80` and `pace-85` — at most once a
-week, `token-lost` — immediately; all of them "failures and warnings")):
+week, `token-lost` — immediately; all of them "failures and warnings"), `spend` (`daily-over` — today's cost passed the
+threshold picked on its page, once a day, its own switch)):
 
 | Key | When it is sent |
 |---|---|
@@ -73,7 +78,7 @@ week, `token-lost` — immediately; all of them "failures and warnings")):
 
 In general: while a key is raised there is one message; cleared and raised again within 10 min after sending — it is
 suppressed (flapping). Events of **third-party** plugins (`trusted: false`) arrive without their text and without their
-rules.
+rules, labeled "Event "key"" — except community keys described by a `kind="plugin"` rule (above).
 
 Limits (protecting the daemon from an event flood): at most `maxPerPluginPerMin` (20) new notifications per minute from
 one trusted plugin and `maxPerUntrustedPerMin` (5) from a third-party one; the first one over the limit produces a
@@ -96,13 +101,13 @@ written only by the app class (the pinned build) via `PUT /settings/notification
 | `sessions` — waiting for an answer / session questions | `session-waiting`, `approvals-paused` | — |
 | `updates` — hub and plugin updates | `plugin-update`, `plugin-own-updated`, `hub-update`, `hub-update-ready`, `hub-update-installed`, `hub-update-failed` | — |
 | `problems` — plugin failures and warnings | `source-broken`, `plugin-error`, `auth-failed` (and plugin rules with `kind="problems"`, for example quota) | a rule with `kind="problems"` or a key from the table (`auth-failed`) |
-| `other` — everything else from plugins | a key without a rule; **all** events of third-party plugins | a rule without `kind` and without a match in the table |
-| `plugin:<id>` — **the plugin's own toggle** | — | rules with `kind="plugin"` (and the deprecated `kind="runs"`/`"night"`): a line in "Settings" with the plugin name, only while the plugin is installed |
+| `other` — everything else from plugins | a key without a rule; events of third-party plugins (except community keys with a `kind="plugin"` rule) | a rule without `kind` and without a match in the table |
+| `plugin:<id>` — **the plugin's own toggle** | — | rules with `kind="plugin"` (and the deprecated `kind="runs"`/`"night"`; a community plugin's `kind="plugin"` labels too): a line in "Settings" with the plugin name, only while the plugin is installed |
 | `security` — **cannot be turned off** | `app-pin-changed`, `app-pin-path-changed`, `app-restart-stopped`, `hub-update-tag-moved`, `hub-update-suspect` | rules with `kind="security"` (tampering signals) |
 
 **The plugin's own toggle** (contract 2). `settings.json → pluginNotifications.plugins` holds `{<id>: bool}`;
-`/state.notifications.plugins` has lines `{id, title, on, labels, legacy?}` for installed trusted plugins that have a
-`kind="plugin"` rule. The title is in the hub language (from `<agenthub.title lang=…>`), `labels` are the labels of its
+`/state.notifications.plugins` has lines `{id, title, on, labels, legacy?}` for installed trusted and community plugins
+that have a `kind="plugin"` rule. The title is in the hub language (from `<agenthub.title lang=…>`), `labels` are the labels of its
 rules. No plugin — no line; the value in `settings.json` stays (if the plugin comes back, the same choice applies).
 The master switch also silences plugin toggles; they do not affect `security`.
 
@@ -135,7 +140,7 @@ inferred from it (`migrated`), while explicit choices stay.
 
 The kind of a plugin rule without `kind` is the kind of the shared-table rule with the same key (`auth-failed` →
 `problems`), otherwise `other`. Only the core and a trusted plugin set kinds; `services.push.rules` in `config.json`
-does not change the kind, and a third-party plugin cannot declare `security` (its rules are not taken at all). The
+does not change the kind, and a third-party plugin cannot declare `security` (a community plugin's rules are taken only as `kind="plugin"` labels, a local plugin's not at all). The
 `security` kind from the core table applies only to the hub's own events (`@hub`): a plugin that raises a core key
 (`app-restart-stopped` and the like) gets a rule without a kind, without `bannerAlways`, `quietException` and the hub
 label — a trusted plugin declares a security exception only with its own `<agenthub.push kind="security">` tag (the
@@ -172,8 +177,13 @@ and "Settings → Notifications" warns about that.
 ## Routing
 
 - HID idle < 10 min or unknown — a macOS notification: event `push.notify`
-  `{notifyId, title, subtitle, body, plugin, key, digest}` on the bus and SSE. The shell shows a banner
-  (`UNUserNotificationCenter`, an "Open" button → the panel on `plugin`) and answers `POST /push/ack {"id": notifyId}`.
+  `{notifyId, title, subtitle, body, plugin, key, digest, actions, href}` on the bus and SSE. The shell shows a banner
+  (`UNUserNotificationCenter`; a click opens `href` when given, otherwise the plugin page in the panel; `actions` become
+banner buttons, without them — the plain "Open" button) and answers `POST /push/ack {"id": notifyId}`.
+  `actions` — up to 2 buttons `{offer, label, level}`: the offers of the direct children of the line with `event=`
+  (no typed-input offers), asked from the plugin's current frame at send time (an event held for the evening gets the live
+  offers); `href` — the event line's `href=` when `open.url` accepts it (http/https), the banner click target. Both only when
+  the banner shows the row text (trusted plugins, a community event its reviewed rule describes); otherwise `[]` / `null`.
   No answer within 3 s — the daemon shows the banner itself via `osascript` (the text goes as arguments, not inside the
   script text). The exception is a rule with `bannerAlways` (only the built-in `app-pin-changed`, `app-pin-path-changed`
   and `app-restart-stopped`; this field can be neither set nor cleared through `config.json` or plugins): `osascript`
@@ -186,14 +196,34 @@ and "Settings → Notifications" warns about that.
   changes, a moved tag, `hub-update-suspect`, `hub-update-failed`, and for plugins `quiet="true"`); everything else is
   held (`push-deferred`), including `app-restart-stopped` and update notices, and goes out as **one digest banner**
   ("Overnight: N", the bodies in a row) on the first tick after quiet hours end. At the Mac during quiet hours banners
-  show as usual. There is no other channel: before 2026-11-11 the hub could also send to a chat bot; that is removed, and
-  its old `services.push.*` keys in `config.json` are ignored (one `push-config-ignored {keys}` journal line at startup).
+  show as usual. Before 2026-11-11 the hub had a chat-bot channel; it is removed, and its old `services.push.*` keys in
+  `config.json` are ignored (one `push-config-ignored {keys}` journal line at startup); channels are now `channels` (below).
 - Time is in the `services.push.timezone` zone (the system one by default: the service checks it on every tick and
   writes `push-timezone` to the journal when it changes); DST transitions follow wall-clock time. The zone is exposed
   in `/state.notifications.quiet.timezone`, the idle threshold in `awayAfterMs`.
 - A hub update failure that looks like tampering (`commit-mismatch`, `not-on-main`, `untrusted-build`, `verify-failed`,
   `tag-moved`) uses the key `hub-update-suspect:<label>` (`security`); other failures use `hub-update-failed:<label>`
   (`updates`).
+
+## Channels
+
+The engine calls one `notify(msg)`; `channels.mjs` sends it to the macOS notifier (always, first — its acknowledgement is what
+the engine tracks) and in the background to every extra channel that accepts it:
+
+- `services.push.channels` — `[{type: "webhook"|"ntfy", url, id?, label?, events?, security?, enabled?}]`; `url` — `https://`,
+  or `http://` only to `localhost`/`127.0.0.0/8`/`[::1]`; no redirects, a 10 s timeout; a bad entry →
+  `push-channel-invalid {index, reason}` (an ntfy URL whose topic has a broken `%` escape — `ntfy-topic`); a bad channel
+  is left out on its own, never the whole set. The URL is never journaled (it often carries a secret).
+- a service: `ctx.facts.get("push.channels")?.register({id, label?, security?, events?, send(payload)}) → unregister`.
+- routing: the kind `security` and `bannerAlways` rules go only to channels with `security: true` — also when they were held
+  overnight: the morning digest goes to extra channels without them, and they follow as a separate kind `security`
+  message (subtitle "Overnight: N", key `push:digest`) for security channels only; the Mac banner lists everything. `events` narrows to kinds
+  (`sessions`, `updates`, `problems`, `other`, `plugin`, `security`, `hub`, `digest`) or key prefixes `<plugin>:<key>*`.
+- payload: `{source: "agent-hub", title, subtitle, body, plugin, key, kind, digest, href, ts}` (no `actions`: offer ids are for
+  the shell). Everything the engine decides — quiet hours, digest, switches, limits — applies before any channel.
+- failures: `push-channel-error {channel, key, code}`; `push-sent`/`push-digest` carry `also: [channel ids]`.
+
+Details and examples — [`docs/extension-points.md`](../../../docs/extension-points.md), "Push channel".
 
 ## Settings (`services.push` in `<home>/config.json`)
 
@@ -205,11 +235,12 @@ and "Settings → Notifications" warns about that.
 `{"my-key": {"label": "…", "hold": "evening"}}` (fields `label`, `hold`, `awayDelayMs`, `quietException`, `cooldownMs`,
 `aliases`). Plugin rules from `<agenthub.push>` go ahead of this table, but user overrides apply to them too:
 `{"service-silent": {"awayDelayMs": 0}}` (by rule name) or `{"<plugin>:service-silent": {…}}` (for that plugin only) —
-the fields are layered over the plugin rule. `enabled: false` — the service does not start. Any other key is ignored
+the fields are layered over the plugin rule. `channels` — extra delivery channels (above). `enabled: false` — the service does not start. Any other key is ignored
 (journal `push-config-ignored {keys}` once at startup).
 
 ## Journal
 
-Message text never reaches the journal: only `push-start`, `push-sent {key, channel: "mac", rule}`, `push-held`,
-`push-deferred`, `push-suppressed`, `push-digest {count, channel: "mac"}`, `push-error {channel, code}`,
+Message text never reaches the journal: only `push-start {…, channels}`, `push-sent {key, channel: "mac", rule, also?}`, `push-held`,
+`push-deferred`, `push-suppressed`, `push-digest {count, channel: "mac", also?}`, `push-error {channel, code}`,
+`push-channel-invalid {index, reason}`, `push-channel-registered {channel, security}`, `push-channel-error {channel, key, code}`,
 `push-muted {key, rule, kind, reason}`, `push-throttled`, `push-dropped`, `push-timezone`, `push-config-ignored {keys}`.

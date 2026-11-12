@@ -577,7 +577,7 @@ public struct SidebarStatus: Equatable, Sendable {
     public var help: String
 
     /// A macOS tooltip wraps text to its width but isn't height-limited, and a plugin header can be
-    /// long (output parsing lets a line through up to 16 KB) — truncate to a reasonable length; the full text is on the page.
+    /// long (output parsing lets a line through up to 64 KB; a longer one is cut and carries no params) — truncate to a reasonable length; the full text is on the page.
     public static let helpLimit = 300
 
     public init(text: String, tone: Tone, help: String? = nil) {
@@ -1001,8 +1001,12 @@ public enum TerminalText {
         if a.sessions > 0 { parts.append("\(a.sessions) " + plural(a.sessions, ru: ("сессия", "сессии", "сессий"), en: ("session", "sessions"))) }
         if a.via == "bridge" {
             parts.append(bridgeOnline ? tr("мост подключён", "bridge connected") : tr("мост не подключён", "bridge not connected"))
+        } else if a.needsSetup {
+            parts.append(tr("нужна настройка", "needs setup"))
         } else if a.installed == false, a.sessions == 0 {
             parts.append(tr("не найден", "not found"))
+        } else if !a.available, a.reasonText != nil {
+            parts.append(tr("недоступен", "unavailable"))
         } else if a.installed == true {
             parts.append(tr("установлен", "installed"))
         }

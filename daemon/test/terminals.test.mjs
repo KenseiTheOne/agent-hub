@@ -12,7 +12,7 @@ import { loadConfig } from "../lib/config.mjs";
 import { Core, effectAllowed, THIRD_PARTY_EFFECTS } from "../lib/core.mjs";
 import { createPeer } from "../lib/peer.mjs";
 import { lintPlugin } from "../lib/registry/perms.mjs";
-import { ADAPTERS, capabilitiesOf, findTab, launchAdapter, locate, supports, tabOf, terminalsInfo } from "../lib/terminals/index.mjs";
+import { ADAPTERS, adapterMessages, adapterProblem, adaptersOf, availability, capabilitiesOf, findTab, launchAdapter, locate, supports, tabOf, terminalsInfo } from "../lib/terminals/index.mjs";
 import { clearCache, hostOf, hostOfPath, ttyOf } from "../lib/terminals/_proc.mjs";
 import { refuseExec } from "../lib/terminals/_exec.mjs";
 import * as tmux from "../lib/terminals/tmux.mjs";
@@ -262,7 +262,7 @@ test("launch terminal: the setting, otherwise the terminal of most sessions, oth
   const info = terminalsInfo({ get: () => undefined }, { sessions, exists: only("/Applications/cmux.app") });
   assert.deepEqual(info.launch, { adapter: "tmux", why: "sessions" });
   const cmuxRow = info.adapters.find((a) => a.id === "cmux");
-  assert.deepEqual(cmuxRow, { id: "cmux", label: "cmux", capabilities: ["focus", "read-screen", "send-text", "send-esc", "launch"], via: "bridge", installed: true, available: false, reason: "bridge-offline", sessions: 1 });
+  assert.deepEqual(cmuxRow, { id: "cmux", label: "cmux", capabilities: ["focus", "read-screen", "send-text", "send-esc", "launch"], via: "bridge", installed: true, available: false, reason: "bridge-offline", reasonText: null, needsSetup: false, messages: {}, source: "builtin", sessions: 1 });
   assert.equal(info.adapters.find((a) => a.id === "tmux").sessions, 2);
 });
 
@@ -536,4 +536,38 @@ test("a test hub without a command double never starts a terminal tool", async (
   } finally {
     cleanup(home);
   }
+});
+
+// ---------- the adapter list: a directory scan, adapter texts, "needs setup" (G12) ----------
+
+test("adapters: found by a directory scan in their declared order; a core's list comes from the terminal.adapters fact; own texts and needs-setup reach /state.terminals", () => {
+  assert.deepEqual(ADAPTERS.map((a) => [a.id, a.order]), [["cmux", 10], ["tmux", 20], ["iterm2", 30], ["terminal-app", 40]]);
+  assert.equal(adapterProblem({ id: "Bad id", locate() {} }), "bad-id");
+  assert.equal(adapterProblem({ id: "x" }), "no-locate");
+  assert.equal(adapterProblem({ id: "x", locate() {}, capabilities: ["teleport"] }), "bad-capabilities");
+  assert.equal(adapterProblem({ id: "x", locate() {}, capabilities: ["focus"] }), null);
+  const extra = Object.freeze({
+    id: "kittyish",
+    label: "Kittyish",
+    capabilities: ["focus", "launch"],
+    messages: { en: { "no-remote": "Turn on remote control in the terminal settings", "BAD CODE": "x" }, ru: { "no-remote": "Включите удалённое управление\nв настройках" } },
+    locate: () => null,
+    available: () => ({ error: "no-remote", setup: true }),
+    focus: async () => ({ ok: true }),
+    launch: async () => ({ ok: true }),
+  });
+  const facts = { lang: () => "en", get: (n) => (n === "terminal.adapters" ? [...ADAPTERS, extra] : undefined) };
+  assert.equal(adaptersOf(facts).at(-1), extra);
+  assert.equal(adaptersOf({ get: () => undefined }), ADAPTERS);
+  assert.deepEqual(availability(extra, facts), { error: "no-remote", setup: true });
+  assert.deepEqual(availability({ available: () => ({ error: "Not A Code" }) }, facts), { error: "terminal-failed" });
+  assert.deepEqual(adapterMessages(extra, "ru"), { "no-remote": "Включите удалённое управление в настройках" });
+  const info = terminalsInfo(facts, { exists: () => false });
+  const row = info.adapters.find((a) => a.id === "kittyish");
+  assert.deepEqual(
+    { available: row.available, reason: row.reason, needsSetup: row.needsSetup, reasonText: row.reasonText, messages: row.messages, capabilities: row.capabilities },
+    { available: false, reason: "no-remote", needsSetup: true, reasonText: "Turn on remote control in the terminal settings", messages: { "no-remote": "Turn on remote control in the terminal settings" }, capabilities: ["focus", "launch"] },
+  );
+  // an extension adapter takes part in launch picking by its sessions, after the built-in ones
+  assert.equal(launchAdapter(facts, { sessions: [{ terminal: "kittyish" }], exists: () => false }).adapter.id, "kittyish");
 });

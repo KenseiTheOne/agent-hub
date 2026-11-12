@@ -4,7 +4,7 @@
 //   peerPid(fd)            → pid of the process that connected (LOCAL_PEERPID)
 //   peerUid(fd)            → peer uid (getpeereid)
 //   pidPath(pid)           → executable path (proc_pidpath) or null
-//   pidInfo(pid)           → { pid, ppid, uid, startSec, startUsec, comm, tty } or null (PROC_PIDTBSDINFO);
+//   pidInfo(pid)           → { pid, ppid, pgid, uid, startSec, startUsec, comm, tty } or null (PROC_PIDTBSDINFO);
 //                            tty — whether the process has a controlling terminal (PROC_FLAG_CONTROLT and e_tdev)
 //   procArgv(pid)          → argv array (KERN_PROCARGS2) or null. The process environment,
 //                            located in the same buffer after argv, is NOT parsed or returned.
@@ -109,6 +109,8 @@ static napi_value PidInfo(napi_env env, napi_callback_info info) {
   CHECK(napi_set_named_property(env, obj, "pid", v));
   CHECK(napi_create_int32(env, (int32_t)bi.pbi_ppid, &v));
   CHECK(napi_set_named_property(env, obj, "ppid", v));
+  CHECK(napi_create_int32(env, (int32_t)bi.pbi_pgid, &v));
+  CHECK(napi_set_named_property(env, obj, "pgid", v));
   CHECK(napi_create_uint32(env, bi.pbi_uid, &v));
   CHECK(napi_set_named_property(env, obj, "uid", v));
   CHECK(napi_create_double(env, (double)bi.pbi_start_tvsec, &v));

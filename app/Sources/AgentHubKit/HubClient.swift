@@ -147,9 +147,11 @@ public final class HubClient: Sendable {
     }
 
     /// `POST /actions/:id`. `id` is `offer.id` from the snapshot or a primitive name.
-    public func invoke(_ id: String, args: [String: JSONValue]? = nil, confirmToken: String? = nil) async throws -> ActionOutcome {
+    /// `input` — the text a human typed for an offer with `input` (G1); the core ignores it for any other target.
+    public func invoke(_ id: String, args: [String: JSONValue]? = nil, input: String? = nil, confirmToken: String? = nil) async throws -> ActionOutcome {
         var body: [String: JSONValue] = [:]
         if let args { body["args"] = .object(args) }
+        if let input { body["input"] = .string(input) }
         if let confirmToken { body["confirmToken"] = .string(confirmToken) }
         let path = "/actions/" + (id.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed.subtracting(CharacterSet(charactersIn: "/"))) ?? id)
         let r = try await request(.POST, path, json: .object(body), timeout: .seconds(60))
@@ -347,6 +349,52 @@ public final class HubClient: Sendable {
     public func registryRemove(_ id: String, purge: Bool) async throws {
         let r = try await request(.POST, "/registry/remove", json: .object(["id": .string(id), "purge": .bool(purge)]))
         guard r.status == 200 else { throw HubError.http(status: r.status, code: Self.errorCode(r.body)) }
+    }
+
+    // MARK: - external extensions (G4)
+
+    /// `GET /extensions`: the same object as `/state.extensions`, rescanned for the request.
+    public func extensions() async throws -> ExtensionsInfo { try await get(ExtensionsInfo.self, "/extensions") }
+
+    /// `POST /extensions/approve {path, sha256}` (app only): the human approved these exact bytes.
+    /// `409 extensions:changed` — the file is different now: show the sheet again.
+    public func approveExtension(path: String, sha256: String) async throws {
+        let r = try await request(.POST, "/extensions/approve", json: .object(["path": .string(path), "sha256": .string(sha256)]), timeout: .seconds(30))
+        guard r.status == 200 else { throw HubError.http(status: r.status, code: Self.errorCode(r.body)) }
+    }
+
+    /// `POST /extensions/revoke {path}` (app only).
+    public func revokeExtension(path: String) async throws {
+        let r = try await request(.POST, "/extensions/revoke", json: .object(["path": .string(path)]))
+        guard r.status == 200 else { throw HubError.http(status: r.status, code: Self.errorCode(r.body)) }
+    }
+
+    // MARK: - secrets (G8, app only)
+
+    /// `GET /secrets/:plugin`: the plugin's declared keys with their state — never values.
+    public func secrets(plugin: String) async throws -> SecretsList {
+        try await get(SecretsList.self, "/secrets/" + Self.segment(plugin))
+    }
+
+    /// `PUT /secrets/:plugin/:key {value}` — the daemon writes the keychain entry via stdin and restarts the plugin.
+    public func setSecret(plugin: String, key: String, value: String) async throws -> PluginSecret? {
+        let r = try await request(.PUT, "/secrets/\(Self.segment(plugin))/\(Self.segment(key))", json: .object(["value": .string(value)]), timeout: .seconds(20))
+        guard r.status == 200 else { throw HubError.http(status: r.status, code: Self.errorCode(r.body)) }
+        return (try? JSONDecoder().decode(SecretReply.self, from: r.body))?.secret
+    }
+
+    /// `DELETE /secrets/:plugin/:key`.
+    public func deleteSecret(plugin: String, key: String) async throws -> PluginSecret? {
+        let r = try await request(.DELETE, "/secrets/\(Self.segment(plugin))/\(Self.segment(key))", timeout: .seconds(20))
+        guard r.status == 200 else { throw HubError.http(status: r.status, code: Self.errorCode(r.body)) }
+        return (try? JSONDecoder().decode(SecretReply.self, from: r.body))?.secret
+    }
+
+    private struct SecretReply: Decodable { var secret: PluginSecret? }
+
+    /// One path segment, percent-encoded (`/` included).
+    static func segment(_ s: String) -> String {
+        s.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed.subtracting(CharacterSet(charactersIn: "/"))) ?? s
     }
 
     // MARK: - notifications

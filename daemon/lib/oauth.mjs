@@ -1,6 +1,7 @@
 // OAuth 2.1 for hub connections to external services (the oauth service, lib/services/oauth.mjs; docs/api.md
 // "Connections"). Public client: PKCE (S256), state, dynamic client registration (RFC 7591, no
-// client_secret), authorization server discovery via protected resource metadata (RFC 9728) and server metadata
+// client_secret) — or, for type="http" connections, a client the plugin author pre-registered (staticMeta: declared
+// endpoints, no discovery, no registration), authorization server discovery via protected resource metadata (RFC 9728) and server metadata
 // (RFC 8414), resource indicator (RFC 8707), iss check in the response (RFC 9207). The redirect URI is a temporary
 // listener on 127.0.0.1 (RFC 8252 §7.3): one request with the right state, a short lifetime, then it closes.
 //
@@ -171,11 +172,19 @@ export async function registerClient(meta, { redirectUri, clientName = "Agent Hu
   return { clientId: id, redirectUri, issuer: meta.issuer, grantTypes: grants, registeredAt: now };
 }
 
+// Endpoints declared by a type="http" connection (no discovery, no registration): checked like discovered ones — https on a
+// listed host (test mode: loopback). → the same shape as discover()
+export function staticMeta({ authorize, token }, { hosts = [], loopback = false } = {}) {
+  for (const [k, u] of [["authorization", authorize], ["token", token]]) if (!urlAllowed(u, { hosts, loopback })) throw new OAuthError("discovery", { reason: `${k}-url` });
+  return { resource: undefined, issuer: null, authorizationEndpoint: authorize, tokenEndpoint: token, registrationEndpoint: null, scopes: null, grantTypes: ["authorization_code", "refresh_token"], issParam: false };
+}
+
 export function authorizeUrl(meta, client, { state, challenge, scope }) {
   const u = new URL(meta.authorizationEndpoint);
   const q = { response_type: "code", client_id: client.clientId, redirect_uri: client.redirectUri, code_challenge: challenge, code_challenge_method: "S256", state, resource: meta.resource };
   if (scope) q.scope = scope;
-  for (const [k, v] of Object.entries(q)) u.searchParams.set(k, v);
+  // a pre-registered client (type http) has no resource indicator: no empty parameter
+  for (const [k, v] of Object.entries(q)) if (v !== undefined && v !== null) u.searchParams.set(k, v);
   return u.toString();
 }
 
@@ -316,4 +325,138 @@ export function startLoopback({ port = 0, state, issuer = null, requireIss = fal
       resolveStart({ port: p, redirectUri: `http://127.0.0.1:${p}/oauth/callback`, result, close: () => finish(new OAuthError("aborted")) });
     });
   });
+}
+
+// ---------- HTTP proxy for type="http" connections (G7) ----------
+// The plugin describes a request, the hub checks it against the declaration and sends it with the bearer token
+// (lib/services/oauth.mjs Connector.httpRequest, POST /connections/:id/http). Only https to a declared API host (test mode: the
+// loopback double), the path under a declared prefix, a declared method, request headers from an allow-list (never Authorization,
+// Cookie, Host or hop-by-hop), no redirects followed (a 3xx comes back with its Location), the response body capped.
+export const PROXY_LIMITS = Object.freeze({ maxPath: 2048, maxQuery: 64, maxHeaders: 16, maxHeaderValue: 1024, maxBody: 64 * 1024, maxResponse: 256 * 1024 });
+const REQ_HEADERS = new Set(["accept", "accept-language", "content-type", "if-match", "if-none-match", "if-modified-since", "if-unmodified-since", "prefer", "idempotency-key", "range"]);
+// An allow-list only (review 2026-11-12): the fixed headers above plus API version headers (Notion-Version, Stripe-Version,
+// X-GitHub-Api-Version). Any other X-… header may be routing or rewriting for a proxy in front of the API (X-Override-URL,
+// X-Envoy-Original-Path, x-middleware-subrequest …) — refused, as are routing names that happen to end in -version.
+export function requestHeaderAllowed(name) {
+  const n = String(name).toLowerCase();
+  if (REQ_HEADERS.has(n)) return true;
+  if (/^x-(?:forwarded|real-ip|http-method|method-override|original|rewrite|host|client-ip|proxy|envoy|middleware|override)/.test(n)) return false;
+  return /^[a-z0-9]+(?:-[a-z0-9]+)*-version$/.test(n);
+}
+// Query keys some frameworks read as a method override (`?_method=DELETE` turns a GET into a write)
+const QUERY_DENY_RE = /^_method$/i;
+const RES_HEADERS = new Set(["content-type", "content-language", "content-range", "etag", "last-modified", "link", "location", "retry-after", "cache-control", "date", "expires", "x-total-count", "x-request-id"]);
+export function responseHeaderAllowed(name) {
+  const n = String(name).toLowerCase();
+  return RES_HEADERS.has(n) || /^x-ratelimit-[a-z-]+$/.test(n) || /^ratelimit(?:-[a-z-]+)?$/.test(n);
+}
+const CTRL_RE = /[\u0000-\u001f\u007f]/;
+const scalar = (v) => typeof v === "string" || typeof v === "number" || typeof v === "boolean";
+
+// Request from the plugin → a checked request, or { error: code }. decl — { hosts, methods, paths } of the connection.
+export function normalizeHttpRequest(b, decl) {
+  if (!b || typeof b !== "object" || Array.isArray(b)) return { error: "args:body:type" };
+  const method = typeof b.method === "string" ? b.method.toUpperCase() : "GET";
+  if (!decl.methods.includes(method)) return { error: "http:method-not-allowed" };
+  const host = b.host === undefined ? decl.hosts[0] : typeof b.host === "string" ? b.host.toLowerCase() : null;
+  if (!host || !decl.hosts.includes(host)) return { error: "http:host-not-allowed" };
+  const path = b.path;
+  // an absolute path on the host: not "//other" (protocol-relative), no query/fragment/backslash/control chars, no dot segments
+  // (also percent-encoded — the URL parser would resolve them past a path prefix)
+  if (typeof path !== "string" || !path.startsWith("/") || path.startsWith("//") || path.length > PROXY_LIMITS.maxPath || /[?#\\\s]/.test(path) || CTRL_RE.test(path)) return { error: "args:path:invalid" };
+  if (path.split("/").some((seg) => /^(?:\.|%2e){1,2}$/i.test(seg))) return { error: "args:path:invalid" };
+  // encoded separators and dots (`..%2F`, `%2e%2e%2f`, `%5c`), a `%` of double encoding (`%252e`), a malformed escape and `;`
+  // (`..;/` — a path parameter some servers strip before resolving dot segments): a server or a proxy in front of it could
+  // decode them past the declared prefix, so they are refused rather than normalized
+  if (/%(?:2f|5c|2e|25)|%(?![0-9a-f]{2})|;/i.test(path)) return { error: "args:path:invalid" };
+  let pathname;
+  try {
+    pathname = new URL(path, "https://h.invalid").pathname;
+  } catch {
+    return { error: "args:path:invalid" };
+  }
+  if (decl.paths?.length && !decl.paths.some((p) => pathname.startsWith(p))) return { error: "http:path-not-allowed" };
+  const query = [];
+  if (b.query !== undefined && b.query !== null) {
+    if (typeof b.query !== "object" || Array.isArray(b.query)) return { error: "args:query:type" };
+    for (const [k, v] of Object.entries(b.query)) {
+      if (QUERY_DENY_RE.test(k)) return { error: "http:query-not-allowed", key: k.slice(0, 64) };
+      for (const x of Array.isArray(v) ? v : [v]) {
+        if (!scalar(x) || k.length > 256 || String(x).length > 2048) return { error: "args:query:type" };
+        query.push([k, String(x)]);
+      }
+    }
+    if (query.length > PROXY_LIMITS.maxQuery) return { error: "args:query:too-many" };
+  }
+  const headers = {};
+  if (b.headers !== undefined && b.headers !== null) {
+    if (typeof b.headers !== "object" || Array.isArray(b.headers)) return { error: "args:headers:type" };
+    const list = Object.entries(b.headers);
+    if (list.length > PROXY_LIMITS.maxHeaders) return { error: "args:headers:too-many" };
+    for (const [k, v] of list) {
+      if (!requestHeaderAllowed(k)) return { error: "http:header-not-allowed", header: String(k).slice(0, 64) };
+      if (typeof v !== "string" || v.length > PROXY_LIMITS.maxHeaderValue || CTRL_RE.test(v)) return { error: "args:headers:value" };
+      headers[k.toLowerCase()] = v;
+    }
+  }
+  let body;
+  if (b.body !== undefined && b.body !== null) {
+    if (method === "GET" || method === "HEAD") return { error: "args:body:not-allowed" };
+    if (typeof b.body === "string") body = b.body;
+    else if (typeof b.body === "object") {
+      body = JSON.stringify(b.body);
+      headers["content-type"] ||= "application/json";
+    } else return { error: "args:body:type" };
+    if (Buffer.byteLength(body) > PROXY_LIMITS.maxBody) return { error: "too-large" };
+  }
+  return { method, host, path, query, headers, body };
+}
+
+// One proxied request (no retries, no redirects). base — the origin to send to ("https://<host>"; test mode — the double).
+// → { status, headers, body, encoding, json?, truncated?, rate, retryAfter } ; throws OAuthError("net") on a network failure
+export async function proxyFetch(rq, token, { base, fetchImpl = globalThis.fetch, timeoutMs = 15_000 } = {}) {
+  const url = new URL(base + rq.path);
+  if (url.origin !== new URL(base).origin) throw new OAuthError("http", { reason: "origin" });
+  for (const [k, v] of rq.query || []) url.searchParams.append(k, v);
+  let res;
+  try {
+    res = await fetchImpl(url, { method: rq.method, headers: { ...rq.headers, authorization: `Bearer ${token}` }, body: rq.body, redirect: "manual", signal: AbortSignal.timeout(timeoutMs) });
+  } catch (e) {
+    throw new OAuthError("net", { reason: e?.name === "TimeoutError" ? "timeout" : "network" });
+  }
+  const headers = {};
+  res.headers.forEach((v, k) => {
+    if (responseHeaderAllowed(k)) headers[k.toLowerCase()] = String(v).slice(0, 2048);
+  });
+  const chunks = [];
+  let n = 0;
+  let truncated = false;
+  if (res.body && rq.method !== "HEAD") {
+    for await (const c of res.body) {
+      const room = PROXY_LIMITS.maxResponse - n;
+      if (c.length > room) {
+        if (room > 0) chunks.push(Buffer.from(c).subarray(0, room));
+        n = PROXY_LIMITS.maxResponse;
+        truncated = true;
+        break;
+      }
+      chunks.push(Buffer.from(c));
+      n += c.length;
+    }
+  }
+  const buf = Buffer.concat(chunks);
+  const ct = String(headers["content-type"] || "").toLowerCase();
+  const textual = !ct || /^(?:text\/|application\/(?:json|[\w.+-]*\+json|xml|[\w.+-]*\+xml|x-www-form-urlencoded|javascript|graphql))/.test(ct);
+  const out = { status: res.status, headers, body: textual ? buf.toString("utf8") : buf.toString("base64"), encoding: textual ? "utf8" : "base64" };
+  if (truncated) out.truncated = true;
+  if (textual && !truncated && /json/.test(ct)) {
+    try {
+      out.json = JSON.parse(out.body);
+    } catch {}
+  }
+  const rem = res.headers.get("x-ratelimit-remaining") ?? res.headers.get("ratelimit-remaining");
+  const reset = Number(res.headers.get("x-ratelimit-reset") ?? res.headers.get("ratelimit-reset"));
+  out.rate = rem !== null && Number.isFinite(Number(rem)) ? { remaining: Number(rem), reset: Number.isFinite(reset) && reset > 0 ? reset : null } : null;
+  out.retryAfter = res.headers.get("retry-after");
+  return out;
 }

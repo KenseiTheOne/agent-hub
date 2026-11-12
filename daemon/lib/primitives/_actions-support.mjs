@@ -15,6 +15,9 @@ import { deepMerge, expandHome } from "../config.mjs";
 
 export const UUID_SRC = "^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$";
 export const UUID_RE = new RegExp(UUID_SRC);
+// A session id session.focus accepts: a Claude Code UUID or a non-Claude agent session id (G13, agentSession= — the same
+// grammar as EXTERNAL_SESSION_ID_RE in lib/core.mjs).
+export const EXTERNAL_SESSION_SRC = "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$";
 // Name of the session to launch: letters/digits, space, . _ ( ) -. No quotes or shell metacharacters.
 export const SESSION_NAME_RE = /^[\p{L}\p{N}][\p{L}\p{N} ._()-]{0,63}$/u;
 

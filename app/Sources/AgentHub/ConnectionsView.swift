@@ -152,7 +152,8 @@ struct PluginConnectionBanner: View {
     let pluginId: String
 
     var body: some View {
-        if let c = store.connectionInfo(forPlugin: pluginId) {
+        // every connection the plugin declares, in declaration order (not just the first)
+        ForEach(store.connectionInfos(forPlugin: pluginId), id: \.id) { c in
             ConnectionCard(store: store, conn: c, place: .plugin)
                 .padding(14).frame(maxWidth: .infinity, alignment: .leading)
                 .background(RoundedRectangle(cornerRadius: 16).fill(Color.white.opacity(0.05)))

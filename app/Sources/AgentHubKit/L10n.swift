@@ -382,6 +382,7 @@ extension PluginPermission {
         case "push": return tr("Громкое уведомление", "Loud notification")
         case "connections": return tr("Подключение", "Connection")
         case "terminal": return tr("Терминал", "Terminal")
+        case "subscribe": return tr("Подписка на события", "Event subscription")
         default: return kind
         }
     }
@@ -594,6 +595,11 @@ public enum Explain {
         "facts:no-terminal", "facts:no-tab", "facts:focus-unsupported", "facts:esc-unsupported", "facts:launch-unsupported",
         "facts:no-launch-terminal", "facts:terminal-test-mode", "facts:terminal-failed", "facts:tmux-failed", "facts:tmux-timeout",
         "facts:osascript-failed", "facts:osascript-timeout", "facts:not-installed", "terminal:unsupported",
+        "input:required", "input:too-long", "input:control", "input:option-like", "input:pattern", "facts:jobs-limit", "facts:no-job",
+        "secrets:disabled", "secrets:not-declared", "secrets:reserved", "secrets:foreign-namespace", "secrets:untrusted", "secrets:bad-key",
+        "secrets:no-keychain", "secrets:keychain", "args:value:required", "args:value:chars", "args:value:length",
+        "extensions:changed", "extensions:not-found", "extensions:disabled", "extensions:write-failed", "extensions:unsafe-file",
+        "extensions:too-large",
     ]
 
     /// Whether the code has its own text (not the generic fallback).
@@ -617,6 +623,37 @@ public enum Explain {
         switch code {
         case "estop":
             return tr("Хаб на паузе — это действие выключено. Нажмите «Снять паузу».", "The hub is paused, so this action is off. Press Resume hub.")
+        case "input:required", "input:too-long", "input:control", "input:option-like", "input:pattern":
+            return "\(q): " + InputCheck.message(code)
+        case "extensions:changed":
+            return tr("Файл расширения изменился — проверьте его снова.", "The extension file changed — review it again.")
+        case "extensions:not-found":
+            return tr("Файла расширения больше нет.", "The extension file is gone.")
+        case "extensions:disabled":
+            return tr("Внешние расширения выключены в config.json (extensions.enabled).", "External extensions are off in config.json (extensions.enabled).")
+        case "extensions:write-failed":
+            return tr("Хаб не смог записать одобрение — ничего не изменилось.", "The hub couldn't record the approval — nothing changed.")
+        case "extensions:unsafe-file":
+            return tr("Файл чужой или его могут менять другие пользователи — такой хаб не загрузит.", "The file belongs to someone else or others may write it — the hub won't load it.")
+        case "extensions:too-large":
+            return tr("Файл больше 1 МБ — хаб такой не загрузит.", "The file is over 1 MB — the hub won't load it.")
+        case "facts:jobs-limit":
+            return tr("\(q): у плагина уже работает максимум фоновых задач — дождитесь конца одной или остановите её.",
+                      "\(q): the plugin already runs the maximum number of background jobs — wait for one to end or stop it.")
+        case "facts:no-job":
+            return tr("Эта фоновая задача уже закончилась.", "This background job has already ended.")
+        case "secrets:disabled":
+            return tr("Служба ключей хаба не запущена.", "The hub's key service isn't running.")
+        case "secrets:not-declared":
+            return tr("Плагин больше не объявляет этот ключ.", "The plugin no longer declares this key.")
+        case "secrets:reserved", "secrets:foreign-namespace", "secrets:untrusted", "secrets:bad-key":
+            return tr("Этот ключ нельзя задать из приложения.", "This key can't be set from the app.")
+        case "secrets:no-keychain":
+            return tr("Нет связки ключей macOS (тестовый хаб).", "No macOS keychain (a test hub).")
+        case "secrets:keychain":
+            return tr("Связка ключей macOS не ответила — ничего не изменилось. Попробуйте ещё раз.", "The macOS keychain didn't answer — nothing changed. Try again.")
+        case "args:value:required", "args:value:chars", "args:value:length":
+            return SecretValue.problem(code == "args:value:length" ? String(repeating: "x", count: SecretValue.maxLength + 1) : code == "args:value:chars" ? "\"" : "") ?? ""
         case "own:no-app":
             return tr("Приложение не закреплено — свой плагин подтвердить некому.", "The app isn't pinned — there's nobody to confirm your own plugin.")
         case "own:lint":

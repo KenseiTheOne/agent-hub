@@ -17,6 +17,8 @@ import { launchCommand, osa, OSASCRIPT } from "./iterm2.mjs";
 
 export const id = "terminal-app";
 export const label = "Terminal";
+// The place in the adapter list (lib/terminals/index.mjs): a session two adapters could claim goes to the lower one.
+export const order = 40;
 export const capabilities = Object.freeze(["focus", "launch"]);
 export const APP_PATHS = Object.freeze(["/System/Applications/Utilities/Terminal.app", "/Applications/Utilities/Terminal.app"]);
 

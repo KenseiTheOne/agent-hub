@@ -102,6 +102,11 @@ process.on("SIGHUP", () => core.host.rescan());
 process.on("uncaughtException", (e) => {
   // the state may have been corrupted — exit, launchd will restart us
   log(`uncaughtException: ${e.stack || e.message}`);
+  // background jobs run in their own process groups and would outlive us invisibly (B3): a synchronous SIGTERM to each now;
+  // one that ignores it is killed by the next daemon from <home>/jobs.json
+  try {
+    core.killJobsSync("SIGTERM");
+  } catch {}
   process.exit(1);
 });
 process.on("unhandledRejection", (e) => {

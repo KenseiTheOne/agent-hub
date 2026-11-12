@@ -159,7 +159,8 @@ test("stage 5 primitives are registered with levels, app-only and remoteAllowed"
     // while the hub is paused only open.url/open.file work — this is visible in the snapshot (the shell disables the other buttons)
     for (const n of Object.keys(prims)) assert.equal(prims[n].safeUnderEstop, n === "open.url" || n === "open.file", n);
     // the core knows nothing about external agents: controlling them is done via plugins' declared actions
-    for (const n of Object.keys(prims)) assert.match(n, /^(open|terminal|cmux|session)\./, n);
+    // job.cancel (G6) stops a plugin's own background job — not an external agent
+    for (const n of Object.keys(prims)) assert.match(n, /^(open|terminal|cmux|session|job)\./, n);
     // cmux.focus is a deprecated alias of terminal.focus (until the next contract)
     assert.equal(prims["cmux.focus"].aliasOf, "terminal.focus");
     assert.equal(prims["cmux.focus"].deprecated, true);
@@ -276,8 +277,11 @@ test("session.focus: the terminal layer finds the tab via the session registry; 
     // action text — by the session name
     const d = h.core.describeTarget({ kind: "primitive", prim: h.core.primitives.get("session.focus"), args: { sessionId: SID } });
     assert.equal(d.text, "Перейти во вкладку «Работа»");
-    r = await focus("not-a-uuid");
+    // the id is a UUID or an external agent session id (G13: [A-Za-z0-9][A-Za-z0-9._-]{0,63}); anything else is a pattern error
+    r = await focus("not a uuid");
     assert.equal(r.body.error, "args:sessionId:pattern");
+    r = await focus("not-a-uuid");
+    assert.equal(r.body.error, "facts:unknown-session");
     h.core.setEstop(true, CLI);
     r = await focus();
     assert.equal(r.status, 423);

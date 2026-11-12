@@ -3,7 +3,9 @@
 This is the **contract** for everyone extending Agent Hub (stage 5 primitives, stage 6 session answers, stage 4 push,
 the bridge, the stage 8 plugin registry, built-in plugins). Only its owner edits the core (`daemon/lib/core.mjs`,
 `server.mjs`, `peer.mjs`, `runner.mjs`, `output.mjs`, `meta.mjs`, `ctx.mjs`); everything else is added as **new files**
-in the directories below. If you need a core change, describe it in your report rather than making it yourself.
+in the directories below. If you need a core change, describe it in your report rather than making it yourself. The same
+modules can also live outside the source tree, on one Mac, in `<AGENTHUB_HOME>/Extensions` — loaded only after a human
+approves each file in the app (below, "External extensions"); they survive hub updates.
 
 | What | Where | Picked up |
 |---|---|---|
@@ -13,6 +15,7 @@ in the directories below. If you need a core change, describe it in your report 
 | Built-in plugin | `plugins/<id>.<interval>.<ext>` or `plugins/<id>/<id>.<interval>.<ext>` | on the fly (the directory is watched) |
 | Installed plugin | `<AGENTHUB_HOME>/Plugins/<id>/…` | on the fly |
 | Local plugin (development) | `<AGENTHUB_HOME>/Plugins/local/…` | on the fly |
+| External extension | `<AGENTHUB_HOME>/Extensions/{services,routes,primitives,terminals}/<name>.mjs` | at daemon start after the built-in ones of its kind, or right after a human approves it in the app ([below](#external-extensions-homeextensions)) |
 | Own plugin (2026-11-09) | a folder in your tool's repository `agenthub/<id>/` → a copy in `<AGENTHUB_HOME>/Plugins/<id>/` | a request via `agenthub plugins install --from <folder>` or "Add from folder…", a human installs it in the app; after that the hub watches the folder itself ([`plugins-registry.md`](plugins-registry.md), "Own sources") |
 
 Files whose name starts with `_` or `.` are not loaded (samples: `routes/_example.mjs`, `services/_example.mjs`).
@@ -73,11 +76,13 @@ The same for primitives, routes and services. The object is frozen.
 | `exec(file, args, {timeoutMs, cwd, env})` | `Promise<{code, stdout, stderr, timedOut?}>` via `execFile` (no shell); in test mode — a record in `AGENTHUB_TEST_EXEC_LOG` |
 | `sendToPlugin(pluginId, obj)` | NDJSON to a streamable plugin's stdin (`{"type":"inbound",...}` from the hook and so on); `false` if it is not streamable or not running |
 | `refreshPlugin(pluginId, reason)` | restart a standard plugin / `{"type":"refresh"}` for streamable |
+| `restartPlugin(pluginId, reason)` | restart a plugin with a **freshly built environment** (a secret was written, a service variable changed): a streamable process gets `{"type":"stopping","reason":"restart","cause":<reason>}`, is stopped and started again; a standard one gets an extra run. `reason` — the new `AGENTHUB_REFRESH_REASON`, `[A-Z][A-Za-z]{1,31}` (`SecretChanged`); journaled as `plugin-restart`. Background jobs keep running. → `Promise<boolean>` (`false` — no such running plugin) |
+| `cancelJob(jobId, requester?)` | stop a plugin's background job (`<agenthub.action background="true">`): SIGTERM to its group, SIGKILL 2 s later; journaled `job-cancel`. → `{ok, error?: "no-job"}` (the `job.cancel` primitive) |
 | `rescanPlugins()` | rescan the plugin directories now and re-evaluate the policy of running ones (after install, removal, blocklist). The host also rescans by itself every `plugins.rescanIntervalMs` (60 s): fs.watch loses events |
 | `onHook(handler)` | registers a `POST /hook` handler (stage 6): `handler(body, {peer, signal})`, `signal` is an `AbortSignal` for the hook connection dropping; returns an unregister function. Handlers are called in order; the first one returning something other than `undefined`/`null` sets the hook answer. No handler, ESTOP or an error → `{}`; while the hub is paused handlers are called only for `SessionStart`, `SessionEnd`, `Stop` (the answer is `{}`) |
-| `providePluginEnv(name, value)` | a service gives **trusted** plugins (`builtin` and `official` — by core policy, not by metadata) an environment variable: `AGENTHUB_<NAME>` (not `AGENTHUB_SECRET_*` and not the core-reserved ones: `AGENTHUB_PLUGIN_ID`, `…_DATA_PATH`, `…_CACHE_PATH`, `AGENTHUB_REFRESH_REASON`, `AGENTHUB_LANG`, `AGENTHUB_PAUSED`); `value: null` removes it. The value is not a secret (a path to its own cache and the like). Already running plugins see it from their next run; services start before plugins. Currently: `AGENTHUB_USAGE_FILE` (the `usage` service), `AGENTHUB_HUB_SOCKET` (the hub socket path: since contract 3 the core always gives it to trusted plugins, not only with the `oauth` service — this is how a plugin calls `POST /connections/:id/mcp` and `/terminal/*`), `AGENTHUB_CLAUDE_SESSIONS_FILE` (the `sessions` service, contract 3: metadata of live Claude Code sessions) |
-| `registerSecretsProvider(fn)` | `fn(pluginId, key, plugin) → Promise<string|undefined>`; the core calls it for every `<agenthub.secrets>` of a plugin and puts the value into the environment as `AGENTHUB_SECRET_<KEY>` (`example.token` → `AGENTHUB_SECRET_EXAMPLE_TOKEN`). One provider per daemon; currently the `secrets` service installs it (the keychain, `agent-hub.<service>` / `<entry>`; built-in plugins get any keys except `oauth.*`, installed ones only `<id>.*` (and never `oauth.*`, even for a plugin with id `oauth`), `Plugins/local` — nothing; in test mode the keychain is not read). The same service gives other services the fact `secrets.store` — `get/set/delete` of `agent-hub.oauth` / `<connection>.client|token` entries (JSON; written via stdin of `security -i`, not argv): this is how the `oauth` service stores client registrations and tokens |
-| `setPluginPolicy(fn)` | stage 8: `fn(plugin, defaults) → {allowed, reason?, effects?, tier?}`; `tier: "official"` is respected only for `installed` (the plugins service gives it only if the verified catalog currently names the id official, the sha256 from `plugins.lock` is signed as official — by the current catalog or by the saved earlier index `Registry/attest/<id>` (a released new version does not demote the installed one until it is updated), and the files match the saved archive `Registry/archives/<id>.tar.gz`); the core still cuts the effects of non-built-in plugins down to the ceiling and forbids `<agenthub.action>` to everyone except `builtin` and `official`. No policy (the plugins service is off, not in `AGENTHUB_SERVICES` or failed at startup) — installed plugins (`Plugins/<id>`) are not admitted (`policy:no-manager` in the journal); built-in and local ones work as usual |
+| `providePluginEnv(name, value)` | a service gives **trusted** plugins (`builtin`, `official` and `own` — by core policy, not by metadata) an environment variable: `AGENTHUB_<NAME>` (not `AGENTHUB_SECRET_*` and not the core-reserved ones: `AGENTHUB_PLUGIN_ID`, `…_DATA_PATH`, `…_CACHE_PATH`, `AGENTHUB_REFRESH_REASON`, `AGENTHUB_LANG`, `AGENTHUB_LOCALE`, `AGENTHUB_PAUSED`); `value: null` removes it. The value is not a secret (a path to its own cache and the like). Already running plugins see it from their next run; services start before plugins. Currently: `AGENTHUB_USAGE_FILE` (the `usage` service), `AGENTHUB_HUB_SOCKET` (the hub socket path: since contract 3 the core always gives it to trusted plugins, not only with the `oauth` service — this is how a plugin calls `POST /connections/:id/mcp|http` and `/terminal/*`), `AGENTHUB_CLAUDE_SESSIONS_FILE` (the `sessions` service, contract 3: metadata of live Claude Code sessions) |
+| `registerSecretsProvider(fn)` | `fn(pluginId, key, plugin) → Promise<string|undefined>`; the core calls it for every `<agenthub.secrets>` of a plugin and puts the value into the environment as `AGENTHUB_SECRET_<KEY>` (`example.token` → `AGENTHUB_SECRET_EXAMPLE_TOKEN`). One provider per daemon; currently the `secrets` service installs it (the keychain, `agent-hub.<service>` / `<entry>`; built-in plugins get any keys except `oauth.*`, installed ones only `<id>.*` (and never `oauth.*`, even for a plugin with id `oauth`), `Plugins/local` — nothing; in test mode the keychain is not read). The same service gives other services the fact `secrets.store` — `get/set/delete` of `agent-hub.oauth` / `<connection>.client|token` entries (JSON; written via stdin of `security -i`, not argv): this is how the `oauth` service stores client registrations and tokens. And the fact `secrets.api` — `list/set/remove` of a plugin's declared keys for the app routes `GET /secrets/:plugin`, `PUT|DELETE /secrets/:plugin/:key` ([`api.md`](api.md), "Secrets"; after a change the cached value is dropped and the plugin restarts via `ctx.restartPlugin` when the core offers it, else `refreshPlugin`, reason `SecretChanged`). Key: service `[a-z0-9][a-z0-9_-]{0,63}`, account `[a-z][a-z0-9_.-]{0,63}`; cache — 5 min for a found value, 1 min for a missing one |
+| `setPluginPolicy(fn)` | stage 8: `fn(plugin, defaults) → {allowed, reason?, effects?, tier?}`; `tier: "official"` is respected only for `installed` (the plugins service gives it only if the verified catalog currently names the id official, the sha256 from `plugins.lock` is signed as official — by the current catalog or by the saved earlier index `Registry/attest/<id>` (a released new version does not demote the installed one until it is updated), and the files match the saved archive `Registry/archives/<id>.tar.gz`); the core still cuts the effects of non-built-in plugins down to the ceiling and gives `<agenthub.action>` to `builtin` and installed plugins only (community — never below `confirm`). No policy (the plugins service is off, not in `AGENTHUB_SERVICES` or failed at startup) — installed plugins (`Plugins/<id>`) are not admitted (`policy:no-manager` in the journal); built-in and local ones work as usual |
 | `invoke({id, args, confirmToken, peer})` | call an action the same way as `POST /actions/:id`. `peer` is passed as is — pass only the real `peer` from a route handler |
 
 ### `facts`
@@ -89,12 +94,14 @@ The same for primitives, routes and services. The object is frozen.
 | `plugin(id)` | the plugin's internal state or `null` |
 | `offer(id)` | a plugin offer (`{id, pluginId, kind, primitive?, args?, action?, level, label}`) |
 | `session(sessionId)`, `sessionByPid(pid)`, `sessions()` | session registry records (signature-verified only) |
+| `externalSession(id)`, `externalSessions()` | non-Claude agent sessions (`kind: "external"`, from trusted plugins' `agentSession=` lines): `{sessionId, pid, startSec, kind, agent, name, owner, updatedAt}`; a record whose process ended or whose pid was reused is dropped on lookup. Only `session.focus` takes them; a primitive that works on Claude Code sessions only refuses them with `external-session` |
 | `appConnections()` | live `app`-class connections: `[{pid, startSec, path}]` (the app service — app supervision) |
 | `stopping()` | `true` if the daemon is stopping (`POST /shutdown`, SIGTERM): closed connections are not a crash |
-| `runningActions()` | plugin actions running right now (`POST /actions/:id` → the action command): `[{action, plugin, title, since}]`; start — the `action.started {action, plugin, actionId}` event, end — `action`. The idle service shows them as a line "<plugin>: running "…"" |
-| `provide(name, fn)` | an extension adds its own fact (`"bridge.online"`, `"bridge.surfaces"`, `"hook.pending"` — waiting cards `[{requestId, sessionId, kind, tool, subagent}]`, `"plugins.busy"` — plugin installations in progress, `"idle.state"` — the "can I shut down" verdict, `"secrets.store"` — the keychain store for connections (the secrets service), `"oauth.connections"` — connection state without tokens, `"oauth.api"` — the oauth service for its routes…). Each name once per daemon |
+| `runningActions()` | plugin actions running right now (`POST /actions/:id` → the action command): `[{action, plugin, title, since}]`, plus background jobs as `{…, job, background: true}`; start — the `action.started {action, plugin, actionId}` event, end — `action` (a job: `job.started` / `job.exited`). The idle service shows them as a line "<plugin>: running "…"" |
+| `jobs()`, `job(id)` | background jobs of plugins: `[{id, plugin, actionId, title, startedAt, pid}]`, one or `null` |
+| `provide(name, fn)` | an extension adds its own fact (`"bridge.online"`, `"bridge.surfaces"`, `"hook.pending"` — waiting cards `[{requestId, sessionId, kind, tool, subagent}]`, `"plugins.busy"` — plugin installations in progress, `"idle.state"` — the "can I shut down" verdict, `"secrets.store"` — the keychain store for connections (the secrets service), `"secrets.api"` — plugin secrets entered in the app (the secrets service), `"oauth.connections"` — connection state without tokens, `"oauth.api"` — the oauth service for its routes, `"push.channels"` — the push service's channel registry (`register(channel) → unregister`, `list()`; below, "Push channel"), `"terminal.adapters"` — the core's terminal adapter list (built-in + approved extensions), `"extensions.api"` — the extension manager for its routes…). Each name once per daemon |
 | `get(name, ...args)` | the fact value (`undefined` if there is none) |
-| `pluginByPid(pid)` | whose process this is: a running standard run or a streamable plugin process (not an action, not a descendant) → `{id, source, tier, trusted, net}` or `null`. For routes that serve plugins themselves: the peer pid on the socket comes from the kernel (`peer.pid`), not from the request (`POST /connections/:id/mcp`) |
+| `pluginByPid(pid, {actions}?)` | whose process this is: a running standard run or a streamable plugin process; with `{actions: true}` also an action process or a background job (never a descendant) → `{id, source, tier, trusted, net, terminal}` or `null`. For routes that serve plugins themselves: the peer pid on the socket comes from the kernel (`peer.pid`), not from the request (`POST /connections/:id/mcp|http` and `/terminal/*` pass `{actions: true}`). The server itself also walks every ancestor of a peer (and checks the process group of each) with it to bind `peer.plugin` ([`api.md`](api.md#peer-classes)) |
 
 ### `sessions` — the Claude Code session registry
 
@@ -106,6 +113,7 @@ ID `Q6L2SF6YDW`). The cmux shim and a planted `~/.claude/sessions/<pid>.json` wi
   the check does not enter the registry.
 - `unregister(sessionId, source)` — drop a source; the record is deleted when no sources remain.
 - `get(id)`, `list()`, `waitingCount()` (sessions with `status: "waiting"`).
+- `external(id)`, `externalList()` — non-Claude agent sessions (see `facts.externalSession`); not part of `get`/`list`.
 - A registry change → the `sessions` event on the bus.
 - `interactive: true` is set by stage 6 on `SessionStart` from the hook; only such sessions can receive `allow`.
 
@@ -191,8 +199,13 @@ export const routes = [
 - Built-in routes ([`api.md`](api.md)) cannot be overridden; a repeated `method path` is a `load-error` and the route is
   skipped.
 - The peer class is checked before the handler is called; a wrong class → `403 {"error":"peer:<class>"}`.
+- A process of an untrusted plugin (community, local — the plugin process, its action or a descendant of either; found by
+  pid, ancestors and process group, `peer.plugin`) gets `403 peer:untrusted-plugin` on every route unless the route sets
+  `untrustedPlugin: true` ([`api.md`](api.md#peer-classes), "Plugin processes"). Don't set it on anything that reads
+  sessions or changes state.
 - `body` is the parsed JSON (or `undefined`); not JSON → 400. Returning `undefined` → 204.
-- `peer`: `{class, pid, path, startSec, reason?, claudePid?}`.
+- `peer`: `{class, pid, path, startSec, reason?, claudePid?, plugin?}` — `plugin: {id, trusted, tier, source, pid}`
+  when the client is a plugin process or its descendant (`pid` there is the plugin process).
 
 ## Service (`daemon/lib/services/<name>.mjs`)
 
@@ -218,7 +231,8 @@ export async function stop(ctx) { ... }      // remove subscriptions and timers;
   `<agenthub.connection>` tag, below; [`api.md`](api.md) "Connections"; network — only the hosts of a declared connection
   and a temporary code receiver on 127.0.0.1; tokens — only in the keychain via `secrets.store`; in test mode — the
   `services.oauth.<id>.resource` doubles on 127.0.0.1 and `services.secrets.securityPath`), `plugins` (the registry),
-  `push`, `secrets`, `terminal` (contract 3: "read the tab screen" and "type a line into the tab" of a Claude Code session
+  `push` (delivery through a channel list: macOS always, `services.push.channels` from `config.json`, channels other
+  services register — below, "Push channel"), `secrets`, `terminal` (contract 3: "read the tab screen" and "type a line into the tab" of a Claude Code session
   for trusted plugins with the `<agenthub.terminal>` permission, the `/terminal/*` routes, the `terminal.api` fact; the
   terminal layer `lib/terminals/` — one built-in adapter per terminal, below "Terminal adapter"; `services.terminal` —
   rate limits and `launch`, the terminal new sessions open in), `usage` (the Claude subscription quota → `Cache/usage.json`, the `AGENTHUB_USAGE_FILE` variable for trusted
@@ -227,21 +241,74 @@ export async function stop(ctx) { ... }      // remove subscriptions and timers;
   `services.usage.credentialsFile`, `services.usage.url` on 127.0.0.1/localhost; `services.usage.live: true` — the real
   keychain and host even in a test directory, for a live check).
 
+### Push channel
+
+The push service decides *whether and when* to notify (rules, quiet hours, kinds, limits —
+[`daemon/lib/push/README.md`](../daemon/lib/push/README.md)); *where* is a channel list (`daemon/lib/push/channels.mjs`). The
+macOS banner (`mac`: the shell, osascript without an acknowledgement) is always on and always first. More channels:
+
+- **from `config.json`** — `services.push.channels`, built-in types:
+
+  ```json
+  { "services": { "push": { "channels": [
+      { "type": "webhook", "url": "https://hooks.example.com/agent-hub/<secret>", "events": ["sessions", "problems"] },
+      { "type": "ntfy", "url": "https://ntfy.sh/<topic>", "security": true, "id": "phone" } ] } } }
+  ```
+
+  `webhook` — `POST` of the JSON payload below; `ntfy` — a JSON publish to the server root with the topic from the URL's
+  path (`title`, `message`, `click` = `href`, priority 5 for security). `url` — `https://` anywhere, plain `http://` only to
+  this Mac (`localhost`, `127.0.0.0/8`, `[::1]`), no `user:password@`; redirects are refused (an https URL can't be bent to
+  http); a 10 s timeout. `events` (optional) — the kinds (`sessions`, `updates`, `problems`, `other`, `plugin`, `security`;
+  `hub` — any hub event, `digest` — the morning digest) or keys `<plugin>:<key>` with a trailing `*` (`mail:*`); no list —
+  everything. `security: true` — the channel also gets security banners (a re-pinned app build, tampering signals: the kind
+  `security` and the `bannerAlways` rules); without it they never leave this Mac. `id` (`[a-z][a-z0-9-]{0,31}`, default
+  `<type>-<n>`), `label`, `enabled: false`. A bad entry is skipped with `push-channel-invalid {index, reason}` in the
+  journal. The URL often carries a secret (a webhook path, an ntfy topic): it never reaches the journal, `/state` or events —
+  failures are `push-channel-error {channel, key, code}`.
+- **from a service** (built-in or an approved extension):
+
+  ```js
+  export async function start(ctx) {
+    off = ctx.facts.get("push.channels")?.register({
+      id: "pager",                // [a-z][a-z0-9-]{0,31}, not "mac", unique
+      label: "Pager",             // optional
+      security: false,            // optional: true — also security banners
+      events: ["sessions"],       // optional: as in config.json
+      send: async (payload) => ({ ok: true }),   // → {ok, code?}; called in the background with a timeout
+    });
+  }
+  export async function stop() { off?.(); }
+  ```
+
+  The fact exists while the push service runs (a service that starts before `push` alphabetically registers on the
+  `services.started` bus event; extension services start after all built-in ones).
+
+Payload (metadata and the banner text only): `{source: "agent-hub", title, subtitle, body, plugin, key, kind, digest, href,
+ts}`. Banner buttons (`actions`) stay with the shell: they are offer ids of this hub. Channels get exactly what the banner
+would show at that moment — the engine's quiet hours, digest and kind switches apply before any channel.
+
 ## Terminal adapter (`daemon/lib/terminals/<id>.mjs`)
 
 Everything the hub does with the terminal tab of a Claude Code session goes through the terminal layer
 (`daemon/lib/terminals/index.mjs`): switch to the tab (`session.focus`, `terminal.focus`), read the end of the screen and
 type a line (`/terminal/*`), press Esc (`session.interrupt`), open a new tab with a session (`session.launch`). A terminal
-is a **built-in adapter file** in the hub repository — a separate kind of extension, not a plugin: it ships with the hub,
-has no permissions of its own and is never installed from a registry. The core and the shell never name a terminal; the
+is an **adapter file** — a separate kind of extension, not a plugin: it ships with the hub (`daemon/lib/terminals/`, found by a
+directory scan) or lives on one Mac as an approved extension (`<home>/Extensions/terminals/`, below), has no permissions of its
+own and is never installed from a registry. The core and the shell never name a terminal; the
 shell draws from what `/state` says.
 
 | Adapter | Where the session is | focus | read-screen | send-text | send-esc | launch | How |
 |---|---|---|---|---|---|---|---|
 | `cmux` | `~/.cmuxterm/claude-hook-sessions.json` (cmux hooks), same pid and start time | yes | yes | yes | yes | yes | the cmux bridge (`bridge/`) — the adapter's internal detail; without it every operation answers `bridge-offline` |
-| `tmux` | a tmux server is the nearest terminal among the process's ancestors; the pane by `pane_tty` | yes | yes | yes | yes | yes | the server's own tmux binary (`-L`/`-S` from its argv): `select-window`/`select-pane`/`switch-client` (+ the window of the client's terminal), `capture-pane`, `send-keys -l` with the same field checks as the bridge, `send-keys Escape`, `new-window -d` |
+| `tmux` | a tmux server is the nearest terminal among the process's ancestors; the pane by `pane_tty` | yes | yes | yes | yes | yes | a known tmux binary (`/opt/homebrew/bin`, `/usr/local/bin`, `/opt/local/bin`, `/usr/bin`) that is the server's executable, as is or after resolving links — a server running any other binary is not reached (`-L`/`-S` from its argv): `select-window`/`select-pane`/`switch-client` (+ the window of the client's terminal), `capture-pane`, `send-keys -l` with the same field checks as the bridge, `send-keys Escape`, `new-window -d` |
 | `iterm2` | iTerm2 (or its `iTermServer`) is the nearest ancestor; the tab by `tty of session` | yes | — | — | — | yes | `/usr/bin/osascript`, values only in `argv` |
 | `terminal-app` | Terminal.app is the nearest ancestor; the tab by `tty of tab` | yes | — | — | — | yes | `/usr/bin/osascript` (`do script` for a new window) |
+
+Non-Claude agent sessions (`/state.externalSessions`, `agentSession=<id> pid=<pid>`) are located the same way, by pid: tmux,
+iTerm2 and Terminal.app find their tab from the process ancestors and tty, so `session.focus` works there. **cmux cannot focus
+them**: the cmux adapter knows a tab only from `~/.cmuxterm/claude-hook-sessions.json`, which cmux's Claude Code hooks write,
+and the bridge has no "surface by pid/tty" operation — such a session in cmux has no tab (`terminal: null`, not focusable).
+Adding it needs a new allowlisted bridge operation (`bridge/`), not a core change.
 
 iTerm2 and Terminal.app declare no screen, typing or Esc: their AppleScript cannot check the Claude Code input field
 before and after typing (Terminal.app can type only through `do script`, always with Enter, or keystrokes into whatever
@@ -273,20 +340,79 @@ export async function sendText(target, text, facts) {}              // send-text
 export async function sendKey(target, "escape", facts) {}           // send-esc
 export async function launch({ cwd, name, sessionId, promptFile }, facts) {} // launch: runs bridge/launch.sh in a new tab
 export function registered(sessionId, facts, { workspaceId }) {}   // optional: the launched session appeared (default: the registry)
+export const order = 20;                     // optional: the place in the list (lower first, default 100; built-in: cmux 10, tmux 20, iterm2 30, terminal-app 40)
+export const autoLaunch = false;             // optional: "auto" never picks it for session.launch by "installed" (tmux)
+export const messages = {                    // optional: human texts for the adapter's own error codes, ru and en
+  ru: { "no-remote": "Включите удалённое управление в настройках терминала" },
+  en: { "no-remote": "Turn on remote control in the terminal settings" },
+};
+// available(facts) may answer { error: "no-remote", setup: true }: "needs setup" — the shell shows messages[error] as a hint
 ```
+
+`messages` — codes `[a-z0-9][a-z0-9-]{0,47}`, one line ≤ 200 characters each, at most 40; the hub language first, the other
+as a fallback. The shell shows them for `available()` reasons and for refusals of the adapter's operations (`409 facts:<code>`,
+`terminal:<code>`); built-in codes keep the shell's own texts.
 
 A capability counts only when it is declared **and** its function exists. What is missing is refused before anything
 runs: `/terminal/*` — `409 terminal:unsupported {terminal, capability}`; primitives — `409 facts:focus-unsupported`,
 `facts:esc-unsupported`, `facts:launch-unsupported`; the shell disables the button with a tooltip naming the terminal.
-A new terminal is a file and a line in `ADAPTERS`: the plugin contract (routes, the `<agenthub.terminal>` permission, error
-codes) does not change.
+A new terminal is a file: `daemon/lib/terminals/<id>.mjs` (found by a directory scan, `_*.mjs` are helpers) or an approved
+`<home>/Extensions/terminals/<id>.mjs` (after the built-in ones; an id a built-in adapter has is refused). The plugin contract
+(routes, the `<agenthub.terminal>` permission, error codes) does not change.
 
 `/state` exposes the layer: `sessions[].terminal` (the adapter id, contract 3, a string), `focusable`, and
 `terminalInfo {adapter, label, capabilities, focusable, via}` (or `null`); `terminals {adapters: [{id, label,
-capabilities, via, installed, available, reason, sessions}], launch: {adapter, why} | null, prefer}` — Settings →
-Terminal. `session.launch` opens the tab in `services.terminal.launch` (an adapter id) or, with `"auto"` (the default),
+capabilities, via, installed, available, reason, reasonText, needsSetup, messages, source, sessions}], launch: {adapter,
+why} | null, prefer}` — Settings → Terminal ([`api.md`](api.md)). `session.launch` opens the tab in `services.terminal.launch` (an adapter id) or, with `"auto"` (the default),
 in the terminal most live sessions run in, otherwise in the first installed of cmux, iTerm2, Terminal (tmux only by the
 setting or by its sessions: a new window would land in a detached server).
+
+## External extensions (`<home>/Extensions`)
+
+The extension points above live in the hub's source tree, which an installed hub rebuilds from a release tag on every update.
+For your own daemon code on one Mac — a push channel to your pager, a route for your tool, a primitive, an adapter for your
+terminal — put the module in the state directory instead:
+
+```
+<AGENTHUB_HOME>/Extensions/
+  services/<name>.mjs      — a service (the contract above: name, start(ctx), stop(ctx))
+  routes/<name>.mjs        — routes (export const routes = [...], above)
+  primitives/<name>.mjs    — a primitive (name, level, argsSchema, verifyFacts, describe, run — above)
+  terminals/<id>.mjs       — a terminal adapter (above)
+```
+
+The module contracts are exactly those of the built-in modules, `ctx` included. What differs:
+
+- **A human approves every file.** An extension is code inside the daemon with the daemon's full rights (sessions, plugin
+  secrets, the user's files, programs, network) — not a plugin: no permissions, no registry review. The daemon lists what it
+  finds in `/state.extensions` (status `pending`), the app shows the consent text (`consent`, the hub language: it says
+  exactly this) with the path and sha256 and, on "Approve", calls the app-only `POST /extensions/approve {path, sha256}`
+  ([`api.md`](api.md), "Extensions"). The approval is the sha256 of these bytes in `Registry/ext-approvals.json`: a changed
+  file is `changed` and does not load until approved again; the daemon keeps approvals in memory too, so an entry another
+  process writes into the file while the daemon runs grants nothing. Approved at runtime — it loads right away; otherwise at
+  the next daemon start. Revoked (`POST /extensions/revoke`) — a loaded module shows `revoked` (it runs until the daemon
+  restarts, not counted as waiting) and stops loading at the next start.
+- **What runs is what was hashed**: the daemon reads the file once, checks its sha256 and imports those bytes (a `data:`
+  URL). So an extension is **one self-contained file**: `import` of `node:*` built-ins works, relative imports don't
+  (`import-failed`); hub helpers come through `ctx` (`ctx.t`, `ctx.exec`, `ctx.facts`, …). Importing hub files by an
+  absolute `file:` URL works but is not a contract — they change between versions.
+- **The file must be yours**: owned by your user, not writable by group or others (`unsafe-file`), ≤ 1 MB, a name
+  `[A-Za-z0-9][A-Za-z0-9._-]{0,63}.mjs`; `_*.mjs` and `.*` are skipped like in the source tree.
+- **Built-ins win**: a service name, primitive name, route method and path (`:params` compared by position) or terminal id a
+  built-in module (or an earlier extension) already has is refused (`name-taken`); a route file with one such route is
+  refused whole.
+- **Order**: extension primitives and terminal adapters right after the built-in primitives, extension services after the
+  built-in services (before plugins; the same `services.<name>.enabled` and `AGENTHUB_SERVICES` switches), extension routes
+  after the built-in routes. Within a kind — by file name.
+- **Journal**: `extension-load`, `extension-denied` (pending or changed), `extension-error`, `extension-approved`,
+  `extension-revoked`; `/state.extensions` and the `extensions.changed` event show the same for the app (a file added while the
+  daemon runs is noticed by `fs.watch` and a rescan every `extensions.rescanMs`, 30 s).
+- **Updates**: `Extensions/` is in the state directory, which hub updates (`docs/hub-updates.md`) and `agenthub builtin
+  update` never touch: extensions keep running across hub versions. A hub update can change `ctx` or a fact an extension
+  relies on — the module contracts in this document are the compatibility promise; anything else (hub files, internal
+  facts) is not.
+- **Off switch**: `extensions.enabled: false` in `config.json` — the folder is not even scanned. Tests:
+  `AGENTHUB_TEST_EXTENSIONS=1` together with `AGENTHUB_HOME` (not the live directory) approves every file automatically.
 
 ## Plugin contract (what the core understands)
 
@@ -338,7 +464,9 @@ no names, no icons, no notification kinds, no error texts. Everything plugin-spe
   with a letter, up to 32; the whole id starts with a letter and is up to 64 characters, otherwise refused: it is also
   the keychain entry name). A plugin id never contains a dot, so a connection always belongs to exactly one plugin:
   `foo` cannot declare a connection of plugin `foo-bar` (before 2026-11-10 it was `<id>-…`, which allowed that); `type`
-  is `mcp` only; `url` is https on a host name (not an IP address) without a port or credentials; `hosts` are additional
+  is `mcp` (below) or `http` (contract 3 additive: a pre-registered public `client_id`, `authorize`/`token`
+  endpoints, API `hosts` the token goes to, `methods`, `paths`, optional `port`; the hub proxies requests via
+  `POST /connections/<id>/http` — [`writing-plugins.md`](writing-plugins.md) 8.3, [`api.md`](api.md) "Connections"); `url` is https on a host name (not an IP address) without a port or credentials; `hosts` are additional
   authorization server hosts; **the `url` host and all `hosts` must be in the plugin's `<agenthub.net>`** (linter —
   error, core — `connection-rejected`); `scope` is what to request at sign-in (space-separated words); `tools` is an
   allowlist of MCP tools (1–32), the plugin cannot call others; `interval` — at most one identical call per interval
@@ -401,7 +529,7 @@ newer hub"); a plugin that can live without them may declare 2 and check the var
   `<agenthub.watch>$AGENTHUB_CLAUDE_SESSIONS_FILE — why</agenthub.watch>`. No variable — the hub is older or the service
   is off (`services.sessions.enabled: false`).
 - **Switching to the session tab** — the `session.focus <sessionId>` effect (a UUID, positional, as for
-  `session.interrupt`): `<agenthub.effects>open.url,session.focus</agenthub.effects>`, the line
+  `session.interrupt`; or the id of another agent's session, `agentSession=` below): `<agenthub.effects>open.url,session.focus</agenthub.effects>`, the line
   `Go to | effect="session.focus <uuid>"`. Level "immediate" (no confirmation), available to third-party plugins too (a
   harmless ceiling, like `open.*`), not from remote channels. The terminal layer (`lib/terminals/`, `locate`) finds the
   tab via the core session registry, and the terminal adapter switches to it (the `focus` operation; for cmux — the bridge
@@ -419,6 +547,16 @@ newer hub"); a plugin that can live without them may declare 2 and check the var
   work). Setting and lifting the pause (via the `/estop` route, `agenthub pause` or the file) restarts plugins, like a
   language change: streamable ones from scratch, interval ones out of turn, with `AGENTHUB_REFRESH_REASON=Paused|Resumed`.
   The core already refuses actions while paused (423); the variable is for the plugin's own deferred work.
+- **Event subscriptions** (within contract 3) — `<agenthub.subscribe>plugin-id:key-prefix — why</agenthub.subscribe>`
+  (up to 16; `*` instead of the id — every other plugin; an empty prefix — all keys). Only trusted (`builtin`, `official`,
+  `own`, test tier) **streamable** plugins; for others the core ignores the tag with a journal warning and the linter warns.
+  A permission of kind `subscribe` (needs a "why"; adding one is permission growth → consent again; `*` is a reviewer
+  warning). The core (`setEvents`) sends each raised/cleared matching event as `{"type":"event","plugin","key","state",
+  "title"?}` (`key` — the source's own key without `<id>:`, `title` — the sanitized row text, only on `raised`) and, every
+  time the subscriber's process starts, `{"type":"eventSnapshot","events":[{plugin,key,state:"raised",title?}]}` with
+  what matches now (≤ 500). At most 600 messages a minute per subscriber (the rest dropped, `subscribe-dropped` in the
+  journal). Hub events (`@hub:*`) are not delivered. Actions pressed over the socket by a plugin process (the server's
+  `peer.plugin`) are journaled with `byPlugin` (`action`, `action-denied`, `action-confirm-requested`).
 - **Terminal: read the tab screen and type a line into the tab** of a Claude Code session — the `<agenthub.terminal>`
   permission (only `builtin`, `official`, `own`; for a community plugin it is a linter error, and the core refuses with
   `terminal:untrusted`). Entries:
@@ -534,28 +672,59 @@ the whole metadata line with " — why", `why: null` (`indexPermissions` in `lib
 explanation — one index installs on both. The plugin formats numbers and dates itself: RU «1,2 млн», «05.11 11:00»,
 «пн»; EN "1.2M", "Nov 5, 11:00", "Mon".
 
+**Content in any language (contract 3 additive).** The hub UI stays ru/en (a third UI language is out of scope).
+`lang` (and the `title-xx`/`cost-xx`/`input-xx` suffixes) take any BCP-47 tag (`de`, `pt-BR`, `zh-Hant`; stored in
+canonical case); a malformed code is a metadata warning (journal, linter) and the tag is skipped. The core passes
+`AGENTHUB_LOCALE` — the system preferred languages, BCP-47, in order (`Settings.systemLocales`, reserved like
+`AGENTHUB_LANG`) — and picks a metadata translation (title, description, statuses, push labels, connections, actions, the
+catalog's and consent window's titles and "why") by the chain in `lib/i18n.mjs` `contentLang`: the hub language if the
+plugin has it → the system languages up to the first ru/en one → the base text. For existing ru/en users nothing changes:
+a ru (or en) system stops the chain at its own language, which step 1 already decided.
+
 **Plugin tier (`tier`)** — `own` (2026-11-09: an own plugin from a local folder whose installation a human confirmed in
 the pinned app; a copy in `Plugins/<id>`, a `plugins.lock` entry with `tier: "own"` and `own.path` — only the manager
 writes it, after the consent window; it never becomes official and has no registry archive or attestation), `builtin`
-(the app's directory: claude-sessions, agents, quota), `official` / `community` (installed by the manager; which one is
+(the app's directory: claude-sessions, agents, quota, spend), `official` / `community` (installed by the manager; which one is
 decided by the signed catalog at check time: official only while the index names the id official with the same archive
 sha256 as in `plugins.lock` and the files on disk are exactly that archive; a lock entry by itself gives no tier),
 `local` (`Plugins/local`). Plugin metadata does not affect the tier (an `<agenthub.tier>` tag is just an unknown tag).
-`trusted` = `builtin`, `official` or `own` (`trustedPlugin` in `core.mjs`): only these get `<agenthub.action>` from the
-core (for `own` — as for official: without network and without a price, the declared level, including `immediate`), push
-rules, service variables (`AGENTHUB_USAGE_FILE`, `AGENTHUB_HUB_SOCKET`, `AGENTHUB_CLAUDE_SESSIONS_FILE`, `$VARIABLE` in
+`trusted` = `builtin`, `official` or `own` (`trustedPlugin` in `core.mjs`; a test-tier local plugin counts as `own`): only
+these get `<agenthub.action>` at the declared level (for `own` — as for official: without network and without a price,
+including `immediate`; `community` gets actions too, never below `confirm`), their own push rules in full (`community` —
+`kind="plugin"` labels only), service variables (`AGENTHUB_USAGE_FILE`, `AGENTHUB_HUB_SOCKET`, `AGENTHUB_CLAUDE_SESSIONS_FILE`, `$VARIABLE` in
 `<agenthub.watch>` and `<agenthub.fsRead>`), writing to the session registry and MCP calls through the hub.
 
-**Plugin actions.** Only for `builtin`, `official` and `own`. For non-built-in ones — only from the app (class `app`, at
-any level: `offer.appOnly`); with declared network access or a price on the action (`cost=`, `cost-<lang>=`) — at least
-`confirm-cost`; for an official plugin without network the core keeps the declared level, including `immediate` — no
+**Plugin actions.** For `builtin`, `official`, `own` and (hub 0.1.3+) `community` — never below `confirm` for community;
+`local` has none (a test hub with `AGENTHUB_TEST_TIER=own` gives local plugins the own tier). For non-built-in ones —
+only from the app (class `app`, at any level: `offer.appOnly`); with declared network access or a price on the action
+(`cost=`, `cost-<lang>=`) — at least `confirm-cost`, except an action with `net="none"` (it promises no network: the
+network floor is lifted for it alone; part of the permission key, checked by the reviewer); for an official plugin without network the core keeps the declared level, including `immediate` — no
 confirmation window (decision 2026-11-09: for example, a mode toggle; the linter flags every such action for the
 registry reviewer — [`plugins-registry.md`](plugins-registry.md)); otherwise a confirmation whose text the core writes.
 A run at any level is journaled (`type=action`). Changing the level changes the permission
 (`actions: <id> [<level>] <command>`): lowering it in an update is a permission increase, with a consent window. The
 command is split into argv **without a shell** (quotes, `\`, `~/`); the first word is the name of the plugin's main file
 (`my-tool.30s.mjs --action stop`) — it runs with the same interpreter as the plugin. cwd is the plugin directory, the
-environment is the same as the plugin's, the timeout is 30 s.
+environment is the same as the plugin's, the timeout is 30 s. The confirmation text ends with the sanitized title of the
+row that carries the button ("Button on the row "…"", ≤ 120 graphemes).
+
+**Input actions:** `input="placeholder"` (`input-<lang>=`, `maxLength=` 1…4000, default 256), always with `arg=` — the
+value is typed by a human in the app (`offer.input`), not printed by the plugin (an `arg=` on the line is refused). The
+core checks it with the same rules as an argument (pattern, control and format characters, a leading `-`) and the
+action's `maxLength`, and writes it to the action's **stdin** (the text, `\n`, EOF); argv is the static command (a
+`{name}` word is dropped). App only for every tier; the journal and `actionResult` carry only `inputLength`.
+
+**Background actions:** `background="true"` — the command is a job: its own process group, no timeout, stdout keeps
+only an 8 KB tail (for `reason=`/`message=`), at most `plugins.maxJobsPerPlugin` (4) per plugin. `/state.plugins[].jobs`,
+the idle verdict and `facts.runningActions()` list it; `job-start`/`job-exit` in the journal; `job.started`/`job.exited`
+on the bus. The end goes to the plugin: `{"type":"jobExit","job","actionId","ok","code","signal","durationMs",
+"cancelled"?,"reason"?,"message"?}` to a streamable process, an extra run with `AGENTHUB_REFRESH_REASON=JobExit` to a
+standard one. Stopped by `job.cancel` (app), the hub pause, removing/disabling/updating the plugin and the daemon
+stopping; **not** by a restart of the streamable process (language, pause flag, `ctx.restartPlugin`). A `jobExit` that
+comes while that process restarts is delivered to the new one, and each start of a plugin with background actions begins
+with `{"type":"jobs","running":[…]}`. The job ends when its first process exits (the rest of its group is killed; a
+`setsid` descendant holding stdout can't keep it alive); running jobs are kept in `<home>/jobs.json` so the next daemon
+kills those a crashed daemon left behind ([`writing-plugins.md`](writing-plugins.md) 5.2).
 
 **A parameterized action:** `arg="taskId:^[A-Za-z0-9_-]{1,64}$"` (name `[A-Za-z][A-Za-z0-9_]{0,31}`, a pattern with
 `^` and `$`, up to 200 characters; otherwise the action is dropped with a warning). In the output —
@@ -576,8 +745,8 @@ the shell writes "the plugin refused (<code>)" — the hub has no texts of its o
 **Plugin environment:** `HOME`, `PATH` (as for agents under launchd:
 `~/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin`), `TMPDIR`, `LANG`, `USER`,
 `AGENTHUB_PLUGIN_ID`, `AGENTHUB_PLUGIN_DATA_PATH`, `AGENTHUB_PLUGIN_CACHE_PATH`, `AGENTHUB_LANG` (`ru|en` — the hub UI
-language), `AGENTHUB_REFRESH_REASON`
-(`FirstLaunch|Schedule|FileChanged|MenuAction|Manual|LanguageChanged|Paused|Resumed`), `AGENTHUB_PAUSED` (contract 3:
+language), `AGENTHUB_LOCALE` (the system preferred languages, BCP-47, comma-separated, may be empty), `AGENTHUB_REFRESH_REASON`
+(`FirstLaunch|Schedule|FileChanged|MenuAction|Manual|LanguageChanged|Paused|Resumed|SecretChanged|JobExit`), `AGENTHUB_PAUSED` (contract 3:
 `1` — the hub is paused, `0` — it is not; always passed, see above), `OS_PLATFORM`, `OS_VERSION_MAJOR|MINOR|PATCH`,
 `OS_APPEARANCE`, `OS_LAST_SLEEP_TIME`, `OS_LAST_WAKE_TIME` (ISO), `AGENTHUB_SECRET_*` for declared secrets; **only for
 built-in, official and own plugins** — core service variables (`ctx.providePluginEnv`): `AGENTHUB_USAGE_FILE` — the path
@@ -585,7 +754,7 @@ to the hub quota cache `<home>/Cache/usage.json` (the `usage` service; no variab
 `services.usage.enabled = false`: the plugin shows "quota unavailable" and does not look for the file itself; the
 permission is declared as `<agenthub.fsRead>$AGENTHUB_USAGE_FILE — why</agenthub.fsRead>`); `AGENTHUB_HUB_SOCKET` — the
 hub socket (contract 3: always; previously only with the `oauth` service): the plugin calls
-`POST /connections/<id>/mcp` and gets the MCP tool result without a token (the core checks the process pid, trust and
+`POST /connections/<id>/mcp` (or `/http` for a `type="http"` connection) and gets the result without a token (the core checks the process pid, trust and
 the declared `<agenthub.net>` against the service host; the core enforces rate and limits), and with the
 `<agenthub.terminal>` permission — `POST /terminal/read-screen|send-text`; `AGENTHUB_CLAUDE_SESSIONS_FILE` (contract 3) —
 the path to `<home>/Cache/claude-sessions.json` (the `sessions` service; no variable — the hub is older or the service is
@@ -593,19 +762,25 @@ off: the plugin lives without this data). On Windows also `USERPROFILE` (= `HOME
 the system `SystemRoot`, `windir`, `COMSPEC`, `PATHEXT`, `TEMP`, `TMP`. Nothing else (no `NODE_OPTIONS`).
 
 **Output:** the header is everything before the first `---`, the body after it; `Title | k=v k2="v 2"` (the separator is
-the last `|`, with only parameters to its right); `--` is a nesting level; `---` in the body is a separator. Parameters:
+the last unescaped `|`, with only parameters to its right; a split whose right side has an unquoted value with a quote
+character loses to a clean split further left); `--` is a nesting level; `---` in the body is a separator. Title
+escapes (hub 0.1.3): `\|` (an odd backslash run before `|`) is a literal `|`, the run shows halved; a leading
+backslash run followed by `-`/`~` loses one backslash — foreign text escaped with `escapeTitle` (`daemon/lib/output.mjs`,
+[`writing-plugins.md` 4.1](writing-plugins.md#41-lines)) can't add parameters. `/state` carries titles already
+unescaped. Parameters:
 
 | Parameter | Meaning |
 |---|---|
 | `status=ok\|wait\|block\|error\|unknown` | in the header; the worst header status is the plugin status. None — `ok`; empty output — `unknown` |
 | `tileLabel="…"` | in the first header line: a short popover tile caption instead of the plugin name (the tile holds one line of ~110 pt): "Agents" instead of "Background agents". None — the plugin name |
 | `tile="…"` | in the first header line: a short value for the popover tile and the panel badge: what is happening ("04:30", "2 waiting", "62%", "1 problem"), not "!" — the status icon shows alarm; the header as a whole answers "do I need to do anything" in plain words |
-| `activity="…"` | in the header, **any plugin tier** (this is not a permission): "work is in progress here" — for the hub's "can I shut down" verdict (`/state.idle`, the idle service): "Run "m81-gold" running, 12 min". Not to be confused with `status=wait` ("waiting/attention"). An empty value (`activity=""`) means "I take part in the check, all quiet here": the plugin goes into "Also checked"; no key — the plugin does not take part in the verdict. Every header line may carry its own phrase; the first 4 distinct ones are taken. The phrase is cleaned (Unicode control and format characters — bidi, zero width, U+2028/2029 — and newlines → a space, except ZWJ between emoji; at most 3 combining marks per grapheme; whitespace collapsed) and cut to 120 graphemes (with "…"). Phrases of plugins that are neither built-in nor official are shown by the hub with a "<plugin name>: " prefix (unless the phrase already starts with it) and never in the card title. A failed plugin (exit ≠ 0, timeout, empty output; `status=error` with a normal exit is a domain error, not a failure) or a silent one (no frame for more than 3 intervals, at least 2 min) is shown as "<plugin>: failure — last: <phrase> (HH:MM)" rather than the phrase as is; an empty frame with an error (exit ≠ 0 without output) does not erase the last phrases. **A streamable plugin** with non-empty `activity=`/`needsOn=` repeats its frame at least every 2 min (the built-in agents — every minute): silent for more than 5 min counts as hung. Not understood in the body: the warning `parameter activity= is understood only in the header` (in the hub language). Does not go into `params`; in the plugin state — `activity: string[] \| null` |
+| `activity="…"` | in the header, **any plugin tier** (this is not a permission): "work is in progress here" — for the hub's "can I shut down" verdict (`/state.idle`, the idle service): "Run "m81-gold" running, 12 min". Not to be confused with `status=wait` ("waiting/attention"). An empty value (`activity=""`) means "I take part in the check, all quiet here": the plugin goes into "Also checked"; no key — the plugin does not take part in the verdict. Every header line may carry its own phrase; the first 4 distinct ones are taken. The phrase is cleaned (Unicode control and format characters — bidi, zero width, U+2028/2029 — and newlines → a space, except ZWJ between emoji; at most 3 combining marks per grapheme; whitespace collapsed) and cut to 120 graphemes (with "…"). Phrases of plugins that are not trusted (builtin, official, own) are shown by the hub with a "<plugin name>: " prefix (unless the phrase already starts with it) and never in the card title. A failed plugin (exit ≠ 0, timeout, empty output; `status=error` with a normal exit is a domain error, not a failure) or a silent one (no frame for more than 3 intervals, at least 2 min) is shown as "<plugin>: failure — last: <phrase> (HH:MM)" rather than the phrase as is; an empty frame with an error (exit ≠ 0 without output) does not erase the last phrases. **A streamable plugin** with non-empty `activity=`/`needsOn=` repeats its frame at least every 2 min (the built-in agents — every minute): silent for more than 5 min counts as hung. Not understood in the body: the warning `parameter activity= is understood only in the header` (in the hub language). Does not go into `params`; in the plugin state — `activity: string[] \| null` |
 | `needsOn="…"` | in the header, any tier: "I will need the computer on later" — "Build at 04:30 — needs the Mac on". needsOn and nothing else gives the `quiet-needs-on` verdict ("OK, but …"). Keep it short: the shell puts the part before " — " into the card title ("OK, but build at 04:30"; only for built-in, official and own plugins, for others — "OK, but not everything will run"). The same limits, cleaning and empty-value rules as for `activity=`; the key is case-insensitive (`needson=`). In the plugin state — `needsOn: string[] \| null` |
 | `effect="<primitive> <arg>…"` | offer a primitive; an argument is `key=value` or positional (`effect="open.url https://…"`) |
 | `action=<id>` | an action from `<agenthub.action>`; `arg=<value>` — the argument of a parameterized action |
 | `href=<url>` | the same as `effect="open.url <url>"` |
-| `event=<key>` | an event for push: the core sends `event.raised` when the key appears and `event.cleared` when it disappears (the bus key is `<pluginId>:<key>`) |
+| `event=<key>` | an event for push: the core sends `event.raised` when the key appears and `event.cleared` when it disappears (the bus key is `<pluginId>:<key>`). `event.raised` carries `title` — the sanitized text of the first row with that key (≤ 120 graphemes) when it has one. Subscribed plugins get it on stdin (`<agenthub.subscribe>`, below) |
+| `agentSession=<id> pid=<pid>` (+ `agent=<kind>`, `agentName="…"`) | another agent's session (within contract 3): only from builtin, official and own (and the test tier) — otherwise ignored with a warning. `<id>` — `[A-Za-z0-9][A-Za-z0-9._-]{0,63}`; the process must exist, its start time is recorded; no signature check. The core keeps it apart from the Claude registry (`/state.externalSessions`, the `sessions.external` event); the entry goes when the line disappears, the process ends or the plugin is removed; an id is held by the first plugin while its process lives. Only `session.focus` works for it (the terminal layer's `locate()` by the pid); `session.interrupt`/`session.stop` → `facts:external-session`, `/terminal/*` → `terminal:external-session` |
 | `session=<sessionId> pid=<pid>` | a line about a Claude Code session: the core verifies the pid signature and writes `session: {id, pid, verified, label?}` into the item (`verified: false` → `label` in the hub language: «подпись не подтверждена», «подпись не проверить: Claude Code обновился»); verified ones go to the registry, but only from builtin, official and own (community and local do not change the session registry) |
 | `sessionStatus=busy\|waiting\|idle`, `waitingFor=…`, `sessionName=…`, `sessionCwd=…`, `surfaceId=…`, `workspaceId=…` | session data for the registry |
 | `sessionEffort=low\|medium\|high\|xhigh\|max`, `sessionUltracode=true\|false` | the effort of the last turn and ⚡ultracode (claude-sessions — from metadata fields of the transcript tail); an unknown value is dropped; in `/state.sessions[].effort`/`ultracode` |
@@ -618,15 +793,33 @@ the last `|`, with only parameters to its right); `--` is a nesting level; `---`
 | `segment=true`, `select=true`, `selected=true` | hub 0.1.1: the line's children are the options of a segmented control (one track, the `selected=true` child highlighted) or a popup button (the current child with a chevron, a menu of all children with their `note=` dimmed); the other children carry offers; `note=` on the line — gray text beside the control. A segment that does not fit the width is drawn as a popup button |
 | `toggle=on\|off` | hub 0.1.1: a switch in that state; a click runs the line's own offer (the plugin flips the state in its next frame) |
 | `table=true`, `columns="A¦B"`, `cells="b¦c"`, `cellColors="¦#RRGGBB"`, `icon=true`, `group=true`, `header=true` | hub 0.1.1: the line's children are ~34 pt table rows — the title is the first column, `cells=` the others, `cellColors=` a color per cell (empty — default), `sfimage`/`iconColor` (or `status`) a state dot; a row's children with an offer are buttons on its right (`icon=true` — icon only, the title as tooltip and accessibility label), without an offer — gray notes; a `group=true` child is a collapsible subheading whose children are rows; a direct child with an offer and `header=true` is a button by the table title. `¦` (U+00A6) separates entries, empty entries keep their place |
-| anything else (`color`, `iconColor`, `sfimage`, `badge`, `badgeColor`, `link`, `tooltip`, `font`, `size`, …) | styling, passed as is in `params`. The panel uses: `color` (title and icon, on every nesting level), `iconColor` (icon only), `badgeColor` (badge tint), `link=true` (an offer line drawn as a text link, not a capsule; same gate and confirmation). Older hubs ignore keys they do not know — no contract bump (contract 3) |
+| `chart=bars`, `values="v1,v2"`, `labels="a¦b"`, `valueLabels="…"`, `avg=`, `avgLabel=`, `highlight=last\|<index>`, `tint=none`, `tips="…"`, `height=`, `unit=`, `stack="a,b"`, `series="a1,a2;b1,b2"`, `colors="#hex,#hex"`, `legend=true` | hub 0.1.3: a bar chart card — one bar per value (or stacked layers per series, a visible layer at least 2 pt), `labels` under the bars, `valueLabels` above them, a dashed average line with its caption (bars above it tinted orange unless `tint=none`), the `highlight` bar in the plugin color or `color=`, a hover tooltip per bar (`tips`: `¦` between entries, the two characters `\n` — a line break inside one). A `segment=true`/`select=true` child sits in the card's title row; other children are drawn under the chart. `note=` — gray text right of the title |
+| `chart=share` with children carrying `value=` (`note=`, `color=`) | hub 0.1.3: one rounded bar of the children's shares and a legend: dot · title · percent · `note=` on the right. No positive value — a plain line |
+| `bar=<0…100>`, `barColumn=<n>` | hub 0.1.3: a thin progress bar on a body line (title, `note=` right, the bar under them; `color=` tints the bar) or a table row (`barColumn=` on the table or the row, 1-based with the title column as 1: the bar in that column with the cell text beside it; without it — a hairline under the title) |
+| `max=<number>` (on `chart=bars`) | hub 0.1.3: a fixed scale top — bars above it are clipped, an `avg=` above it is not drawn. Without it the scale autoscales to the tallest bar or `avg=`, whichever is higher. Non-positive or broken — ignored |
+| `spark="v1,v2"`, `sparkAvg=`, `sparkMax=`, `sparkLabel=`, `sparkNote=` | hub 0.1.3, first header line: a bar sparkline (the last bar in the plugin color). On the plugin page the header becomes a hero — `stat=` caption, the `tile=` value large, `note=` and the other header lines under it, the sparkline with its captions and a dashed average on the right; the popover tile draws it in its icon row |
+| `until=<ISO-8601>` | hub 0.1.3, first header line: a countdown the app runs itself in the tile and the page header (`mm:ss`, from an hour `h:mm:ss`, stops at `00:00`); give a time zone; unparsable — ignored; keep a `tile=` for older hubs |
+| anything else (`color`, `iconColor`, `sfimage`, `badge`, `badgeColor`, `link`, `tooltip`, `font`, `size`, …) | styling, passed as is in `params`. The panel uses: `color` (title and icon, on every nesting level), `iconColor` (icon only), `badgeColor` (badge tint), `link=true` (an offer line drawn as a text link, not a capsule; same gate and confirmation), `font=mono` (hub 0.1.3: the title in a monospaced font; other `font=` values are ignored). Older hubs ignore keys they do not know — no contract bump (contract 3) |
 
 A non-zero exit code → status `error` (the output items are kept) and the `plugin-error` event. A standard timeout
 (5 s) → the whole process group is killed, `error: "timeout"`. More than 1 MB of output → `output-too-large`.
 
 **streamable:** a long-lived process; **a frame ends with a `~~~` line** (print the frame, then `~~~`). Stdin gets
 NDJSON: `{"type":"fileChanged","path":…}` (per `<agenthub.watch>`), `{"type":"refresh","reason":…}`,
-`{"type":"actionResult","id":…,"actionId"|"primitive":…,"ok":…,"code":…}`, `{"type":"inbound",…}` from extensions.
-If it crashes — restart with a 1 s → 60 s backoff, status `error` until the next frame.
+`{"type":"actionResult","id":…,"actionId"|"primitive":…,"arg":…,"ok":…,"code":…}` (`arg` — the checked argument or
+`null`; `inputLength`, `job` when they apply), `{"type":"jobs","running":[…]}` and `{"type":"jobExit",…}`, `{"type":"inbound",…}` from extensions,
+`{"type":"event","plugin","key","state":"raised|cleared","title"?}` and `{"type":"eventSnapshot","events":[…]}` (event
+subscriptions, below), and
+`{"type":"stopping","reason":"restart|updated|policy|removed|shutdown","cause"?}` right before the core stops it (stdin is
+then closed; SIGTERM 200 ms later, SIGKILL a second after). If it crashes — restart with a 1 s → 60 s backoff, status
+`error` until the next frame; the environment is built again for every restart. `plugin` events of one plugin reach SSE
+at most every 250 ms (`plugins.emitMinIntervalMs`), always with the latest state; the first change after a quiet period
+and the first frame after an action or a job's end go out at once.
+
+**Process lifecycle.** Every run, streamable process and action runs in its own process group; when it ends or times
+out the core kills the whole group, so children left behind die with it (a long task is `background="true"`). A restart
+of the streamable process (language, pause, `ctx.restartPlugin`) kills its group too — background jobs are separate
+groups and survive it.
 
 **watch:** a path or a mask in the last segment (`~/.claude/sessions/*.json`); 300 ms debounce. If the path does not
 exist but its parent directory does — the directory is watched by name (a file appearing triggers a run right away); if
@@ -637,12 +830,18 @@ from the same `ctx.providePluginEnv` variables that go into the plugin environme
 official and own plugins**; for others, and when the service is off, the entry is skipped (a warning in the journal) and
 the plugin lives by the interval from its file name. This is how the built-in quota (`quota.5m.mjs`) and any trusted
 plugin with such an entry run right after the usage service writes the quota cache; the interval is a fallback.
+`$AGENTHUB_PLUGIN_DATA_PATH` and `$AGENTHUB_PLUGIN_CACHE_PATH` (the plugin's own directories, created before the watch
+starts) are substituted for **every** tier. `~` is the plugins' HOME — the same as in their environment
+(`AGENTHUB_PLUGIN_HOME` on a test bench). `<agenthub.watch recursive="true">` also watches subdirectories (`fs.watch`
+recursive: macOS, Windows, Linux with Node ≥ 20); a mask then matches the file name at any depth, and `fileChanged` carries
+the full path. The attribute is optional: an older hub watches the top level only (`meta.watchRecursive` keeps those
+entries; the permission key is unchanged).
 
 An unknown source shape → the plugin itself prints `status=unknown` and `event=source-broken`.
 
 **`event=` keys** — pick them from the shared push table ([`daemon/lib/push/README.md`](../daemon/lib/push/README.md))
-or describe your own rule with a `<agenthub.push key="…">Label</agenthub.push>` tag (taken only from `builtin`,
-`official` and `own`): the rule is chosen by key, an instance suffix goes after `:` (`session-waiting:<sessionId>`,
+or describe your own rule with a `<agenthub.push key="…">Label</agenthub.push>` tag (taken in full from `builtin`,
+`official` and `own`; from `community` only `kind="plugin"` rules, key and label): the rule is chosen by key, an instance suffix goes after `:` (`session-waiting:<sessionId>`,
 `build-done:<YYYYMMDD>`). The title of the line with `event=` goes into the notification — metadata only. The
 `kind="sessions|updates|problems|other|plugin|security"` attribute assigns the event to a switch in "Settings →
 Notifications"; without it — the kind of the core rule with the same key, otherwise "other". `kind="plugin"` (contract
@@ -676,6 +875,23 @@ makes offers for the toggle line and for children at any depth, as for any line.
 bump — a hub 0.1.0 ignores the keys and draws the children as plain lines and capsule buttons (a toggle — as a button
 with its title), so a plugin keeps `<agenthub.contract>3` and its output stays usable on both. Write the titles so that
 the fallback reads well too ("Ultracode: off").
+
+**Charts within contract 3 (hub 0.1.3).** `chart=`, `bar=`, `barColumn=`, `spark=` and their companion keys
+(`values`, `labels`, `valueLabels`, `avg`, `avgLabel`, `highlight`, `tint`, `tips`, `height`, `unit`, `stack`, `series`,
+`colors`, `legend`, `value`, `sparkAvg`, `sparkLabel`, `sparkNote`) are plain params as well: the core passes them as is
+(the data keys `values`, `labels`, `valueLabels`, `tips`, `series`, `spark` up to 8000 characters, the rest up to
+2000; a longer data key keeps its newest entries — the lists of one chart line lose the same count from the start,
+with a journal warning), no contract bump. An older hub ignores them and draws the lines as plain text — a chart line as its title with its
+children as lines, a `bar=` line as its title, the header as before. Numbers are plain decimals (`1234.5`, no exponent, no
+thousands separator); lists are comma-separated, text lists `¦`-separated.
+
+**Other additions within contract 3 (hub 0.1.3).** All optional, ignored by an older hub: title escapes (`\|`);
+action attributes `input=`, `net="none"`, `background="true"`; community actions and `kind="plugin"` push rules;
+`<agenthub.subscribe>`; `<agenthub.connection type="http">`; `<agenthub.watch recursive="true">`; `agentSession=` lines;
+`until=`, `font=mono`, `max=`, `sparkMax=`; `lang` in any BCP-47 tag and `AGENTHUB_LOCALE`; `actionResult.arg`,
+`{"type":"jobExit"}`, `{"type":"stopping"}`; `event.raised.title`; banner buttons and click target (`push.notify`
+`actions`, `href`). A plugin that relies on one of them keeps `<agenthub.contract>3</agenthub.contract>` and should read
+on an older hub as the fallback each item describes.
 
 **Contract 3 and version 2 hubs.** A version 2 hub sees `<agenthub.contract>3` and refuses with "requires a newer hub" —
 so a plugin that cannot live without session metadata or the pause flag only needs to declare 3. A plugin that declared

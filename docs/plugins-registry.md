@@ -37,6 +37,42 @@ the shell setting "Check for plugin updates" (`PUT /settings/plugin-updates`, ap
 hour, at the top end no longer than 90 days; delays longer than the `setTimeout` limit are waited out in parts).
 `indexUrl` may be a path or `file://` (a mirror, tests); network access is `https://` only.
 
+### Several registries
+
+```json
+{ "services": { "plugins": {
+    "indexUrl": "https://…/index.json", "publicKey": "…",
+    "registries": [
+      { "name": "team", "indexUrl": "https://team.example/agenthub/index.json", "publicKey": "…", "trust": "community" },
+      { "name": "corp", "indexUrl": "https://corp.example/index.json", "publicKey": "…", "trust": "official" }
+    ]
+} } }
+```
+
+- The scalar `indexUrl`/`publicKey` pair keeps working: it is the registry **`default`** with trust `official`, and it
+  comes first. `registries[]` follow in order (or stand alone, without the scalar pair). `name` — `a-z`, `0-9`, `-`,
+  starting with a letter, up to 32, unique (`default` is taken by the scalar pair); `trust` — `official` (the index may
+  name plugins official) or `community` (the default: every entry is `community` whatever the index says, marked
+  `capped: true`). At most 8 registries; an invalid entry is skipped (journal `registry-config-changed {invalid}`).
+- **Each registry is verified with its own key** and has its own files: `default` — `Registry/index.json(.minisig)`,
+  `state.json`, `attest/` as before; others — `Registry/sources/<name>/…`. Rollback protection is per registry.
+  `POST /registry/fetch` downloads all of them: with one registry its error is the response (as before); with several,
+  the response is `200 {generatedAt, plugins, blocklist, registries: [{name, ok, error?, generatedAt?, plugins?}]}` unless
+  every one failed, and a failed registry keeps its last verified catalog.
+- **The same id in two registries:** the catalog shows the entry of the **earlier** registry (config order, `default`
+  first); the later one is hidden, listed in `GET /registry/catalog → shadowed: [{id, registry, by}]` and journaled once
+  (`registry-shadowed`). An installed plugin is **pinned to the registry it came from** (`plugins.lock` entry `registry`;
+  entries from before — `default`, or the first registry if there is no `default`): updates, officialness, attestations
+  and the catalog card follow that registry only, so an earlier registry that later lists the same id never takes over an
+  installed plugin. Moving a plugin to another registry = remove and install again.
+- **Blocklists:** a registry's blocklist applies to its own plugins; the blocklist of a registry with trust `official`
+  applies to every plugin (and to `Plugins/local`) — the hub's kill switch.
+- **Fields for the shell:** `GET /registry/catalog` → `registries: [{name, trust, label, configured, missing, generatedAt,
+  fetchedAt, plugins, error, tierLabel}]`, `shadowed`; every catalog plugin, installed entry, update item and consent
+  window carries `registry`, `registryLabel` and (except updates) `tierLabel` — e.g. "official plugin · corp" in the hub
+  language. `registryLabel` is `null` while only the `default` registry is configured, so a single-registry hub looks
+  exactly as before. `/state.plugins[]` of an installed registry plugin — `registry`, `registryLabel`.
+
 ## What lives where (state directory)
 
 | Path | What |
@@ -72,7 +108,7 @@ Permissions window (`428`): `{error:"consent-required", needsConsent:true, token
 version, fromVersion, update, sha256, icon, permissions:[{kind, what, why, added, risk?}], added:[…]}` (`icon` is the
 `<agenthub.icon>` of the plugin being installed: the window tile is drawn from the declaration; `risk` — contract 3: an
 `fsWrite` entry to a place where Claude Code or the system can be hijacked, the kind of place is
-`claude-code | autostart | shell | bin | ssh | git | hub` — the window shows such a permission first, as a red line
+`claude-code | autostart | shell | bin | terminals | ssh | git | hub` — the window shows such a permission first, as a red line
 "Hijack location…" with an explanation; `risk` is not part of the permission key). The app shows the permissions with
 their "why" (new ones are marked `added`) and repeats the request with `consentToken`. The token is single-use and bound
 to the id, the archive and the app pid; a new catalog arriving while the window is open gives
@@ -90,8 +126,9 @@ Errors: `registry:no-index-url`, `registry:no-public-key`, `registry:foreign-key
 status comes from the `tier` of the signed index), `registry:blocklist`, `registry:platform`, `registry:id-taken` (a
 built-in id), `consent:invalid`, `estop` (423, installation only), `registry:disabled` (503, the service is not
 running), `registry:hub-too-old` (409, + `need`, `have`: the plugin needs a newer contract than the hub has — from the
-archive's `<agenthub.contract>` or the index entry's `contract`; checked before permissions and the linter, the text is
-"requires a newer hub", not a linter error).
+archive's `<agenthub.contract>` or the index entry's `contract`, including a `features` entry this hub does not know
+(`need: null`, `features`: the unknown ones — see "Contract 3 additions after hub 0.1.2" below); checked before
+permissions and the linter, the text is "requires a newer hub", not a linter error).
 
 ## Policy for the core
 
@@ -127,11 +164,25 @@ runs.
   the last verified catalog (`registry-rejected`), and a catalog pair on disk that does not verify (another process is
   halfway through writing it, or a damaged file) does not replace the verified one already in memory
   (`registry-cache-rejected`). A daemon that starts without any verified catalog treats registry plugins as community
-  and journals nothing until it has one. The core allows `<agenthub.action>` only for `official` (and
-  built-in) plugins; for an official plugin without declared network access and without a declared price the action is
-  as declared, including `immediate` (no window, from the app only; 2026-11-09); with network access or `cost=` (in any
-  language, `cost-en=` too) — at least `confirm-cost` (linter: `immediate` with network or `cost=` is an error). Plugin
-  metadata does not affect the tier.
+  and journals nothing until it has one. The core allows `<agenthub.action>` for `builtin`, `official`, `own` and
+  (hub 0.1.3+) `community` plugins; for an official plugin without declared network access and without a declared price
+  the action is as declared, including `immediate` (no window, from the app only; 2026-11-09); with network access
+  (unless the action declares `net="none"`) or `cost=` (in any language, `cost-en=` too) — at least `confirm-cost`
+  (linter: `immediate` with network and without `net="none"`, or with `cost=`, is an error). A community action is never below `confirm` (the linter warns about
+  `immediate`), always from the app, always journaled. Plugin metadata does not affect the tier.
+  **Community actions and push rules (hub 0.1.3+).** The linter accepts them with warnings for the reviewer
+  (`check.sh`: "! <agenthub.action>: community plugin actions…"): **the reviewer checks every command does exactly what
+  its `title` says**, nothing irreversible hides behind a vague title, and the row that carries the button names the
+  thing acted on (the core quotes that row in the confirmation window). Community `<agenthub.push>` rules count only with
+  `kind="plugin"` and only their label: the banner shows the reviewed label and the row text — **the reviewer reads every
+  label and checks the rows with `event=` carry no foreign or secret text** (foreign text escaped, see below). `quiet`, `away`,
+  `hold`, `cooldown` and other kinds are ignored (a linter warning).
+  **`net="none"`, `background="true"`, `input=` (hub 0.1.3+)** — each is a warning for the reviewer: `net="none"` lifts
+  the network floor for one action, so **the reviewer checks the command reaches no host** (itself or through programs
+  it starts); `background="true"` runs without a timeout, so **the reviewer checks the job ends by itself and on SIGTERM
+  and spends no more than its title says**; `input=` hands the human's text to the command on stdin, so **the reviewer
+  checks it is treated as data** — no `eval`, no shell, no splicing into commands or URLs without encoding. `net=none`,
+  `background` and `input` are part of the action's permission key (adding one in an update asks for consent again).
   **The registry reviewer checks every `immediate` action for a price.** "No network and no `cost=`" does not mean
   "free": an action may start a runner, agents or turn on daily quota spending (for example, a runner plugin's mode
   switch), and the core will run it on a single click. The linter flags every such action with a warning (`check.sh`:
@@ -163,6 +214,23 @@ runs.
   never types those), so look more strictly: where does the line come from, and can foreign text inject it. In the
   permissions it is the `terminal` kind (`permissions.terminal: [{what, why}]` in the index; an empty list is not
   written), and `send` has `risk: "terminal"`: the consent window shows a red line "Typing into Claude Code sessions".
+- **Event subscriptions (2026-11-12).** `<agenthub.subscribe>plugin-id:key-prefix — why</agenthub.subscribe>` — another
+  plugin's events (key and row text) on the plugin's stdin; the core delivers them only to trusted (builtin, official, own) streamable
+  plugins (for community ones, and for `standard` ones, the linter warns that the tag is ignored), a malformed entry or
+  more than 16 is an error, "why" is required. `*:` (every plugin) is a warning: **the reviewer checks the plugin needs
+  them and treats the row text as data** — it never sends it anywhere or runs it. In the permissions it is the
+  `subscribe` kind (`permissions.subscribe: [{what, why}]`; an empty list is not written): adding one is permission growth.
+- **Foreign text in output (2026-11-12).** A plugin that prints text it doesn't control (log lines, PR or task titles,
+  tab, file and folder names, model names, error messages) last on a line lets that text add parameters after its own
+  `|` — `href=`, `event=`, the plugin's own `action=`/`arg=`. **The reviewer checks every place where such text reaches
+  a line**: titles go through an `escapeTitle` helper (`\|`, a guarded leading `-`/`~`, no line breaks; or `|` → `¦`
+  and the leading `-`/`~` stripped for hubs before 0.1.3), values are always double-quoted with `"`, `\` and `|`
+  escaped, and no foreign text is printed unquoted into a value or as a line of its own (`---`, `~~~`). Helpers and the
+  escape rules: [`writing-plugins.md` 4.1](writing-plugins.md#41-lines). A plugin that prints raw foreign text is sent
+  back, whatever its tier.
+- **Hub socket (2026-11-12).** Processes of community and local plugins — the plugin process, its action and their
+  children — get only `GET /health` and `GET /peer` on `hub.sock` (`403 peer:untrusted-plugin`, journaled; see
+  [`api.md`](api.md)). A community plugin whose README or code talks to the hub socket won't work and is sent back.
 
 ## Own sources (2026-11-09)
 
@@ -191,7 +259,7 @@ installation gives 423 (declining is still possible).
 
 **Folder checks** — the same as in registry CI: no symbolic links (neither outward nor inward), `README.md`, exactly one
 main file with a known interpreter (not binary), metadata without warnings, `lintPlugin` as for an official plugin
-(actions are allowed, `immediate` with network or a price is an error), forbidden places in all files of the copy,
+(actions are allowed, `immediate` with network — without `net="none"` — or a price is an error), forbidden places in all files of the copy,
 archive size limits. The walk is complete: more than 200 files (excluding dot files, including `test/` and `fixtures/`,
 as in CI) or more than 1000 entries is an error, not a truncated list; an unreadable main file is an error. Reading has
 no "checked — then read" race: `O_NOFOLLOW|O_NONBLOCK`, `fstat` of the descriptor — a regular file with the same inode as
@@ -225,8 +293,8 @@ fingerprint (sha256 of a list of "path — file sha256"), `archive: null`. Polic
 remembers the fingerprint of every own entry it wrote (path, content fingerprint, files, permissions) in daemon memory
 and in `Registry/own-approvals.json`. While the daemon runs, an entry in the consent file that it did not write gives no
 trust — only revocations are taken from the file (`agenthub plugins remove` from another process); at startup consents
-are read from the file. On a mismatch the plugin runs as **community** (no actions, own push rules or service
-variables), the blocklist applies to it, journal `plugin-own-unexpected`, event `plugins.own-unexpected` → the push
+are read from the file. On a mismatch the plugin runs as **community** (actions only at `confirm` and up, push rules
+only `kind="plugin"` labels, no service variables), the blocklist applies to it, journal `plugin-own-unexpected`, event `plugins.own-unexpected` → the push
 service: the security exception `@hub:plugin-own-unexpected:<id>` (like a pin change: immediately, during quiet hours,
 banner bypassing the shell), an orange `unverified` line in the manager, and the hub itself creates a request to
 re-confirm from the entry's folder (`reason: "unexpected"`; all permissions in the window are "new"). The limit is the
@@ -318,7 +386,7 @@ Bus: `plugins.catalog`, `plugins.installed`, `plugins.removed`, `plugins.blocked
 `plugins.updates`, `plugins.update-available`.
 
 Watching a service file in permissions: `<agenthub.watch>$AGENTHUB_USAGE_FILE — why</agenthub.watch>` — the core
-substitutes the path (only for `builtin` and `official`); the permissions window shows the variable name. Adding such a
+substitutes the path (only for trusted plugins: `builtin`, `official`, `own`); the permissions window shows the variable name. Adding such a
 watch in a new version is a permission increase: the update goes through the permissions window.
 
 ## Plugin contract 2 (2026-11-09): what the registry needs
@@ -346,3 +414,52 @@ side:
   as an error. The connection id is the plugin id or `<plugin id>.<name>`, and `url` uses a host name, not an IP address.
 - `connections` permissions are the same "permission increase" on update: a new connection or a new tool in its
   allowlist means a consent window (changing `interval`/`budget` does not: that is not access).
+
+## Contract 3 additions after hub 0.1.2 (2026-11-12): gating index entries
+
+The contract number stays 3, but these attributes were added after hub 0.1.2 shipped: `net="none"`, `background="true"`
+and `input=` on `<agenthub.action>`, actions of community plugins, `<agenthub.subscribe>`, `<agenthub.connection
+type="http">`, `<agenthub.watch recursive="true">`. Hub 0.1.2 does not know them. Depending on the attribute it either
+refuses the archive with an opaque error (`type="http"` changes the connection permission →
+`registry:archive-permissions`; community actions → `registry:lint`) or installs the plugin and runs it wrongly (a
+background job killed after 30 s, an input action with no way to get its text, no events, no subdirectories watched,
+confirm-cost instead of `net="none"`).
+
+**What hub 0.1.2 can be made to say.** It ignores unknown fields of an index entry (a `minHub` field would change
+nothing), and it reads `contract` strictly: an integer above 3 → "Requires a newer hub" with the number; anything that is
+not an integer 1…9999 → `contractUnknown`, also "Requires a newer hub" (`needsHub.need: null`, the app says the plugin
+needs a newer plugin contract), the version is not offered as an "available update", and installing it is refused with
+`409 registry:hub-too-old` — before the permission check. Raising the integer to 4 would mislead every newer hub too
+(the contract is frozen at 3), so the mechanism is the second branch: **an entry that uses any of these attributes
+writes `contract` as an object**
+
+```json
+"contract": { "version": 3, "features": ["background", "net-none"] }
+```
+
+Hubs from 0.1.3 on read the object: `version` is compared as before, and every `features` entry must be one this hub
+implements (`CONTRACT_FEATURES` in `daemon/lib/registry/perms.mjs`: `background`, `community-actions`,
+`http-connection`, `input`, `net-none`, `subscribe`, `watch-recursive`); an unknown feature is "Requires a newer hub"
+(`needsHub: {need: null, have: 3, features: [the unknown ones]}`). So every future optional addition gets a feature name
+instead of a contract bump, and older hubs refuse such entries with a clear text. Entries that use none of them keep the
+plain integer (or no field) and install on 0.1.2 as before.
+
+`indexContract(meta, {official})` in `perms.mjs` computes the field (`undefined`, an integer, or the object;
+`contractFeatures` lists the features). `official` is the tier the registry assigns: community actions are a feature,
+official ones are not.
+
+The permission key also changed for one attribute: `<agenthub.watch recursive="true">` is the permission
+`watch:<path> recursive` (the index and lock entries carry `recursive: true`), so an update that adds `recursive` is a
+permission increase with a consent window, not a silent widening. Index `permissions.subscribe` is shape-checked like the
+other kinds (`[{what, why}]`), and the terminal installer names the kind ("subscription").
+
+**Rollout** (in this order):
+
+1. Release the hub with this support (0.1.3) and let installs update.
+2. In `agent-hub-plugins`: `node scripts/sync-vendor.mjs` — the vendored `perms.mjs` gets `CONTRACT_FEATURES`,
+   `contractFeatures`, `indexContract` and the recursive watch key, `meta.mjs` the new attributes. Without the sync the
+   index of a plugin with a recursive watch or an http connection will not match its archive on new hubs.
+3. `build-index.mjs` writes `contract: indexContract(info.meta, {official: info.official})` instead of copying the integer
+   (`...(c !== undefined ? { contract: c } : {})`).
+4. Only then publish plugin versions that use these attributes. Hub 0.1.2 shows them as "Requires a newer hub"; versions
+   without them stay installable there.

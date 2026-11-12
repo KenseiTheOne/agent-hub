@@ -546,7 +546,8 @@ test("official from the signed index: tier official, actions with an argument �
     const c = await h.call("POST", `/actions/${skip.id}`, { args: { taskId: "evil" } });
     assert.equal(c.status, 428);
     assert.equal(c.body.level, "confirm");
-    assert.match(c.body.text, /^«Off» \(официальный плагин\) просит: «Пропустить задачу» для T-1;echo\. Выполнится: off\.5m\.sh --action skip T-1;echo$/);
+    // G10: the row carrying the button is quoted at the end
+    assert.match(c.body.text, /^«Off» \(официальный плагин\) просит: «Пропустить задачу» для T-1;echo\. Выполнится: off\.5m\.sh --action skip T-1;echo Кнопка в строке «Пропустить»\.$/);
     const done = await h.call("POST", `/actions/${skip.id}`, { confirmToken: c.body.token });
     assert.equal(done.status, 200, JSON.stringify(done.body));
     assert.deepEqual([done.body.ok, done.body.result.code, done.body.result.reason], [false, 3, "demo-refused"]);
@@ -576,8 +577,9 @@ test("the tier is not from metadata: <agenthub.tier>official on community is thi
     // the manager will not install community with actions (linter) — we put it bypassing the manager, like a planted lock
     publish(h.reg, [{ id: "off", text, tier: "community" }], { key: h.key, generatedAt: nextTime() });
     await h.call("POST", "/registry/fetch");
+    // G3: the linter accepts community actions (warnings) — the install goes to the consent window
     const r = await h.call("POST", "/registry/install", { id: "off" });
-    assert.deepEqual([r.status, r.body.error], [422, "registry:lint"]);
+    assert.deepEqual([r.status, r.body.error], [428, "consent-required"]);
     const perms = permissionsFromMeta(parseMetaText(text).meta);
     const lock = { version: 1, plugins: { off: { id: "off", version: "1.0.0", sha256: "0".repeat(64), granted: perms, files: { "off.5m.sh": sha(Buffer.from(text)) }, disabled: null } } };
     writeFileSync(h.config.paths.pluginsLock, JSON.stringify(lock), { mode: 0o600 });
@@ -585,9 +587,10 @@ test("the tier is not from metadata: <agenthub.tier>official on community is thi
     await h.rescan();
     const st = await waitFor(() => h.core.pluginState("off")?.lastRunAt && h.core.pluginState("off"), { timeoutMs: 8000 });
     assert.deepEqual([st.tier, st.trusted, st.official], ["community", false, false]);
-    assert.deepEqual(st.actions, []);
+    // G3: community actions — never below confirm, app only; the push rule without kind="plugin" is not taken
+    assert.deepEqual(st.actions.map((a) => a.level), ["confirm", "confirm"]);
     assert.deepEqual(st.pushRules, []);
-    assert.ok(!st.body.some((i) => i.offer), "actions are unavailable to a third-party plugin");
+    assert.ok(st.body.filter((i) => i.offer?.kind === "action").every((i) => i.offer.appOnly), "community actions are app only");
     // tier official written into lock bypassing the manager does not make it official: the catalog calls off community
     lock.plugins.off.tier = "official";
     lock.plugins.off.official = true;
@@ -595,7 +598,7 @@ test("the tier is not from metadata: <agenthub.tier>official on community is thi
     await h.rescan();
     await new Promise((r) => setTimeout(r, 300));
     const st2 = h.core.pluginState("off");
-    assert.deepEqual([st2.tier, st2.trusted, st2.actions.length], ["community", false, 0]);
+    assert.deepEqual([st2.tier, st2.trusted, st2.official], ["community", false, false]);
     const inst = await h.call("GET", "/registry/installed");
     assert.equal(inst.body.installed[0].tier, "community", "the manager shows the same tier as the policy");
     const rm = await h.call("POST", "/registry/remove", { id: "off" });
@@ -710,7 +713,9 @@ test("downgrading official → community in a new signed index removes actions f
     publish(h.reg, [{ id: "off", text: offText(), tier: "community" }], { key: h.key, generatedAt: nextTime() });
     assert.equal((await h.call("POST", "/registry/fetch")).status, 200);
     const st2 = await waitFor(() => h.core.pluginState("off")?.tier === "community" && h.core.pluginState("off"), { timeoutMs: 8000 });
-    assert.deepEqual([st2.trusted, st2.official, st2.actions, st2.pushRules], [false, false, [], []]);
+    // G3: community keeps its actions (app only, at least confirm), own push rules only kind="plugin" (none here)
+    assert.deepEqual([st2.trusted, st2.official, st2.actions.length, st2.pushRules], [false, false, 1, []]);
+    assert.ok(st2.actions.every((a) => a.level !== "immediate"));
     const inst = await h.call("GET", "/registry/installed");
     assert.equal(inst.body.installed[0].tier, "community");
     // the consent window is open for official, while the catalog changed the tier of the same archive meanwhile
@@ -762,7 +767,8 @@ test("official = only what the signed catalog lists now: delisted → community,
     publish(h.reg, [], { key: h.key, generatedAt: nextTime() });
     assert.equal((await h.call("POST", "/registry/fetch")).status, 200);
     const st2 = await waitFor(() => h.core.pluginState("off")?.tier === "community" && h.core.pluginState("off"), { timeoutMs: 8000 });
-    assert.deepEqual([st2.trusted, st2.official, st2.actions, st2.pushRules], [false, false, [], []], "permissions and actions as for community");
+    assert.deepEqual([st2.trusted, st2.official, st2.actions.length, st2.pushRules], [false, false, 1, []], "permissions and actions as for community (G3: actions at least confirm)");
+    assert.ok(st2.actions.every((a) => a.level !== "immediate"));
     const inst = (await h.call("GET", "/registry/installed")).body.installed[0];
     assert.deepEqual([inst.tier, inst.official, inst.officialPending, inst.label], ["community", false, false, null], "just the tier it has now, no special label");
     const low = lines("plugin-tier-lowered");
@@ -834,7 +840,7 @@ test("a new version of an official plugin in the catalog does not downgrade the 
     publish(h.reg, [{ id: "off", text: offText({ version: "1.2.0" }), tier: "community" }], { key: h.key, generatedAt: nextTime() });
     await h.call("POST", "/registry/fetch");
     const st3 = await waitFor(() => h.core.pluginState("off")?.tier === "community" && h.core.pluginState("off"), { timeoutMs: 8000 });
-    assert.deepEqual([st3.trusted, st3.actions], [false, []]);
+    assert.deepEqual([st3.trusted, st3.actions.every((a) => a.level !== "immediate")], [false, true], "G3: community actions, never immediate");
     inst = (await h.call("GET", "/registry/installed")).body.installed[0];
     assert.equal(inst.tier, "community");
 
@@ -868,8 +874,10 @@ test("a plugins.lock entry bypassing the manager does not grant official: neithe
     await h.rescan();
     const st = await waitFor(() => h.core.pluginState("off")?.lastRunAt && h.core.pluginState("off"), { timeoutMs: 8000 });
     assert.equal((await h.call("GET", "/registry/catalog")).body.plugins.length, 0);
-    assert.deepEqual([st.tier, st.trusted, st.actions.length], ["community", false, 0]);
-    assert.ok(!st.body.some((i) => i.offer?.kind === "action"));
+    // G3: community has actions, but at least confirm and app only — the forged official mark gives nothing more
+    assert.deepEqual([st.tier, st.trusted], ["community", false]);
+    assert.ok(st.actions.every((a) => a.level !== "immediate"));
+    assert.ok(st.body.filter((i) => i.offer?.kind === "action").every((i) => i.offer.appOnly && i.offer.level !== "immediate"));
     // 2. the catalog calls off official, lock copied its sha256, but the files are its own (with a copy of the real archive next to them)
     const [entry] = publish(h.reg, [{ id: "off", text, tier: "official" }], { key: h.key, generatedAt: nextTime() });
     await h.call("POST", "/registry/fetch");
@@ -880,7 +888,8 @@ test("a plugins.lock entry bypassing the manager does not grant official: neithe
     await h.rescan();
     await waitFor(() => h.core.pluginState("off")?.body?.length, { timeoutMs: 8000 });
     const st2 = h.core.pluginState("off");
-    assert.deepEqual([st2.tier, st2.trusted, st2.actions.length], ["community", false, 0], "the files are not the archive contents from the index");
+    assert.deepEqual([st2.tier, st2.trusted, st2.official], ["community", false, false], "the files are not the archive contents from the index");
+    assert.ok(st2.actions.every((a) => a.level !== "immediate"), "G3: community actions only, never immediate");
   } finally {
     await h.stop();
   }

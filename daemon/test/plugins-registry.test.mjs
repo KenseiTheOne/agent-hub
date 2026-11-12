@@ -106,13 +106,15 @@ test("linter: effects=session.stop is rejected for both third-party and official
   assert.ok(r.errors.some((e) => e.includes("session.stop")), r.errors.join("\n"));
   assert.ok(lintPlugin({ id: "t", meta, official: true }).errors.some((e) => e.includes("session.stop")), "effects ceiling — for official too");
   const act = (level, arg = "") => META(`# <agenthub.action id="go" level="${level}"${arg}>t.1m.mjs --action go</agenthub.action>`);
-  assert.ok(lintPlugin({ id: "t", meta: act("confirm") }).errors.some((e) => e.includes("только у официальных")));
+  // G3: community actions are accepted, with a note for the reviewer
+  assert.deepEqual(lintPlugin({ id: "t", meta: act("confirm") }).errors, []);
+  assert.ok(lintPlugin({ id: "t", meta: act("confirm") }).warnings.some((w) => w.includes("плагина сообщества")));
   assert.deepEqual(lintPlugin({ id: "t", meta: act("confirm"), official: true }).errors, []);
   // (decision 2026-11-09): official immediate without network is allowed (no dialog, only from the app); with network — an error
   assert.deepEqual(lintPlugin({ id: "t", meta: act("immediate"), official: true }).errors, []);
   const netMeta = META(`# <agenthub.net>api.example.com — данные</agenthub.net>\n# <agenthub.action id="go" level="immediate">t.1m.mjs --action go</agenthub.action>`);
   assert.ok(lintPlugin({ id: "t", meta: netMeta, official: true }).errors.some((e) => e.includes("immediate — только у плагина без сети")));
-  assert.ok(lintPlugin({ id: "t", meta: act("immediate") }).errors.some((e) => e.includes("только у официальных")));
+  assert.ok(lintPlugin({ id: "t", meta: act("immediate") }).warnings.some((w) => w.includes("поднимет immediate до confirm")));
   // review 2026-11-09 (low): immediate with a cost — an error (the core would ask with the cost); without a cost — a warning for the reviewer
   for (const cost of [' cost="квота"', ' cost-en="quota"']) {
     const r = lintPlugin({ id: "t", meta: act("immediate", cost), official: true });

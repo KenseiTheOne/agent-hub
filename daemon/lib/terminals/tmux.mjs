@@ -2,8 +2,10 @@
 //
 // Where the session is: the nearest terminal among the ancestors of the Claude Code process is a tmux server
 // (lib/terminals/_proc.mjs). The pane is found when an operation runs: `tmux list-panes -a` → the pane whose pane_tty is the
-// process's controlling terminal. The tmux binary is the server's own executable (an absolute path from the process table, not
-// PATH); a server started with -L <name> or -S <path> is reached the same way (read from the server's argv).
+// process's controlling terminal. The tmux binary is one of BIN_PATHS — the one that is the server's executable (the same
+// path, or the same file after resolving links: Homebrew runs it from its Cellar). A server whose executable is anything else
+// (an ancestor merely named `tmux-…`) is not reached at all: the adapter never runs a binary it found in the process table.
+// A server started with -L <name> or -S <path> is reached the same way (read from the server's argv).
 //
 // Operations (all through the tmux CLI, execFile without a shell):
 //   focus       — select-window and select-pane of the pane, switch-client to it; then the window of the terminal the tmux
@@ -14,7 +16,7 @@
 //   send-esc    — send-keys Escape;
 //   launch      — new-window -d in the default server (the most recently used session) with bridge/launch.sh.
 
-import { existsSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
 import { isAbsolute } from "node:path";
 import { hostOf, ttyOf } from "./_proc.mjs";
 import { execError, execOf, LAUNCH_SH, shQuote } from "./_exec.mjs";
@@ -24,6 +26,10 @@ import * as terminalApp from "./terminal-app.mjs";
 
 export const id = "tmux";
 export const label = "tmux";
+// The place in the adapter list (lib/terminals/index.mjs): a session two adapters could claim goes to the lower one.
+export const order = 20;
+// "auto" never opens a new session here by "installed": a new window would land in a detached server (only by the setting or by its sessions).
+export const autoLaunch = false;
 export const capabilities = Object.freeze(["focus", "read-screen", "send-text", "send-esc", "launch"]);
 export const BIN_PATHS = Object.freeze(["/opt/homebrew/bin/tmux", "/usr/local/bin/tmux", "/opt/local/bin/tmux", "/usr/bin/tmux"]);
 
@@ -43,15 +49,33 @@ export function socketArgs(argv) {
   return [];
 }
 
-// → { target: {terminal, tab, pid, bin, socket} } | null
-export function locate(session, facts) {
+function safeRealpath(p) {
+  try {
+    return realpathSync.native(p);
+  } catch {
+    return null;
+  }
+}
+
+// The known tmux binary (BIN_PATHS) that the server's executable path is — as is or after resolving links. → path | null
+export function knownBin(path, { realpath = safeRealpath } = {}) {
+  if (BIN_PATHS.includes(path)) return path;
+  const real = realpath(path);
+  if (!real) return null;
+  return BIN_PATHS.find((p) => realpath(p) === real) ?? null;
+}
+
+// → { target: {terminal, tab, pid, bin, socket} } | null. opts.realpath — for tests.
+export function locate(session, facts, opts = {}) {
   const h = hostOf(session.pid, facts);
   if (h?.id !== id || !isAbsolute(h.path || "")) return null;
+  const bin = knownBin(h.path, opts);
+  if (!bin) return null;
   let argv = null;
   try {
     argv = facts.processArgv?.(h.pid) ?? null;
   } catch {}
-  return { target: { terminal: id, tab: `pid:${session.pid}`, pid: session.pid, bin: h.path, socket: socketArgs(argv) } };
+  return { target: { terminal: id, tab: `pid:${session.pid}`, pid: session.pid, bin, socket: socketArgs(argv) } };
 }
 
 export function idle() {

@@ -11,7 +11,7 @@ import { readPluginMeta, parseFileName } from "./meta.mjs";
 import { isAbsolutePath } from "./platform.mjs";
 import { msg } from "./i18n.mjs";
 import { cleanPhrase } from "./output.mjs";
-import { actionArgv, buildEnv, commandFor, ensureDir, nextCron, osVars, parseCron, runOnce, StreamProcess, Watcher } from "./runner.mjs";
+import { actionArgv, buildEnv, commandFor, ensureDir, nextCron, osVars, parseCron, runOnce, spawnJob, StreamProcess, Watcher } from "./runner.mjs";
 
 const PLATFORM = { darwin: "macos", win32: "windows", linux: "linux" }[process.platform] || process.platform;
 
@@ -67,16 +67,22 @@ export function scanDir(dir, source) {
 // plugins (ctx.providePluginEnv): "$AGENTHUB_USAGE_FILE — …" watches the usage service's cache file. The core substitutes
 // the value from the same variables that go into the plugin's environment (pluginEnvFor: only builtin,
 // official and own); for the rest, and with the service off, such an entry is skipped — the plugin runs on its own interval.
+// The plugin's own directories ($AGENTHUB_PLUGIN_DATA_PATH, $AGENTHUB_PLUGIN_CACHE_PATH) are substituted for every tier:
+// the instance adds them to vars (they are the plugin's, not a service's).
 // The variable's value must be an absolute path per the platform's rules (platform — for tests).
+// recursive — the entries declared with <agenthub.watch recursive="true"> (meta.watchRecursive): their paths come back as
+// { path, recursive: true } (the Watcher then watches subdirectories too); others stay strings.
 // → { paths: [...], skipped: [variable name] }
-export function watchPaths(entries, vars, { platform = process.platform } = {}) {
+export function watchPaths(entries, vars, { platform = process.platform, recursive = [] } = {}) {
   const paths = [];
   const skipped = [];
+  const deep = new Set(recursive);
   for (const e of entries || []) {
-    const path = String(e).split(/\s+[—–-]{1,2}\s+/)[0].trim();
-    const m = /^\$(?:\{([A-Z][A-Z0-9_]*)\}|([A-Z][A-Z0-9_]*))(.*)$/.exec(path);
+    const path0 = String(e).split(/\s+[—–-]{1,2}\s+/)[0].trim();
+    const add = (p) => paths.push(deep.has(e) ? { path: p, recursive: true } : p);
+    const m = /^\$(?:\{([A-Z][A-Z0-9_]*)\}|([A-Z][A-Z0-9_]*))(.*)$/.exec(path0);
     if (!m) {
-      paths.push(path);
+      add(path0);
       continue;
     }
     const name = m[1] || m[2];
@@ -85,7 +91,7 @@ export function watchPaths(entries, vars, { platform = process.platform } = {}) 
       skipped.push(name);
       continue;
     }
-    paths.push(v + m[3]);
+    add(v + m[3]);
   }
   return { paths, skipped };
 }
@@ -134,10 +140,14 @@ class PluginInstance {
       }
     }
     if (p.meta.watch.length) {
-      const { paths, skipped } = watchPaths(p.meta.watch, this.core.pluginEnvFor(p));
+      // service variables (trusted only) plus the plugin's own directories (any tier; created now so the watch holds);
+      // "~" is the plugins' HOME (AGENTHUB_PLUGIN_HOME on a test bench), the same as in their environment
+      const cfg = this.core.config;
+      const own = { AGENTHUB_PLUGIN_DATA_PATH: ensureDir(join(cfg.paths.pluginData, this.id)), AGENTHUB_PLUGIN_CACHE_PATH: ensureDir(join(cfg.paths.pluginCache, this.id)) };
+      const { paths, skipped } = watchPaths(p.meta.watch, { ...this.core.pluginEnvFor(p), ...own }, { recursive: p.meta.watchRecursive || [] });
       for (const name of skipped) this.core.warn(this.id, msg("warn.watch.var", { name }));
       if (paths.length) {
-        this.watcher = new Watcher(paths, (changed) => this.onFiles(changed));
+        this.watcher = new Watcher(paths, (changed) => this.onFiles(changed), cfg.pluginHome ? { home: cfg.pluginHome } : {});
         this.watcher.start();
       }
     }
@@ -151,6 +161,8 @@ class PluginInstance {
     // a restart on a language or pause change (restartAll) stops the previous process — its exit isn't a plugin failure
     const sp = new StreamProcess(this.argv, {
       env,
+      // an automatic restart after an exit builds the environment again (G8): a secret written meanwhile is seen
+      envFn: () => this.env(reason),
       cwd: this.plugin.dir,
       maxBytes: cfg.maxOutputBytes,
       onFrame: (text, overflow) => this.core.applyFrame(this.id, text, { overflow }),
@@ -158,6 +170,8 @@ class PluginInstance {
         if (!this.stopped && !sp.stopped) this.core.pluginExited(this.id, { code, signal, error });
       },
       onStart: (pid) => this.core.pluginStarted(this.id, pid),
+      // the process doesn't read stdin and over 1 MB waits in the pipe: messages are dropped, the journal hears once (B6)
+      onBacklog: () => this.core.stdinBacklog?.(this.id),
     });
     this.stream = sp;
     sp.start();
@@ -168,7 +182,8 @@ class PluginInstance {
     const gen = ++this.streamGen;
     const old = this.stream;
     this.stream = null;
-    await old?.stop();
+    // the plugin is told why first (G18): {"type":"stopping","reason":"restart","cause":<new AGENTHUB_REFRESH_REASON>}
+    await old?.stop("restart", { cause: reason });
     if (this.stopped || gen !== this.streamGen) return;
     await this.startStream(gen, reason);
   }
@@ -225,6 +240,8 @@ class PluginInstance {
           this.kills.add((killer = kill));
           if (pid) this.runPids.add((runPid = pid));
         },
+        // the pid is the plugin's only while the process lives (B4): a descendant holding stdout delays the end of the run
+        onLeaderExit: (pid) => this.runPids.delete(pid),
       });
       this.kills.delete(killer);
       this.runPids.delete(runPid);
@@ -248,18 +265,42 @@ class PluginInstance {
   // The last stdout line of the form `reason=<code>` is the machine-readable refusal reason (result.reason); a `message=<text>` line
   // among the last lines (contract 2) is an explanation for humans in the hub language (AGENTHUB_LANG): the shell
   // shows it as is (result.message); the core and the shell know nothing about plugin codes.
-  async runAction(action, argValue = null) {
+  // input (G1) — the text a human typed for an input action: stdin is that text plus "\n", then EOF; argv never carries it.
+  // background (G6) — start a job and return at once: { ok, job: { pid, kill } }; onJobExit({code, signal, ok, reason?, message?,
+  // durationMs, error?}) when it ends. A job has no timeout and its own process group; its pid counts as an action pid.
+  async runAction(action, argValue = null, { input = null, background = false, onJobExit = null } = {}) {
     if (this.stopped || !this.argv) return { ok: false, error: "stopped" };
-    let argv = actionArgv(action.command, action.arg, argValue);
+    let argv = action.input ? actionArgv(action.command, action.arg, null, { input: true }) : actionArgv(action.command, action.arg, argValue);
     if (argv[0] === basename(this.plugin.file)) argv = [...this.argv, ...argv.slice(1)];
     const env = await this.env("MenuAction");
     // stopped or the hub was paused while we waited for the keychain — don't launch
     if (this.stopped) return { ok: false, error: "stopped" };
     if (this.core.estop()) return { ok: false, error: "estop" };
+    const stdin = typeof input === "string" ? `${input}\n` : null;
+    if (background) {
+      let jobPid = null;
+      const job = spawnJob(argv, {
+        env,
+        cwd: this.plugin.dir,
+        stdin,
+        // the pid is the plugin's only while the leader lives (B4)
+        onLeaderExit: (pid) => this.actionPids.delete(pid),
+        onExit: (x) => {
+          this.actionPids.delete(jobPid);
+          const m = /(?:^|\n)reason=([a-z0-9][a-z0-9-]{0,47})\s*$/.exec(x.tail || "");
+          const message = actionMessage(x.tail);
+          onJobExit?.({ ok: x.code === 0, code: x.code, signal: x.signal, durationMs: x.durationMs, ...(x.error ? { error: x.error } : {}), ...(m ? { reason: m[1] } : {}), ...(message ? { message } : {}) });
+        },
+      });
+      if (job.error) return { ok: false, error: job.error };
+      this.actionPids.add((jobPid = job.pid));
+      return { ok: true, job };
+    }
     let killer = null;
     let actPid = null;
     const r = await runOnce(argv, {
       env,
+      stdin,
       cwd: this.plugin.dir,
       timeoutMs: this.core.config.plugins.actionTimeoutMs,
       maxBytes: 256 * 1024,
@@ -267,6 +308,7 @@ class PluginInstance {
         this.kills.add((killer = kill));
         if (pid) this.actionPids.add((actPid = pid));
       },
+      onLeaderExit: (pid) => this.actionPids.delete(pid),
     });
     this.kills.delete(killer);
     this.actionPids.delete(actPid);
@@ -275,14 +317,15 @@ class PluginInstance {
     const message = actionMessage(out);
     return { ok: r.code === 0 && !r.timedOut, code: r.code, timedOut: r.timedOut, durationMs: r.durationMs, error: r.error, ...(m ? { reason: m[1] } : {}), ...(message ? { message } : {}) };
   }
-  async stop() {
+  // reason (G18) — what the streamable process is told before SIGTERM: updated | policy | removed | shutdown.
+  async stop(reason = null) {
     this.stopped = true;
     this.streamGen++;
     this.timer?.cancel?.();
     for (const kill of this.kills) kill();
     this.kills.clear();
     this.watcher?.close();
-    await this.stream?.stop();
+    await this.stream?.stop(reason);
   }
 }
 
@@ -322,11 +365,15 @@ export function wallTimer(targetMs, fn, { stepMs = 60_000 } = {}) {
   return h;
 }
 
+// The policy the running instance was started with still holds: effects, actions, officialness, tier and the registry it came
+// from (G19). The registry's display label is not compared here: a new label (a second registry was added, a name changed) does not
+// restart the plugin — the host updates it in place (sameLabel, B7).
 function samePolicy(a, b) {
   if (!b) return false;
   const eff = (x) => [...(x.effects || [])].sort().join(",");
-  return eff(a) === eff(b) && Boolean(a.actions) === Boolean(b.actions) && Boolean(a.official) === Boolean(b.official) && (a.tier || null) === (b.tier || null);
+  return eff(a) === eff(b) && Boolean(a.actions) === Boolean(b.actions) && Boolean(a.official) === Boolean(b.official) && (a.tier || null) === (b.tier || null) && (a.registry || null) === (b.registry || null);
 }
+const sameLabel = (a, b) => (a.registryLabel ?? null) === (b?.registryLabel ?? null);
 
 export class PluginHost {
   constructor(core) {
@@ -388,9 +435,14 @@ export class PluginHost {
       if (!drop) {
         const policy = await this.core.policyFor(pl);
         drop = !policy.allowed || !samePolicy(policy, inst.plugin.granted);
+        // only the registry label changed (B7): the running instance keeps going, its state gets the new label
+        if (!drop && !sameLabel(policy, inst.plugin.granted)) {
+          inst.plugin.granted = { ...inst.plugin.granted, registryLabel: policy.registryLabel ?? null };
+          this.core.pluginRelabeled?.(id, inst.plugin.granted);
+        }
       }
       if (drop) {
-        await inst.stop();
+        await inst.stop(!pl ? "removed" : pl.file !== inst.plugin.file || pl.mtimeMs !== inst.plugin.mtimeMs ? "updated" : "policy");
         this.instances.delete(id);
         // the same id remains on disk — a restart: events move to the new instance (core.pluginRemoved)
         this.core.pluginRemoved(id, { keepEvents: Boolean(pl) });
@@ -416,8 +468,8 @@ export class PluginHost {
     return this.instances.get(id) || null;
   }
   // Whose process this is: an ongoing standard run or a live streamable process (not the plugin's descendants). A plugin action
-  // (<agenthub.action>, started by a human) — only with { actions: true }: terminal routes (contract 3) let it
-  // through, the oauth service doesn't. → plugin (scanner object with granted) or null.
+  // (<agenthub.action>, started by a human) — only with { actions: true }: terminal routes (contract 3) and MCP calls
+  // through hub connections let it through. → plugin (scanner object with granted) or null.
   pluginByPid(pid, { actions = false } = {}) {
     if (!Number.isInteger(pid) || pid <= 0) return null;
     for (const inst of this.instances.values()) {
@@ -447,6 +499,16 @@ export class PluginHost {
     }
     await Promise.all(jobs);
   }
+  // Restart one plugin with a fresh environment (a secret written in the app — G8, or another service-side change): a streamable
+  // one is stopped (it gets {"type":"stopping","reason":"restart","cause":reason}) and started again; a standard one gets an
+  // extra run. reason is AGENTHUB_REFRESH_REASON. → false — no such plugin (or not launched).
+  restartPlugin(id, reason = "Manual") {
+    const inst = this.instances.get(id);
+    if (!inst || inst.stopped || !inst.argv) return Promise.resolve(false);
+    if (inst.plugin.meta.type === "streamable") return inst.restartStream(reason).then(() => true);
+    inst.runStandard(reason);
+    return Promise.resolve(true);
+  }
   send(id, obj) {
     return this.instances.get(id)?.send(obj) ?? false;
   }
@@ -459,7 +521,7 @@ export class PluginHost {
   async stop() {
     clearInterval(this.rescanTimer);
     this.dirWatcher?.close();
-    await Promise.all([...this.instances.values()].map((i) => i.stop()));
+    await Promise.all([...this.instances.values()].map((i) => i.stop("shutdown")));
     this.instances.clear();
   }
 }

@@ -8,6 +8,19 @@
 // The peer class is determined once per connection (lib/peer.mjs) and checked on every route.
 // Exception — processes from AgentHub.app: when requirements.app changes (build re-pin, lib/app-pin.mjs) —
 // their connections are closed (SSE too), and a request on a connection with a stale generation is classified again.
+//
+// Plugin processes (S2): on accept the server also asks whose plugin the peer is — the peer pid or one of its
+// ancestors (any depth, not above the daemon) is a plugin run, a streamable process, an action or a background job
+// (the pluginByPid fact), or the process group of the peer or of one of those ancestors is one of them: every plugin
+// process is spawned detached, so it leads its own group and its descendants stay in it even after a double fork to
+// launchd. The answer is bound to the connection as peer.plugin = {id, trusted, tier, source}.
+// A process of an untrusted plugin (community, local) gets only the routes marked `untrustedPlugin: true`
+// (GET /health, GET /peer): everything else is 403 peer:untrusted-plugin, journaled (once a minute per plugin and route).
+// Such a plugin has no use for the hub API: it doesn't get AGENTHUB_HUB_SOCKET, and its own actions are pressed by a
+// human in the app (community — with confirmation), not through the socket; so one rule instead of a filtered /state.
+// Trusted plugins (builtin, official, own) keep their class.
+// Not a hard boundary: a descendant that leaves both the tree and the group (setsid/setpgid, then a double fork to
+// launchd) under the same UID is a plain cli again.
 
 import { createServer } from "node:http";
 import { connect } from "node:net";
@@ -23,6 +36,47 @@ import { msg } from "./i18n.mjs";
 
 const DEFAULT_MAX_BODY = 64 * 1024;
 const HOOK_MAX_BODY = 1024 * 1024;
+// How far up the peer's parents to look for a plugin process: all the way (a fixed depth is bypassed by nesting wrappers);
+// the walk ends at launchd, the daemon or a loop in the table.
+export const PLUGIN_ANCESTOR_DEPTH = Infinity;
+// Denials of one plugin on one route are journaled at most once per this interval.
+const PLUGIN_DENY_JOURNAL_MS = 60_000;
+
+// Whose plugin process the peer is: pid itself or an ancestor is a plugin run, streamable process, action or job — or
+// leads the process group of one of them (pidInfo().pgid, see the header).
+// → {id, trusted, tier, source, pid} (pid — the plugin process found) or null. The walk stops at the daemon and launchd.
+export function pluginOfPid(core, pid, { depth = PLUGIN_ANCESTOR_DEPTH } = {}) {
+  const byPid = core.facts?.pluginByPid;
+  if (typeof byPid !== "function") return null;
+  const found = (pl, at) => ({ id: pl.id, trusted: pl.trusted === true, tier: pl.tier ?? null, source: pl.source ?? null, pid: at });
+  const groupOf = (pgid) => (Number.isInteger(pgid) && pgid > 1 && pgid !== process.pid ? byPid(pgid, { actions: true }) : null);
+  let cur = pid;
+  const seen = new Set();
+  for (let i = 0; i <= depth; i++) {
+    if (!Number.isInteger(cur) || cur <= 1 || cur === process.pid || seen.has(cur)) return null;
+    seen.add(cur);
+    const pl = byPid(cur, { actions: true });
+    if (pl) return found(pl, cur);
+    const info = core.peer?.sys?.pidInfo?.(cur);
+    if (info?.pgid !== cur) {
+      const byGroup = groupOf(info?.pgid);
+      if (byGroup) return found(byGroup, info.pgid);
+    }
+    cur = info?.ppid;
+  }
+  return null;
+}
+
+// The peer class plus peer.plugin (see the header). Failures of the lookup leave the class as it is.
+function withPlugin(core, r) {
+  if (!r || r.class === "foreign" || !Number.isInteger(r.pid)) return r;
+  try {
+    const plugin = pluginOfPid(core, r.pid);
+    return plugin ? { ...r, plugin } : r;
+  } catch {
+    return r;
+  }
+}
 
 function compilePath(path) {
   const names = [];
@@ -68,13 +122,16 @@ function builtinRoutes(core) {
       method: "GET",
       path: "/health",
       peers: ["app", "cli", "hook", "bridge"],
+      untrustedPlugin: true,
       handler: () => ({ status: 200, body: { ok: true, pid: process.pid, uptimeMs: Date.now() - core.startedAt, contract: CONTRACT_VERSION } }),
     },
     {
       method: "GET",
       path: "/peer",
       peers: ["app", "cli", "hook", "bridge"],
-      handler: ({ peer }) => ({ status: 200, body: { class: peer.class, reason: peer.reason || null, pid: peer.pid ?? null } }),
+      untrustedPlugin: true,
+      // plugin — {id, trusted} when the peer is a plugin process (or its descendant), otherwise null
+      handler: ({ peer }) => ({ status: 200, body: { class: peer.class, reason: peer.reason || null, pid: peer.pid ?? null, plugin: peer.plugin ? { id: peer.plugin.id, trusted: peer.plugin.trusted } : null } }),
     },
     {
       method: "GET",
@@ -107,7 +164,8 @@ function builtinRoutes(core) {
       peers: ["app", "cli"],
       handler: async ({ params, body, peer }) => {
         const b = body && typeof body === "object" ? body : {};
-        return core.invoke({ id: params.id, args: b.args, confirmToken: typeof b.confirmToken === "string" ? b.confirmToken : null, peer });
+        // input (G1) — text a human typed for an input action; the core accepts it only where the offer declares a field
+        return core.invoke({ id: params.id, args: b.args, ...(b.input !== undefined ? { input: b.input } : {}), confirmToken: typeof b.confirmToken === "string" ? b.confirmToken : null, peer });
       },
     },
     {
@@ -325,14 +383,7 @@ export async function loadRoutes(core, dir = join(DAEMON_DIR, "lib", "routes")) 
   for (const { name, mod } of mods) {
     for (const r of mod.routes || []) {
       const key = `${r.method} ${r.path}`;
-      const bad =
-        !["GET", "POST", "PUT", "DELETE"].includes(r.method) ||
-        typeof r.path !== "string" ||
-        !r.path.startsWith("/") ||
-        typeof r.handler !== "function" ||
-        !Array.isArray(r.peers) ||
-        !r.peers.length ||
-        r.peers.some((p) => !PEER_CLASSES.includes(p));
+      const bad = badRoute(r);
       if (bad || taken.has(key)) {
         core.journal.write({ type: "load-error", kind: "route", file: name, detail: bad ? `bad route ${key}` : `duplicate ${key}` });
         continue;
@@ -342,6 +393,37 @@ export async function loadRoutes(core, dir = join(DAEMON_DIR, "lib", "routes")) 
     }
   }
   return routes.map((r) => ({ ...r, ...compilePath(r.path) }));
+}
+
+function badRoute(r) {
+  return (
+    !r ||
+    !["GET", "POST", "PUT", "DELETE"].includes(r.method) ||
+    typeof r.path !== "string" ||
+    !r.path.startsWith("/") ||
+    typeof r.handler !== "function" ||
+    !Array.isArray(r.peers) ||
+    !r.peers.length ||
+    r.peers.some((p) => !PEER_CLASSES.includes(p))
+  );
+}
+
+// Routes of an approved external extension (G4, lib/extensions.mjs: <home>/Extensions/routes/<name>.mjs) — added to the live route
+// table after every built-in one. All or nothing: one bad route or one that would take a method and path already served (`:params`
+// compared by position, `/x/:id` = `/x/:name`) refuses the whole file. → null | "bad route …" | "duplicate …"
+export function addExtensionRoutes(core, routes, name, mod) {
+  const shape = (r) => `${r.method} ${String(r.path).replace(/:\w+/g, ":")}`;
+  const list = Array.isArray(mod?.routes) ? mod.routes : [];
+  if (!list.length) return "bad route: no routes";
+  const taken = new Set(routes.map(shape));
+  for (const r of list) {
+    if (badRoute(r)) return `bad route ${r?.method} ${r?.path}`;
+    if (taken.has(shape(r))) return `duplicate ${r.method} ${r.path}`;
+    taken.add(shape(r));
+  }
+  const ctx = makeCtx(core, `route:${name}`);
+  for (const r of list) routes.push({ ...r, ext: name, extension: true, ctx, ...compilePath(r.path) });
+  return null;
 }
 
 // Prepares the 0700 directory and removes a stale socket. A live foreign socket is an error.
@@ -374,8 +456,16 @@ export async function startServer(core) {
   if (problem) throw new Error(problem);
   await prepareSocket(sockPath, home);
   const routes = await loadRoutes(core);
+  // approved external extension routes (G4) — now and whenever a human approves one while the daemon runs
+  await core.extensions?.attachRoutes((name, mod) => addExtensionRoutes(core, routes, name, mod));
   const peers = new WeakMap();
   const appSockets = new Set(); // connections of processes from AgentHub.app (app and those rejected by signature)
+  const pluginDenied = new Map(); // `${plugin}|${route}` → last journal time (untrusted plugin processes)
+  const classifyConn = (socket) =>
+    core.peer
+      .classify(socket)
+      .catch(() => ({ class: "cli", reason: "peer:error" }))
+      .then((r) => withPlugin(core, r));
   const isAppCandidate = (p) => p && p.appGen !== undefined;
   const track = (socket, p) => {
     p.then((r) => {
@@ -406,7 +496,7 @@ export async function startServer(core) {
       } catch {}
       if (tracked && peer.appGen === core.peer.appGeneration?.() && !req.socket.destroyed) appSockets.add(req.socket);
       if (peer.appGen !== core.peer.appGeneration?.()) {
-        const p = core.peer.classify(req.socket).catch(() => ({ class: "cli", reason: "peer:error" }));
+        const p = classifyConn(req.socket);
         peers.set(req.socket, p);
         track(req.socket, p);
         peer = (await p) || { class: "cli", reason: "peer:unknown" };
@@ -418,6 +508,16 @@ export async function startServer(core) {
       if (!candidates.length) return json(res, 404, { error: "not-found" });
       const route = candidates.find((r) => r.method === req.method);
       if (!route) return json(res, 405, { error: "method" });
+      if (peer.plugin && !peer.plugin.trusted && route.untrustedPlugin !== true) {
+        const key = `${peer.plugin.id}|${route.method} ${route.path}`;
+        const now = Date.now();
+        if (now - (pluginDenied.get(key) || 0) >= PLUGIN_DENY_JOURNAL_MS) {
+          if (pluginDenied.size > 1000) pluginDenied.clear();
+          pluginDenied.set(key, now);
+          core.journal.write({ type: "denied", route: `${route.method} ${route.path}`, peer: peer.class, pid: peer.pid, plugin: peer.plugin.id, tier: peer.plugin.tier, error: "peer:untrusted-plugin" });
+        }
+        return json(res, 403, { error: "peer:untrusted-plugin", peer: peer.class, plugin: peer.plugin.id });
+      }
       if (!route.peers.includes(peer.class)) {
         core.journal.write({ type: "denied", route: `${route.method} ${route.path}`, peer: peer.class, pid: peer.pid, error: denyCode(peer) });
         return json(res, 403, { error: denyCode(peer), peer: peer.class });
@@ -456,7 +556,7 @@ export async function startServer(core) {
   server.keepAliveTimeout = 5000;
   server.on("connection", (socket) => {
     // fd is read synchronously on accept, while the connection is surely alive
-    const p = core.peer.classify(socket).catch(() => ({ class: "cli", reason: "peer:error" }));
+    const p = classifyConn(socket);
     peers.set(socket, p);
     track(socket, p);
     socket.once("close", () => {

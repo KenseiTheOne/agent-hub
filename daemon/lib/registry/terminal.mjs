@@ -24,7 +24,7 @@ import { myUid, psCommand } from "../platform.mjs";
 import { PluginManager, RegistryError } from "../plugins.mjs";
 import { writeRiskText } from "./perms.mjs";
 
-const KINDS = new Set(["fsRead", "fsWrite", "watch", "exec", "secrets", "net", "effects", "actions", "connections", "terminal"]);
+const KINDS = new Set(["fsRead", "fsWrite", "watch", "exec", "secrets", "net", "effects", "actions", "connections", "terminal", "subscribe"]);
 
 // Moving from an own plugin (the same id from an own folder) to a registry plugin is not an "Update": a "Replace" line and
 // what follows from it (watching the folder stops), as in the app window. lang — the hub language (the CLI's by default).

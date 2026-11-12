@@ -325,8 +325,9 @@ export function loadMemory(path) {
     if (j?.version !== MEMORY_VERSION) return mem;
     const pairs = (v) => (Array.isArray(v) ? v.filter((x) => Array.isArray(x) && x.length === 2 && typeof x[0] === "string" && UUID_RE.test(x[0])) : []);
     for (const [k, v] of pairs(j.waitingSince)) if (Number.isFinite(v)) mem.waitingSince.set(k, v);
-    for (const [k, v] of pairs(j.lastBusy)) if (v && Number.isInteger(v.pid)) mem.lastBusy.set(k, { ...v, seenAt: Number.isFinite(v.seenAt) ? v.seenAt : fileAt });
-    for (const [k, v] of pairs(j.died)) if (v && Number.isFinite(v.at)) mem.died.set(k, v);
+    // sessionId comes from the checked key, not the stored object: it goes into event= and titles unquoted
+    for (const [k, v] of pairs(j.lastBusy)) if (v && Number.isInteger(v.pid)) mem.lastBusy.set(k, { ...v, sessionId: k, seenAt: Number.isFinite(v.seenAt) ? v.seenAt : fileAt });
+    for (const [k, v] of pairs(j.died)) if (v && typeof v === "object" && Number.isFinite(v.at)) mem.died.set(k, { ...v, sessionId: k, pid: Number.isInteger(v.pid) ? v.pid : null });
     for (const k of Array.isArray(j.gone) ? j.gone : []) if (typeof k === "string" && UUID_RE.test(k)) mem.gone.add(k);
   } catch {}
   return mem;
@@ -761,6 +762,8 @@ export const T = {
     tileWaiting: (n) => `${n} ${pl.ru(n, "ждёт", "ждут", "ждут")}`,
     tileDied: (n) => `${n} оборв.`,
     tileBusy: (n) => `${n} в работе`,
+    alsoBusy: (n) => ` · ${n} в работе`,
+    tileShort: { waiting: (n) => `${n} ждёт`, died: (n) => `${n} оборв.`, busy: (n) => `${n} раб.` },
     tileIdle: (n) => `${n} ${pl.ru(n, "свободна", "свободны", "свободны")}`,
     unnamed: (id) => `сессия ${id}`,
     waitFor: { permission: "разрешения", question: "ответа на вопрос", input: "вашего сообщения" },
@@ -815,6 +818,8 @@ export const T = {
     tileWaiting: (n) => `${n} waiting`,
     tileDied: (n) => `${n} stopped`,
     tileBusy: (n) => `${n} working`,
+    alsoBusy: (n) => ` · ${n} working`,
+    tileShort: { waiting: (n) => `${n} wait`, died: (n) => `${n} stop`, busy: (n) => `${n} run` },
     tileIdle: (n) => `${n} idle`,
     unnamed: (id) => `session ${id}`,
     waitFor: { permission: "permission", question: "an answer", input: "your message" },
@@ -942,8 +947,13 @@ export function render({ sessions, died, problems, agentsOk, hintsCount = 0, bin
   if (broken && status === "ok") status = "unknown";
   let head;
   let tile;
-  if (waiting) [head, tile] = [L.headWaiting(waiting), L.tileWaiting(waiting)];
-  else if (died.length) [head, tile] = [L.headDied(died.length), L.tileDied(died.length)];
+  // Waiting / stopped sessions lead, but the working ones are still counted (2026-11-11: "1 waiting" alone hid that
+  // two tabs were busy): "1 session needs you · 2 working".
+  const also = busy ? L.alsoBusy(busy) : "";
+  // The popover tile is narrow: both counts in the short form ("1 wait · 3 run"); the header keeps the full words.
+  const tileBoth = (k, n) => `${L.tileShort[k](n)} · ${L.tileShort.busy(busy)}`;
+  if (waiting) [head, tile] = [L.headWaiting(waiting) + also, busy ? tileBoth("waiting", waiting) : L.tileWaiting(waiting)];
+  else if (died.length) [head, tile] = [L.headDied(died.length) + also, busy ? tileBoth("died", died.length) : L.tileDied(died.length)];
   else if (!agentsOk && broken && !sessions.length) [head, tile] = [brokenText, "?"];
   else if (busy) [head, tile] = [L.headBusy(busy), L.tileBusy(busy)];
   else if (sessions.length) [head, tile] = [L.headIdle, L.tileIdle(sessions.length)];
@@ -967,7 +977,7 @@ export function render({ sessions, died, problems, agentsOk, hintsCount = 0, bin
     out.push(`${name} — ${L.died} (${L.why[d.why] || clean(d.why, 40)}) | status=wait event=died:${d.sessionId} sfimage=xmark.octagon color=red`);
     out.push(`--${L.resume(d.sessionId)}`);
     out.push(`--${L.detailsTitle} | details=true`);
-    out.push(`----${L.seen(fmtDateTime(d.at, lang))} · ${L.details(d.pid, null, null)}`);
+    out.push(`----${L.seen(fmtDateTime(d.at, lang))} · ${L.details(Number.isInteger(d.pid) ? d.pid : "?", null, null)}`);
   }
   for (const s of sessions) {
     out.push(sessionLine(s, nowMs, lang));

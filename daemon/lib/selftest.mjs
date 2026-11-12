@@ -10,7 +10,7 @@ import { readdirSync } from "node:fs";
 import { request } from "node:http";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { liveStateDir, samePath } from "./platform.mjs";
+import { isLiveStateDir } from "./platform.mjs";
 import { msg } from "./i18n.mjs";
 
 const LIB = dirname(fileURLToPath(import.meta.url));
@@ -40,7 +40,7 @@ export async function selfTest(env = process.env) {
   let version = null;
   try {
     ({ VERSION: version } = await import("./version.mjs"));
-    if (!env.AGENTHUB_HOME || samePath(env.AGENTHUB_HOME, liveStateDir({ env }))) return { ok: false, version, error: msg("err.selftest.home") };
+    if (!env.AGENTHUB_HOME || isLiveStateDir(env.AGENTHUB_HOME, { env })) return { ok: false, version, error: msg("err.selftest.home") };
     const { loadConfig } = await import("./config.mjs");
     const { Core } = await import("./core.mjs");
     const { createPeer } = await import("./peer.mjs");

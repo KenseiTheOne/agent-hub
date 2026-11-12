@@ -32,6 +32,13 @@ public enum HubEvent: Sendable {
     /// `idle.verdict`: the "is it safe to shut down" verdict changed (the daemon's idle service). nil — "checking" (verdict null:
     /// the daemon has just started, not all sources have answered) — the icon and popover as without a verdict.
     case idle(IdleVerdict?)
+    /// `job.started` / `job.exited`: a background job of a plugin started or ended (G6). The `plugin` event with the new
+    /// `jobs` follows anyway; this keeps the list right in between.
+    case job(JobEvent)
+    /// `secrets.changed`: a plugin secret was set or removed in the app (G8) — the "Keys" section re-reads its state.
+    case secretsChanged(plugin: String, key: String?)
+    /// `sessions.external`: the whole `externalSessions` list after a change (non-Claude agent sessions).
+    case externalSessions([ExternalSession])
     /// Extension events (`push.sent`, `bridge.connected`, `plugins.installed`, …) and anything unknown.
     case other(type: String, data: JSONValue)
 
@@ -48,6 +55,18 @@ public enum HubEvent: Sendable {
     private struct UpdatesData: Decodable { var pluginUpdates: PluginUpdates }
     private struct HubUpdateData: Decodable { var hubUpdate: HubUpdateInfo }
     private struct RestartingData: Decodable { var label: String? }
+    private struct SecretData: Decodable { var plugin: String; var key: String? }
+    private struct ExternalData: Decodable {
+        var sessions: [ExternalSession]
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            guard let list = c.lossyList(ExternalSession.self, forKey: .sessions) else {
+                throw DecodingError.keyNotFound(CodingKeys.sessions, .init(codingPath: [], debugDescription: "sessions"))
+            }
+            sessions = list
+        }
+        enum CodingKeys: String, CodingKey { case sessions }
+    }
     private struct IdleData: Decodable {
         var idle: IdleVerdict?
         init(from decoder: Decoder) throws {
@@ -92,6 +111,14 @@ public enum HubEvent: Sendable {
             case "hub-update.status": return .hubUpdate(try dec.decode(HubUpdateData.self, from: data).hubUpdate)
             case "hub-update.restarting": return .hubRestarting(label: (try? dec.decode(RestartingData.self, from: data))?.label)
             case "idle.verdict": return .idle(try dec.decode(IdleData.self, from: data).idle)
+            case "job.started", "job.exited":
+                var j = try dec.decode(JobEvent.self, from: data)
+                j.started = ev.event == "job.started"
+                return .job(j)
+            case "sessions.external": return .externalSessions(try dec.decode(ExternalData.self, from: data).sessions)
+            case "secrets.changed":
+                let d = try dec.decode(SecretData.self, from: data)
+                return .secretsChanged(plugin: d.plugin, key: d.key)
             default:
                 return .other(type: ev.event, data: (try? dec.decode(JSONValue.self, from: data)) ?? .string(ev.data))
             }
@@ -127,9 +154,52 @@ extension HubState {
             hubUpdate = u
         case .idle(let v):
             idle = v
-        case .action, .raised, .cleared, .pushNotify, .hookCard, .hookCardRemoved, .hookPaused, .hubRestarting, .other:
+        case .externalSessions(let list):
+            externalSessions = list
+        case .job(let j):
+            guard let i = plugins.firstIndex(where: { $0.id == j.plugin }) else { return false }
+            if j.started {
+                guard !plugins[i].jobs.contains(where: { $0.id == j.job }) else { return false }
+                let title = plugins[i].actions.first { $0.id == j.actionId }?.title
+                plugins[i].jobs.append(PluginJob(id: j.job, actionId: j.actionId, title: title, startedAt: j.ts, pid: j.pid))
+            } else {
+                guard plugins[i].jobs.contains(where: { $0.id == j.job }) else { return false }
+                plugins[i].jobs.removeAll { $0.id == j.job }
+            }
+        case .action, .raised, .cleared, .pushNotify, .hookCard, .hookCardRemoved, .hookPaused, .hubRestarting, .secretsChanged, .other:
             return false
         }
         return true
+    }
+}
+
+/// `job.started` `{plugin, actionId, job, pid}` / `job.exited` `{plugin, actionId, job, ok, code, signal, cancelled?}`.
+public struct JobEvent: Decodable, Sendable, Hashable {
+    public var started = false
+    public var plugin: String
+    public var actionId: String?
+    public var job: String
+    public var pid: Int?
+    public var ok: Bool?
+    public var code: Int?
+    public var signal: String?
+    /// `cancelled`, `paused`, `plugin-removed`, `plugin-restarted`, `shutdown`; nil — the job ended by itself.
+    public var cancelled: String?
+    /// The event time (`ts`): the start time for a job that `job.started` adds.
+    public var ts: String?
+
+    enum CodingKeys: String, CodingKey { case plugin, actionId, job, pid, ok, code, signal, cancelled, ts }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        plugin = try c.decode(String.self, forKey: .plugin)
+        job = try c.decode(String.self, forKey: .job)
+        actionId = try? c.decodeIfPresent(String.self, forKey: .actionId)
+        pid = try? c.decodeIfPresent(Int.self, forKey: .pid)
+        ok = try? c.decodeIfPresent(Bool.self, forKey: .ok)
+        code = try? c.decodeIfPresent(Int.self, forKey: .code)
+        signal = try? c.decodeIfPresent(String.self, forKey: .signal)
+        cancelled = try? c.decodeIfPresent(String.self, forKey: .cancelled)
+        ts = try? c.decodeIfPresent(String.self, forKey: .ts)
     }
 }

@@ -21,6 +21,7 @@ const FILES = {
   agents: join(PLUGINS, "agents/agents.mjs"),
   "claude-sessions": join(PLUGINS, "claude-sessions/claude-sessions.mjs"),
   quota: join(PLUGINS, "quota/quota.5m.mjs"),
+  spend: join(PLUGINS, "spend/spend.mjs"),
 };
 // claude-sessions is declared for macOS only (agenthub.platforms): the host doesn't run it on other platforms.
 const LIVE = Object.keys(FILES).filter((id) => IS_DARWIN || id !== "claude-sessions");
@@ -34,7 +35,9 @@ test("built-in plugins: metadata per contract, permissions with why, effects onl
     const m = pm.meta;
     assert.ok(m.title && m.version && m.desc, id);
     assert.ok(m.platforms.includes("macos"), id);
-    assert.deepEqual(m.actions, [], `${id}: read-only plugins have no actions`);
+    // spend has two actions — they only store the daily alert threshold and the chart range in its own PluginData
+    if (id === "spend") assert.deepEqual(m.actions.map((a) => a.id), ["set-alert", "set-range"], id);
+    else assert.deepEqual(m.actions, [], `${id}: read-only plugins have no actions`);
     // the built-in claude-sessions also offers switching to the tab, interrupting and stopping a session; agents — the tab
     const allowed =
       id === "claude-sessions" ? /^(open\.(url|file)|cmux\.focus|session\.(interrupt|stop))$/ : id === "agents" ? /^cmux\.focus$/ : /^open\.(url|file)$/;
@@ -45,12 +48,12 @@ test("built-in plugins: metadata per contract, permissions with why, effects onl
     assert.deepEqual(m.fsWrite, [], `${id}: plugins only read`);
     assert.deepEqual(m.net, [], `${id}: no network`);
     // no conversations, no keys (agents is built in and not part of the registry: workflow metadata lives in
-    // ~/.claude/projects, but only results, usage and requestId are read)
+    // ~/.claude/projects, but only results, usage and requestId are read; spend — only usage, model, time and ids)
     // claude-sessions reads only the last turn's effort fields from the session transcript (file tail, no text)
     for (const entry of m.fsRead) {
       const what = splitWhy(entry).what;
       if (id === "claude-sessions" && what === "~/.claude/projects/*/<sessionId>.jsonl") continue;
-      assert.doesNotMatch(what, id === "agents" ? /workstream\.jsonl|\.key$|\.env|auth\.json/ : /\.claude\/projects|workstream\.jsonl|\.key$|\.env|auth\.json/, id);
+      assert.doesNotMatch(what, id === "agents" || id === "spend" ? /workstream\.jsonl|\.key$|\.env|auth\.json/ : /\.claude\/projects|workstream\.jsonl|\.key$|\.env|auth\.json/, id);
     }
   }
   assert.equal(readPluginMeta(FILES["claude-sessions"]).meta.type, "streamable");
@@ -58,13 +61,13 @@ test("built-in plugins: metadata per contract, permissions with why, effects onl
   assert.equal(readPluginMeta(FILES.quota).intervalMs, 300_000);
 });
 
-test("built-in plugins: the host finds all three, fixtures aren't picked up", () => {
+test("built-in plugins: the host finds all of them, fixtures aren't picked up", () => {
   const { plugins } = scanDir(PLUGINS, "builtin");
   const ids = plugins.map((p) => p.id);
   for (const id of Object.keys(FILES)) assert.equal(ids.filter((x) => x === id).length, 1, id);
   for (const p of plugins) assert.doesNotMatch(p.file, /\/fixtures\//);
   for (const [id, file] of Object.entries(FILES)) assert.equal(plugins.find((p) => p.id === id).file, file);
-  assert.deepEqual(ids.sort(), Object.keys(FILES).sort(), "exactly three built-ins");
+  assert.deepEqual(ids.sort(), Object.keys(FILES).sort(), "exactly these built-ins");
 });
 
 test("built-in plugins via the daemon: sessions, workflows and quota in /state, tier builtin; sleep pid — not Claude Code", { timeout: 60_000 }, async () => {

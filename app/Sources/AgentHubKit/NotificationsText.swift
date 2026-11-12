@@ -20,8 +20,8 @@ public enum NotificationsText {
                                   "A new version, built and waiting for a restart, installed, failed; an own plugin updated from its folder")
         case "problems": return tr("Плагин не может прочитать данные или перестал работать, сервис не принял токен, квота",
                                    "A plugin can't read its data or stopped working, a service rejected a token, quota warnings")
-        default: return tr("События без вида и всё от плагинов сообщества",
-                           "Events without a kind and everything from community plugins")
+        default: return tr("События без вида и события плагинов сообщества без своего правила",
+                           "Events without a kind and community plugins' events without a rule of their own")
         }
     }
 
@@ -29,11 +29,13 @@ public enum NotificationsText {
     public static var pluginsHeader: String { tr("По плагинам", "By plugin") }
 
     /// Caption under a plugin toggle: what it declared (its rule labels in the hub language).
-    public static func pluginDetail(_ p: NotificationsInfo.PluginToggle) -> String {
+    public static func pluginDetail(_ p: NotificationsInfo.PluginToggle, community: Bool = false) -> String {
         let list = p.labels.prefix(4).joined(separator: "; ")
         let more = p.labels.count > 4 ? tr(" и ещё \(p.labels.count - 4)", " and \(p.labels.count - 4) more") : ""
-        if list.isEmpty { return tr("Свои уведомления плагина", "The plugin's own notifications") }
-        return list + more
+        let base = list.isEmpty ? tr("Свои уведомления плагина", "The plugin's own notifications") : list + more
+        // a community plugin's rules carry only the key and the label (G3): its own limits are not taken
+        return community ? base + tr(" · плагин сообщества: не чаще 5 в минуту, в тихие часы — в утреннюю сводку",
+                                     " · community plugin: at most 5 a minute, during quiet hours — in the morning digest") : base
     }
 
     /// The toggle was turned off by migrating an earlier setting (before contract 2 the kind the plugin belonged to was

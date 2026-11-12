@@ -68,13 +68,13 @@ import { dirname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { CONTRACT_VERSION, parseFileName, parseIcon, parseMetaText, parseRequires } from "./meta.mjs";
 import { cleanAuthor } from "./author.mjs";
-import { currentLang, errText, msg } from "./i18n.mjs";
+import { contentLang, contentOf, currentLang, errText, msg, normTag, pickLang } from "./i18n.mjs";
 import { fileSig, readJsonFile } from "./config.mjs";
 import { isAbsolutePath, liveStateDir, myUid, samePath } from "./platform.mjs";
 import { scanDir } from "./host.mjs";
 import { verify as verifySignature } from "./registry/minisign.mjs";
 import { readTarGz, LIMITS as TAR_LIMITS } from "./registry/tarball.mjs";
-import { ID_RE, RESERVED_IDS, lintPlugin, permissionGrowth, permissionList, permissionsFingerprint, permissionsFromMeta, splitWhy } from "./registry/perms.mjs";
+import { CONTRACT_FEATURES, ID_RE, RESERVED_IDS, lintPlugin, permissionGrowth, permissionList, permissionsFingerprint, permissionsFromMeta, splitWhy } from "./registry/perms.mjs";
 import { expandPath, inspectSource, OwnSourceError, shortPath } from "./registry/own-source.mjs";
 import { refreshLocalWritePlaces } from "./registry/local-places.mjs";
 
@@ -94,7 +94,7 @@ export const OWN_DEFAULTS = Object.freeze({ checkMs: 60_000, debounceMs: 1500 })
 const MAX_INDEX_BYTES = 4 * 1024 * 1024;
 const MAX_SIG_BYTES = 4096;
 const PLATFORM = { darwin: "macos", win32: "windows", linux: "linux" }[process.platform] || process.platform;
-const KINDS_WITH_WHY = ["fsRead", "fsWrite", "watch", "exec", "secrets", "net", "connections", "terminal"];
+const KINDS_WITH_WHY = ["fsRead", "fsWrite", "watch", "exec", "secrets", "net", "connections", "terminal", "subscribe"];
 
 export class RegistryError extends Error {
   constructor(status, code, extra = {}) {
@@ -218,7 +218,7 @@ function validPermissions(p) {
   for (const k of KINDS_WITH_WHY) {
     if (p[k] === undefined) continue;
     if (!Array.isArray(p[k]) || p[k].length > 100) return false;
-    if (!p[k].every((e) => e && isStr(e.what, 1024) && (e.why === null || e.why === undefined || isStr(e.why, 1024)))) return false;
+    if (!p[k].every((e) => e && isStr(e.what, 1024) && (e.why === null || e.why === undefined || isStr(e.why, 1024)) && (e.recursive === undefined || e.recursive === true))) return false;
   }
   if (p.effects !== undefined && !(Array.isArray(p.effects) && p.effects.every((e) => isStr(e, 128)))) return false;
   if (p.actions !== undefined && !(Array.isArray(p.actions) && p.actions.every((a) => a && isStr(a.id, 64) && isStr(a.level, 32) && isStr(a.command, 2048) && (a.arg === undefined || isStr(a.arg, 256))))) return false;
@@ -237,10 +237,24 @@ export function contractTooNew(need) {
   return Number.isInteger(need) && need > CONTRACT_VERSION ? { need, have: CONTRACT_VERSION } : null;
 }
 // Same for an index entry: a contract field of unknown shape (not an integer ≥ 1 — e.g. "2.1" or an object from a future
-// build-index) is also "needs a newer hub" (need: null), not a rejection of the whole catalog. → null | {need, have}
+// build-index) is also "needs a newer hub" (need: null), not a rejection of the whole catalog. The object form
+// {version, features} (B11, registry/perms.mjs indexContract) names features added to the contract after hub 0.1.2: a feature
+// this hub doesn't know is "needs a newer hub" too (need: null, features: the unknown ones). → null | {need, have, features?}
 export function entryContractTooNew(e) {
   if (e?.contractUnknown) return { need: null, have: CONTRACT_VERSION };
-  return contractTooNew(e?.contract);
+  const tooNew = contractTooNew(e?.contract);
+  if (tooNew) return tooNew;
+  const missing = (e?.contractFeatures || []).filter((f) => !CONTRACT_FEATURES.includes(f));
+  return missing.length ? { need: null, have: CONTRACT_VERSION, features: missing } : null;
+}
+
+// The contract field of an index entry: an integer, or {version, features} (B11). → {contract, features} | null (unknown shape)
+function entryContract(c) {
+  if (Number.isInteger(c) && c >= 1 && c <= 9999) return { contract: c, features: [] };
+  if (c && typeof c === "object" && !Array.isArray(c) && Number.isInteger(c.version) && c.version >= 1 && c.version <= 9999 && Array.isArray(c.features) && c.features.length <= 32 && c.features.every((f) => isStr(f, 32) && /^[a-z][a-z0-9-]*$/.test(f))) {
+    return { contract: c.version, features: [...new Set(c.features)].sort() };
+  }
+  return null;
 }
 
 // Parse and shape-check index.json. → { generatedAt, plugins: Map, blocklist: [...] }
@@ -275,7 +289,8 @@ export function parseIndex(text) {
       (e.requires === undefined || (Array.isArray(e.requires) && e.requires.length <= 8));
     // contract 2: minimum plugin contract version (build-index takes it from <agenthub.contract>). An unknown
     // value doesn't break the catalog: the entry is marked "needs a newer hub" (entryContractTooNew)
-    const contractOk = Number.isInteger(e?.contract) && e.contract >= 1 && e.contract <= 9999;
+    // B11: or {version, features} — the features newer than hub 0.1.2 the plugin uses (an older hub reads it as unknown)
+    const ec = e?.contract === undefined || e?.contract === null ? null : entryContract(e.contract);
     if (!ok) throw new RegistryError(422, "registry:index-entry", { id: isStr(e?.id, 64) ? e.id : null });
     if (plugins.has(e.id)) throw new RegistryError(422, "registry:index-duplicate", { id: e.id });
     plugins.set(e.id, {
@@ -298,8 +313,9 @@ export function parseIndex(text) {
       // dependencies (<agenthub.requires>): "Requires <program>" in the catalog; an invalid entry is dropped entirely
       requires: (e.requires || []).map((r) => (r && typeof r === "object" ? parseRequires({ name: r.name, url: r.url, check: r.check }, isStr(r.note, 300) ? r.note : null) : "x")).filter((r) => typeof r === "object"),
       // minimum contract version (null — 1) and icon (<agenthub.icon>; invalid — no icon, the entry stays)
-      contract: contractOk ? e.contract : null,
-      ...(e.contract !== undefined && e.contract !== null && !contractOk ? { contractUnknown: true } : {}),
+      contract: ec ? ec.contract : null,
+      ...(ec?.features.length ? { contractFeatures: ec.features } : {}),
+      ...(e.contract !== undefined && e.contract !== null && !ec ? { contractUnknown: true } : {}),
       icon: entryIcon(e.icon),
     });
   }
@@ -323,6 +339,52 @@ export const INDEX_TIERS = ["official", "community"];
 export function entryTier(e) {
   if (e?.tier === "official" || e?.tier === "community") return e.tier;
   return e?.official === true ? "official" : "community";
+}
+
+// ---------- several registries (G19) ----------
+// services.plugins.registries: [{ name, indexUrl, publicKey, trust }] next to the old scalar indexUrl/publicKey pair, which keeps
+// working as the registry "default" with trust "official" (and comes first). name — a-z, 0-9, "-" (starting with a letter, up to 32);
+// trust — "official" (the index may name plugins official) or "community" (default: every entry is community, whatever the index
+// says). Order matters: the same id in two registries — the earlier registry wins in the catalog (registry-shadowed is journaled),
+// while an installed plugin always follows the registry it was installed from (lock entry registry). Each registry's signature is
+// verified with its own key; a registry's blocklist applies to its own plugins, an official registry's blocklist — to all.
+export const REGISTRY_NAME_RE = /^[a-z][a-z0-9-]{0,31}$/;
+export const REGISTRY_TRUST = ["official", "community"];
+export const MAX_REGISTRIES = 8;
+const strOrNull = (v) => (typeof v === "string" && v.trim() ? v.trim() : null);
+// services.plugins → { list: [{name, indexUrl, publicKey, trust}], errors: [{index, name, error}] }
+export function registrySources(opts = {}) {
+  const list = [];
+  const errors = [];
+  const url0 = strOrNull(opts?.indexUrl);
+  const key0 = typeof opts?.publicKey === "string" && opts.publicKey.trim() ? opts.publicKey : null;
+  if (url0 || key0) list.push({ name: "default", indexUrl: url0, publicKey: key0, trust: "official" });
+  const arr = Array.isArray(opts?.registries) ? opts.registries : [];
+  arr.forEach((r, index) => {
+    const name = typeof r?.name === "string" ? r.name : null;
+    let error = null;
+    if (!r || typeof r !== "object") error = "type";
+    else if (!name || !REGISTRY_NAME_RE.test(name)) error = "name";
+    else if (list.some((x) => x.name === name)) error = "duplicate";
+    else if (!strOrNull(r.indexUrl)) error = "indexUrl";
+    else if (typeof r.publicKey !== "string" || !r.publicKey.trim()) error = "publicKey";
+    else if (r.trust !== undefined && !REGISTRY_TRUST.includes(r.trust)) error = "trust";
+    else if (list.length >= MAX_REGISTRIES) error = "too-many";
+    if (error) errors.push({ index, name: name && name.length <= 64 ? name : null, error });
+    else list.push({ name, indexUrl: strOrNull(r.indexUrl), publicKey: r.publicKey, trust: r.trust || "community" });
+  });
+  return { list, errors };
+}
+// The label suffix of a registry: null when only the default registry is configured (single-registry UI unchanged), else the name.
+export function registryLabel(name, sources) {
+  if (!name) return null;
+  return sources.length === 1 && sources[0].name === "default" && name === "default" ? null : name;
+}
+// "official plugin · <name>" in the hub language.
+export function tierLabel(tier, name, sources) {
+  const base = msg(`tier.${tier === "official" ? "official" : "community"}`);
+  const l = registryLabel(name, sources);
+  return l ? `${base} · ${l}` : base;
 }
 
 export class PluginManager {
@@ -367,11 +429,16 @@ export class PluginManager {
       tiers: join(this.dirs.registry, "tiers.json"),
     };
     this.lowered = null; // id → {version, sha256, reason, at}: installed as official, the catalog no longer says so (tiers.json)
-    this.catalog = null; // { generatedAt, plugins: Map, blocklist, fetchedAt }
-    this.catalogError = null;
-    this.catalogStamp = null; // size and mtime of index.json/.minisig on disk from which this.catalog was loaded
+    // Registry sources (G19, registrySources): name → { catalog: { generatedAt, plugins: Map, blocklist, fetchedAt } | null,
+    // error, stamp (size and mtime of its index.json/.minisig on disk the catalog was loaded from), key (the public key it was
+    // verified with) }. this.catalog — the merged view (catalogView).
+    this.cats = new Map();
+    this.catsVer = 0;
+    this.merged = null;
+    this.sourcesMemo = null;
+    this.shadowNoted = new Set();
     this.archiveCache = new Map(); // `${id}|${sha256}|${stat}` → { rel: sha256 } | null
-    this.attestCache = new Map(); // id → { key: `${stat}|${publicKey}`, entry: index entry | null }
+    this.attestCache = new Map(); // `${registry}|${id}` → { key: `${stat}|${publicKey}`, entry: index entry | null }
     this.pending = new Map(); // consent token → { id, pid, expires, prep }
     this.lockCache = null;
     // Installs and updates in progress (id → {id, op, title, version, since}): downloading and verifying
@@ -424,8 +491,8 @@ export class PluginManager {
   // Title and version for the "Installing plugin: …" line — from the verified catalog in the hub language.
   busyInfo(id, entry = null) {
     const installed = this.lock().plugins[id] || null;
-    const e = entry || (installed?.tier === "own" ? installed : null) || this.catalog?.plugins.get(id) || null;
-    return { op: installed ? "update" : "install", title: (e && (e.i18n?.[this.langNow()]?.title || e.title)) || id, version: e?.version || null };
+    const e = entry || (installed?.tier === "own" ? installed : null) || this.catalogEntry(id, installed) || null;
+    return { op: installed ? "update" : "install", title: (e && pickLang(e.title, e.i18n, "title", this.langNow())) || id, version: e?.version || null };
   }
 
   log(entry) {
@@ -588,75 +655,209 @@ export class PluginManager {
     this.optsSig = sig;
     const prev = this.optsNow;
     this.optsNow = { ...file, ...this.baseOpts };
-    if (prev.publicKey !== this.optsNow.publicKey || prev.indexUrl !== this.optsNow.indexUrl) {
-      this.log({ type: "registry-config-changed", indexUrl: Boolean(this.indexUrl()), publicKey: Boolean(this.publicKey()) });
-      // the catalog on disk was verified with the previous key — re-verify with the new one (or reset)
-      if (prev.publicKey !== this.optsNow.publicKey) {
-        this.loadCached();
-        this.noteUpdates();
-      }
+    const regSig = (o) => JSON.stringify(registrySources(o).list);
+    if (regSig(prev) !== regSig(this.optsNow)) {
+      const now = registrySources(this.optsNow);
+      this.log({ type: "registry-config-changed", indexUrl: Boolean(this.indexUrl()), publicKey: Boolean(this.publicKey()), registries: now.list.map((r) => r.name), ...(now.errors.length ? { invalid: now.errors } : {}) });
+      // a catalog on disk was verified with the previous key — re-verify with the new one (or reset); a removed registry's
+      // catalog is dropped (its installed plugins become community until it is back)
+      this.loadCached();
+      this.noteUpdates();
     }
     return this.optsNow;
   }
 
+  // ---------- registry sources (G19) ----------
+  // The configured registries in order (registrySources): the scalar indexUrl/publicKey pair is the registry "default"
+  // (trust official), then services.plugins.registries[].
+  sources() {
+    const o = this.opts;
+    if (this.sourcesMemo?.opts !== o) this.sourcesMemo = { opts: o, list: registrySources(o).list };
+    return this.sourcesMemo.list;
+  }
+  source(name) {
+    return this.sources().find((r) => r.name === name) || null;
+  }
+  // The registry an installed (lock) entry came from: its registry field; an entry from before G19 — "default", or the first
+  // configured registry when there is no default.
+  registryOf(e) {
+    if (typeof e?.registry === "string" && REGISTRY_NAME_RE.test(e.registry)) return e.registry;
+    const list = this.sources();
+    return list.some((r) => r.name === "default") || !list.length ? "default" : list[0].name;
+  }
+  // Files of a registry: "default" keeps the historical Registry/index.json…, Registry/attest/; others — Registry/sources/<name>/.
+  srcFiles(name) {
+    const dir = name === "default" ? this.dirs.registry : join(this.dirs.registry, "sources", name);
+    return { dir, index: join(dir, "index.json"), sig: join(dir, "index.json.minisig"), state: join(dir, "state.json"), attest: name === "default" ? this.dirs.attest : join(dir, "attest") };
+  }
+  catState(name) {
+    let c = this.cats.get(name);
+    if (!c) this.cats.set(name, (c = { catalog: null, error: null, stamp: null }));
+    return c;
+  }
+  setCat(name, catalog, error = undefined) {
+    const c = this.catState(name);
+    c.catalog = catalog;
+    if (error !== undefined) c.error = error;
+    this.catsVer++;
+  }
+  // The merged catalog: every registry's plugins in config order; the same id in a later registry is shadowed by the
+  // earlier one (journaled once, registry-shadowed) — except for an installed plugin, which always follows the registry it was
+  // installed from (catalogEntry). Blocklists: tagged with their registry (blockReason). null — no verified catalog at all.
+  get catalog() {
+    const key = `${this.catsVer}|${this.sources().map((r) => r.name).join(",")}`;
+    if (this.merged?.key === key) return this.merged.value;
+    const plugins = new Map();
+    const blocklist = [];
+    let generatedAt = null;
+    let fetchedAt = null;
+    let any = false;
+    const shadowed = [];
+    for (const src of this.sources()) {
+      const cat = this.cats.get(src.name)?.catalog;
+      if (!cat) continue;
+      any = true;
+      if (!generatedAt || Date.parse(cat.generatedAt) > Date.parse(generatedAt)) generatedAt = cat.generatedAt;
+      if (cat.fetchedAt && (!fetchedAt || Date.parse(cat.fetchedAt) > Date.parse(fetchedAt))) fetchedAt = cat.fetchedAt;
+      for (const [id, e] of cat.plugins) {
+        if (plugins.has(id)) shadowed.push({ id, registry: src.name, by: plugins.get(id).registry });
+        else plugins.set(id, e);
+      }
+      for (const b of cat.blocklist) blocklist.push(b);
+    }
+    for (const x of shadowed) {
+      const k = `${x.id}|${x.registry}|${x.by}`;
+      if (this.shadowNoted.has(k)) continue;
+      this.shadowNoted.add(k);
+      this.log({ type: "registry-shadowed", plugin: x.id, registry: x.registry, by: x.by });
+    }
+    const value = any ? { generatedAt, fetchedAt, plugins, blocklist, shadowed } : null;
+    this.merged = { key, value };
+    return value;
+  }
+  // The first registry's error (the old single-registry field), or null.
+  get catalogError() {
+    for (const src of this.sources()) {
+      const e = this.cats.get(src.name)?.error;
+      if (e) return e;
+    }
+    return null;
+  }
+  // The catalog entry for id: an installed registry plugin — from the registry it was installed from (an earlier registry
+  // listing the same id never takes it over); otherwise — the first registry listing it.
+  catalogEntry(id, inst = this.lockEntry(id)) {
+    if (inst && inst.tier !== "own") return this.cats.get(this.registryOf(inst))?.catalog?.plugins.get(id) || null;
+    return this.catalog?.plugins.get(id) || null;
+  }
+  // Registries for the shell (GET /registry/catalog → registries): name, trust, state of its catalog.
+  registriesView() {
+    return this.sources().map((r) => {
+      const c = this.cats.get(r.name) || {};
+      return {
+        name: r.name,
+        trust: r.trust,
+        // the tier label suffix: null for the single default registry (the UI stays as before)
+        label: registryLabel(r.name, this.sources()),
+        configured: Boolean(r.indexUrl && r.publicKey),
+        missing: [!r.indexUrl && "index-url", !r.publicKey && "public-key"].filter(Boolean),
+        generatedAt: c.catalog?.generatedAt || null,
+        fetchedAt: c.catalog?.fetchedAt || null,
+        plugins: c.catalog ? c.catalog.plugins.size : 0,
+        error: c.error || null,
+        // "official plugin · <name>" in the hub language (the suffix only when there is more than the default registry)
+        tierLabel: tierLabel(r.trust, r.name, this.sources()),
+      };
+    });
+  }
+
   // ---------- catalog ----------
-  publicKey() {
-    const k = this.opts.publicKey;
+  // The first registry's index URL and key (single-registry fields of /registry/catalog: configured, missing).
+  publicKey(name = null) {
+    const src = name ? this.source(name) : this.sources()[0];
+    const k = src?.publicKey;
     return typeof k === "string" && k.trim() ? k : null;
   }
 
-  verifyIndex(indexBytes, sigText) {
-    const key = this.publicKey();
-    if (!key) throw new RegistryError(409, "registry:no-public-key");
+  // Verify an index with the key of registry name and parse it. A registry with trust "community" never makes a plugin
+  // official (its entries are capped to community); every entry carries the registry name.
+  verifyIndex(indexBytes, sigText, name = this.sources()[0]?.name || "default") {
+    const src = this.source(name);
+    const key = src?.publicKey || null;
+    if (!key) throw new RegistryError(409, "registry:no-public-key", { registry: name });
     const v = verifySignature(indexBytes, String(sigText), key);
-    if (!v.ok) throw new RegistryError(422, `registry:${v.reason === "key-mismatch" ? "foreign-key" : v.reason}`);
+    if (!v.ok) throw new RegistryError(422, `registry:${v.reason === "key-mismatch" ? "foreign-key" : v.reason}`, { registry: name });
     const idx = parseIndex(Buffer.from(indexBytes).toString("utf8"));
+    for (const e of idx.plugins.values()) {
+      e.registry = name;
+      if (src.trust !== "official" && e.tier === "official") {
+        e.tier = "community";
+        e.official = false;
+        e.capped = true;
+      }
+    }
+    for (const b of idx.blocklist) b.registry = name;
     return idx;
   }
 
-  // Fingerprint of index.json and the signature on disk: another process may have updated the catalog (`agenthub plugins install`).
-  diskStamp() {
+  // Fingerprint of a registry's index.json and signature on disk: another process may have updated it (`agenthub plugins install`).
+  diskStamp(name = "default") {
+    const f = this.srcFiles(name);
     try {
-      const a = statSync(this.files.index);
-      const b = statSync(this.files.sig);
+      const a = statSync(f.index);
+      const b = statSync(f.sig);
       return `${a.size}:${a.mtimeMs}:${a.ctimeMs}|${b.size}:${b.mtimeMs}:${b.ctimeMs}`;
     } catch {
       return null;
     }
   }
 
-  // Re-read the catalog from disk if it was changed outside this process. An older index (rollback) is not taken. Files that
+  // Re-read the catalogs from disk if they were changed outside this process. An older index (rollback) is not taken. Files that
   // don't verify (a half-written pair from another process — index.json is replaced before its signature — or a damaged file) don't
   // replace the last verified catalog in memory: tiers keep following it until a pair on disk verifies again.
   refreshCatalog() {
-    const stamp = this.diskStamp();
-    if (stamp === this.catalogStamp) return;
-    const prev = this.catalog;
-    this.loadCached();
-    if (prev && this.catalog && Date.parse(this.catalog.generatedAt) < Date.parse(prev.generatedAt)) {
-      this.log({ type: "registry-rejected", error: "registry:rollback" });
-      this.catalog = prev;
+    let changed = false;
+    for (const src of this.sources()) {
+      const st = this.catState(src.name);
+      const stamp = this.diskStamp(src.name);
+      if (stamp === st.stamp && st.key === src.publicKey) continue;
+      const prev = st.catalog;
+      this.loadSource(src);
+      if (prev && st.catalog && Date.parse(st.catalog.generatedAt) < Date.parse(prev.generatedAt)) {
+        this.log({ type: "registry-rejected", registry: src.name, error: "registry:rollback" });
+        this.setCat(src.name, prev);
+      }
+      if (prev && !st.catalog && st.error && st.key === src.publicKey) this.setCat(src.name, prev);
+      changed = true;
     }
-    if (prev && !this.catalog && this.catalogError) this.catalog = prev;
-    this.noteUpdates();
+    if (changed) this.noteUpdates();
   }
 
+  // (Re)load every registry's catalog from disk; registries no longer configured are forgotten.
   loadCached() {
-    this.catalog = null;
-    this.catalogStamp = this.diskStamp();
-    if (!existsSync(this.files.index) || !existsSync(this.files.sig)) return;
+    const names = new Set(this.sources().map((r) => r.name));
+    for (const n of [...this.cats.keys()]) if (!names.has(n)) this.cats.delete(n);
+    for (const src of this.sources()) this.loadSource(src);
+    this.catsVer++;
+  }
+  loadSource(src) {
+    const st = this.catState(src.name);
+    const f = this.srcFiles(src.name);
+    this.setCat(src.name, null);
+    st.stamp = this.diskStamp(src.name);
+    st.key = src.publicKey;
+    if (!existsSync(f.index) || !existsSync(f.sig)) return;
     try {
-      const idx = this.verifyIndex(readFileSync(this.files.index), readFileSync(this.files.sig, "utf8"));
-      this.catalog = { ...idx, fetchedAt: readJsonOr(this.files.state, {}).fetchedAt || null };
-      this.catalogError = null;
+      const idx = this.verifyIndex(readFileSync(f.index), readFileSync(f.sig, "utf8"), src.name);
+      this.setCat(src.name, { ...idx, fetchedAt: readJsonOr(f.state, {}).fetchedAt || null }, null);
     } catch (e) {
-      this.catalogError = e.code || e.message;
-      this.log({ type: "registry-cache-rejected", error: this.catalogError });
+      this.setCat(src.name, null, e.code || e.message);
+      this.log({ type: "registry-cache-rejected", registry: src.name, error: e.code || e.message });
     }
   }
 
-  indexUrl() {
-    const u = this.opts.indexUrl;
+  indexUrl(name = null) {
+    const src = name ? this.source(name) : this.sources()[0];
+    const u = src?.indexUrl;
     return typeof u === "string" && u.trim() ? u.trim() : null;
   }
 
@@ -697,9 +898,9 @@ export class PluginManager {
     return Buffer.concat(chunks);
   }
 
-  // Archive URL relative to index.json; locally — not above the index directory.
+  // Archive URL relative to the index.json of the entry's registry; locally — not above the index directory.
   archiveUrl(entry) {
-    const base = this.indexUrl();
+    const base = this.indexUrl(entry.registry || this.sources()[0]?.name || "default");
     if (!base) throw new RegistryError(409, "registry:no-index-url");
     if (/^https:\/\//.test(entry.archive)) return entry.archive;
     if (/^[a-z]+:/i.test(entry.archive) || entry.archive.startsWith("/")) throw new RegistryError(422, "registry:archive-url");
@@ -714,47 +915,77 @@ export class PluginManager {
     return p;
   }
 
+  // Download and verify every configured registry (G19). One registry — as before: its error is thrown. Several — each on its own;
+  // throws only if none succeeded (the first error). → { generatedAt, plugins, blocklist, registries: [{name, ok, error?, …}] }
   async fetchCatalog() {
-    const url = this.indexUrl();
-    if (!url) throw new RegistryError(409, "registry:no-index-url");
-    if (!this.publicKey()) throw new RegistryError(409, "registry:no-public-key");
+    const list = this.sources();
+    if (!list.length || !list.some((r) => r.indexUrl)) throw new RegistryError(409, "registry:no-index-url");
+    if (!list.some((r) => r.indexUrl && r.publicKey)) throw new RegistryError(409, "registry:no-public-key");
+    const results = [];
+    let firstError = null;
+    for (const src of list) {
+      if (!src.indexUrl || !src.publicKey) {
+        results.push({ name: src.name, ok: false, error: src.indexUrl ? "registry:no-public-key" : "registry:no-index-url" });
+        continue;
+      }
+      try {
+        results.push({ name: src.name, ok: true, ...(await this.fetchSource(src)) });
+      } catch (e) {
+        firstError ||= e;
+        results.push({ name: src.name, ok: false, error: e.code || e.message });
+      }
+    }
+    if (list.length === 1 && firstError) throw firstError;
+    if (!results.some((r) => r.ok)) throw firstError || new RegistryError(502, "registry:fetch");
+    this.applyBlocklist();
+    // New catalogs may have changed the tier of installed plugins (official → community): the core re-evaluates the policy.
+    this.changed();
+    const cat = this.catalog;
+    this.emit({ type: "plugins.catalog", generatedAt: cat?.generatedAt || null, plugins: cat?.plugins.size || 0 });
+    this.noteUpdates();
+    return { generatedAt: cat?.generatedAt || null, plugins: cat?.plugins.size || 0, blocklist: cat?.blocklist.length || 0, registries: results };
+  }
+
+  async fetchSource(src) {
+    const url = src.indexUrl;
+    const f = this.srcFiles(src.name);
     const sigUrl = url.startsWith("https://") ? new URL(url).href + ".minisig" : url + ".minisig";
     const [indexBytes, sigBytes] = await Promise.all([this.fetchBytes(url, MAX_INDEX_BYTES), this.fetchBytes(sigUrl, MAX_SIG_BYTES)]);
     let idx;
     try {
-      idx = this.verifyIndex(indexBytes, sigBytes.toString("utf8"));
+      idx = this.verifyIndex(indexBytes, sigBytes.toString("utf8"), src.name);
     } catch (e) {
-      this.log({ type: "registry-rejected", error: e.code || e.message });
+      this.log({ type: "registry-rejected", registry: src.name, error: e.code || e.message });
       throw e;
     }
-    const prev = readJsonOr(this.files.state, {}).generatedAt || this.catalog?.generatedAt || null;
+    const st = this.catState(src.name);
+    const prev = readJsonOr(f.state, {}).generatedAt || st.catalog?.generatedAt || null;
     if (prev && Date.parse(idx.generatedAt) < Date.parse(prev)) {
-      this.log({ type: "registry-rejected", error: "registry:rollback" });
-      throw new RegistryError(409, "registry:rollback", { have: prev, got: idx.generatedAt });
+      this.log({ type: "registry-rejected", registry: src.name, error: "registry:rollback" });
+      throw new RegistryError(409, "registry:rollback", { have: prev, got: idx.generatedAt, registry: src.name });
     }
     // The previous catalog is being replaced: save the signed attestation of officialness for installed versions that are
     // the latest in it (otherwise a new release by itself, without an update, would demote the installed one to community).
-    this.keepAttestations(idx);
-    atomicWrite(this.files.index, indexBytes);
-    atomicWrite(this.files.sig, sigBytes);
+    this.keepAttestations(idx, src.name);
+    mkdirSync(f.dir, { recursive: true, mode: 0o700 });
+    atomicWrite(f.index, indexBytes);
+    atomicWrite(f.sig, sigBytes);
     const fetchedAt = new Date().toISOString();
-    atomicWrite(this.files.state, JSON.stringify({ generatedAt: idx.generatedAt, fetchedAt }) + "\n");
-    this.catalog = { ...idx, fetchedAt };
-    this.catalogStamp = this.diskStamp();
-    this.catalogError = null;
-    this.log({ type: "registry-fetched", generatedAt: idx.generatedAt, plugins: idx.plugins.size, blocked: idx.blocklist.length });
-    this.applyBlocklist();
-    // The new catalog may have changed the tier of installed plugins (official → community): the core re-evaluates the policy.
-    this.changed();
-    this.emit({ type: "plugins.catalog", generatedAt: idx.generatedAt, plugins: idx.plugins.size });
-    this.noteUpdates();
+    atomicWrite(f.state, JSON.stringify({ generatedAt: idx.generatedAt, fetchedAt }) + "\n");
+    this.setCat(src.name, { ...idx, fetchedAt }, null);
+    st.stamp = this.diskStamp(src.name);
+    st.key = src.publicKey;
+    this.log({ type: "registry-fetched", registry: src.name, generatedAt: idx.generatedAt, plugins: idx.plugins.size, blocked: idx.blocklist.length });
     return { generatedAt: idx.generatedAt, plugins: idx.plugins.size, blocklist: idx.blocklist.length };
   }
 
   // ---------- blocklist ----------
-  blockReason(id, { version = null, sha256: sum = null, any = false } = {}) {
+  // A blocklist entry applies to a plugin from its own registry; blocklists of registries with trust "official" apply to every
+  // plugin (the hub's kill switch). registry — the plugin's registry (null: a local plugin or not from a registry).
+  blockReason(id, { version = null, sha256: sum = null, any = false, registry = null } = {}) {
     for (const b of this.catalog?.blocklist || []) {
       if (b.id !== id) continue;
+      if (b.registry && b.registry !== registry && this.source(b.registry)?.trust !== "official") continue;
       const all = !b.versions?.length && !b.sha256?.length;
       if (all) return b.reason;
       if (any) continue;
@@ -773,7 +1004,7 @@ export class PluginManager {
       // The registry blocklist is about registry plugins; it doesn't disable an own plugin from its own folder (the human installed it).
       // An own entry the manager didn't make (ownTrusted) is not an own plugin: the blocklist applies to it.
       if (this.ownTrusted(id, e)) continue;
-      const reason = this.blockReason(id, { version: e.version, sha256: e.sha256 });
+      const reason = this.blockReason(id, { version: e.version, sha256: e.sha256, registry: this.registryOf(e) });
       const live = join(this.paths.plugins, id);
       const off = join(this.dirs.disabled, id);
       if (reason && !e.disabled) {
@@ -828,7 +1059,9 @@ export class PluginManager {
       tier = this.officialNow(pl.id, v.entry) ? "official" : "community";
       this.noteTier(pl.id, v.entry, tier === "official");
     }
-    return { allowed: true, effects: (defaults?.effects || []).filter((e) => granted.has(e)), tier, official: tier === "official" };
+    // registry (G19): where a registry plugin came from — the core shows it in /state.plugins[].registry(Label)
+    const reg = v.entry.tier === "own" ? null : this.registryOf(v.entry);
+    return { allowed: true, effects: (defaults?.effects || []).filter((e) => granted.has(e)), tier, official: tier === "official", ...(reg ? { registry: reg, registryLabel: registryLabel(reg, this.sources()) } : {}) };
   }
 
   // Is the installed plugin official right now: the signed catalog names the id official (tier not lowered),
@@ -841,7 +1074,7 @@ export class PluginManager {
     // an own plugin is never official, even if the catalog has a plugin with the same id and the same content
     if (e?.tier === "own") return false;
     this.refreshCatalog();
-    const ce = this.catalog?.plugins.get(id);
+    const ce = e ? this.catalogEntry(id, e) : null;
     if (!ce || ce.tier !== "official" || !e) return false;
     if (ce.sha256 !== e.sha256 && !this.attestedOfficial(id, e)) return false;
     const files = this.archiveFiles(id, e.sha256);
@@ -869,7 +1102,7 @@ export class PluginManager {
   // Why an installed official plugin is not official now: the id is gone from the catalog, the catalog lists it as community,
   // or the installed archive is not the signed one (no attestation, files differ from the saved archive).
   lowerReason(id, e) {
-    const ce = this.catalog?.plugins.get(id);
+    const ce = this.catalogEntry(id, e);
     if (!ce) return "not-in-catalog";
     if (ce.tier !== "official") return "community";
     return "archive";
@@ -878,7 +1111,8 @@ export class PluginManager {
   // catalog doesn't call official now is journaled once; back to official — once more. Without a verified catalog (never
   // fetched, the cache on disk failed its signature) nothing is journaled: there is nothing to compare with.
   noteTier(id, e, official) {
-    if (entryTier(e) !== "official" || !this.catalog) return;
+    const cat = this.cats.get(this.registryOf(e))?.catalog || null;
+    if (entryTier(e) !== "official" || !cat) return;
     const map = this.loweredMap();
     const mark = map.get(id);
     const same = mark && mark.sha256 === e.sha256;
@@ -886,11 +1120,11 @@ export class PluginManager {
       const reason = this.lowerReason(id, e);
       map.set(id, { version: e.version, sha256: e.sha256, reason, at: new Date().toISOString() });
       this.saveLowered();
-      this.log({ type: "plugin-tier-lowered", plugin: id, version: e.version, from: "official", to: "community", reason, generatedAt: this.catalog.generatedAt });
+      this.log({ type: "plugin-tier-lowered", plugin: id, version: e.version, from: "official", to: "community", reason, generatedAt: cat.generatedAt, registry: this.registryOf(e) });
     } else if (official && mark) {
       map.delete(id);
       this.saveLowered();
-      if (same) this.log({ type: "plugin-tier-restored", plugin: id, version: e.version, from: "community", to: "official", generatedAt: this.catalog.generatedAt });
+      if (same) this.log({ type: "plugin-tier-restored", plugin: id, version: e.version, from: "community", to: "official", generatedAt: cat.generatedAt, registry: this.registryOf(e) });
     }
   }
   // The plugin was installed again or removed: the previous mark is about another install.
@@ -900,13 +1134,20 @@ export class PluginManager {
     this.saveLowered();
   }
 
-  attestFiles(id) {
-    return { index: join(this.dirs.attest, `${id}.json`), sig: join(this.dirs.attest, `${id}.json.minisig`) };
+  // Attestations of id in every configured registry (and the one the lock entry names): removed on update and removal.
+  dropAttest(id, e = null) {
+    const regs = new Set(["default", ...this.sources().map((r) => r.name), ...(e ? [this.registryOf(e)] : [])]);
+    for (const r of regs) for (const f of Object.values(this.attestFiles(id, r))) rmSync(f, { force: true });
+  }
+  attestFiles(id, registry = "default") {
+    const dir = this.srcFiles(registry).attest;
+    return { index: join(dir, `${id}.json`), sig: join(dir, `${id}.json.minisig`) };
   }
 
   // Does the saved signed index name the installed version (id, version, archive sha256) official?
   attestedOfficial(id, e) {
-    const f = this.attestFiles(id);
+    const reg = this.registryOf(e);
+    const f = this.attestFiles(id, reg);
     let stamp;
     try {
       const a = lstatSync(f.index);
@@ -916,17 +1157,17 @@ export class PluginManager {
     } catch {
       return false;
     }
-    const key = `${stamp}|${this.publicKey() || ""}`;
-    let hit = this.attestCache.get(id);
+    const key = `${stamp}|${this.source(reg)?.publicKey || ""}`;
+    let hit = this.attestCache.get(`${reg}|${id}`);
     if (!hit || hit.key !== key) {
       let entry = null;
       try {
-        if (statSync(f.index).size <= MAX_INDEX_BYTES) entry = this.verifyIndex(readFileSync(f.index), readFileSync(f.sig, "utf8")).plugins.get(id) || null;
+        if (this.source(reg) && statSync(f.index).size <= MAX_INDEX_BYTES) entry = this.verifyIndex(readFileSync(f.index), readFileSync(f.sig, "utf8"), reg).plugins.get(id) || null;
       } catch {
         entry = null;
       }
       hit = { key, entry };
-      this.attestCache.set(id, hit);
+      this.attestCache.set(`${reg}|${id}`, hit);
     }
     const ae = hit.entry;
     return Boolean(ae && ae.tier === "official" && ae.sha256 === e.sha256 && ae.version === e.version);
@@ -934,25 +1175,27 @@ export class PluginManager {
 
   // The new catalog next replaces the current one (verified, on disk): for installed plugins whose version is official
   // in the current catalog and no longer the latest in the new one, save the current index with its signature to Registry/attest/<id>.
-  keepAttestations(next) {
+  keepAttestations(next, registry = "default") {
     this.refreshCatalog(); // memory is exactly what's on disk (another process may have updated the catalog)
-    const cur = this.catalog;
+    const cur = this.cats.get(registry)?.catalog;
+    const files = this.srcFiles(registry);
     if (!cur) return;
     let bytes = null;
     let sig = null;
     for (const [id, e] of Object.entries(this.lock().plugins)) {
+      if (e.tier === "own" || this.registryOf(e) !== registry) continue;
       const ce = cur.plugins.get(id);
       if (!ce || ce.tier !== "official" || ce.sha256 !== e.sha256) continue;
       if (next.plugins.get(id)?.sha256 === e.sha256) continue; // the new catalog signs it itself
       if (this.attestedOfficial(id, e)) continue;
       try {
         if (!bytes) {
-          bytes = readFileSync(this.files.index);
-          sig = readFileSync(this.files.sig);
-          this.verifyIndex(bytes, sig.toString("utf8")); // on disk — exactly the verified catalog
+          bytes = readFileSync(files.index);
+          sig = readFileSync(files.sig);
+          this.verifyIndex(bytes, sig.toString("utf8"), registry); // on disk — exactly the verified catalog
         }
-        const f = this.attestFiles(id);
-        mkdirSync(this.dirs.attest, { recursive: true, mode: 0o700 });
+        const f = this.attestFiles(id, registry);
+        mkdirSync(files.attest, { recursive: true, mode: 0o700 });
         atomicWrite(f.index, bytes);
         atomicWrite(f.sig, sig);
         this.log({ type: "registry-attest-kept", plugin: id, version: e.version });
@@ -995,7 +1238,7 @@ export class PluginManager {
     const e = this.lockEntry(pl.id);
     if (!e) return { ok: false, reason: "not-in-lock" };
     if (e.disabled) return { ok: false, reason: e.disabled.reason || "disabled" };
-    if (!this.ownTrusted(pl.id, e) && this.blockReason(pl.id, { version: e.version, sha256: e.sha256 })) return { ok: false, reason: "blocklist" };
+    if (!this.ownTrusted(pl.id, e) && this.blockReason(pl.id, { version: e.version, sha256: e.sha256, registry: this.registryOf(e) })) return { ok: false, reason: "blocklist" };
     const dir = join(this.paths.plugins, pl.id);
     if (resolve(pl.dir) !== resolve(dir)) return { ok: false, reason: "layout" };
     let files;
@@ -1041,9 +1284,10 @@ export class PluginManager {
   async prepare(id) {
     if (typeof id !== "string" || !ID_RE.test(id) || RESERVED_IDS.has(id)) throw new RegistryError(400, "registry:id");
     if (!this.catalog) throw new RegistryError(409, "registry:no-catalog", this.catalogError ? { detail: this.catalogError } : {});
-    const entry = this.catalog.plugins.get(id);
+    // an installed registry plugin updates only from the registry it came from (G19); a new one — from the first registry listing it
+    const entry = this.catalogEntry(id);
     if (!entry) throw new RegistryError(404, "not-found");
-    const blocked = this.blockReason(id, { version: entry.version, sha256: entry.sha256 });
+    const blocked = this.blockReason(id, { version: entry.version, sha256: entry.sha256, registry: entry.registry });
     if (blocked) throw new RegistryError(409, "registry:blocklist", { reason: blocked });
     if (entry.platforms.length && !entry.platforms.includes(PLATFORM)) throw new RegistryError(409, "registry:platform");
     if (this.builtinIds().has(id)) throw new RegistryError(409, "registry:id-taken", { by: "builtin" });
@@ -1162,9 +1406,9 @@ export class PluginManager {
       // a new catalog may have arrived while the window was open
       // (same archive, but a different tier — the linter in prepare judged by the old tier)
       this.refreshCatalog();
-      const cur = this.catalog?.plugins.get(id);
-      if (!cur || cur.sha256 !== prep.entry.sha256 || cur.tier !== prep.entry.tier) throw new RegistryError(409, "registry:catalog-changed");
-      if (this.blockReason(id, { version: cur.version, sha256: cur.sha256 })) throw new RegistryError(409, "registry:blocklist");
+      const cur = this.catalogEntry(id);
+      if (!cur || cur.sha256 !== prep.entry.sha256 || cur.tier !== prep.entry.tier || cur.registry !== prep.entry.registry) throw new RegistryError(409, "registry:catalog-changed");
+      if (this.blockReason(id, { version: cur.version, sha256: cur.sha256, registry: cur.registry })) throw new RegistryError(409, "registry:blocklist");
     } else {
       const inst = this.lockEntry(id);
       if (inst?.tier === "own" && source !== "registry") {
@@ -1197,8 +1441,9 @@ export class PluginManager {
       token,
       expiresInMs: CONSENT_TTL_MS,
       id,
-      title: prep.entry.i18n?.[lang]?.title || prep.entry.title,
+      title: pickLang(prep.entry.title, prep.entry.i18n, "title", lang),
       tier: prep.entry.tier,
+      ...(prep.kind === "own" ? {} : { registry: prep.entry.registry || null, registryLabel: registryLabel(prep.entry.registry, this.sources()), tierLabel: tierLabel(prep.entry.tier, prep.entry.registry, this.sources()) }),
       version: prep.entry.version,
       fromVersion: prep.fromVersion,
       update: prep.update,
@@ -1291,7 +1536,7 @@ export class PluginManager {
     const ce = this.catalog?.plugins.get(id);
     if (!ce) return null;
     const lang = this.langNow();
-    return { from: "catalog", tier: ce.tier, version: ce.version, title: ce.i18n?.[lang]?.title || ce.title || id };
+    return { from: "catalog", tier: ce.tier, version: ce.version, title: pickLang(ce.title, ce.i18n, "title", lang) || id };
   }
 
   commitOwn(prep, peer, opts = {}) {
@@ -1435,7 +1680,7 @@ export class PluginManager {
     return {
       requestId: r.requestId,
       id: r.id,
-      title: r.titles[lang] || r.titles[""] || r.id,
+      title: (r.titles[contentLang(Object.fromEntries(Object.entries(r.titles).filter(([k]) => k).map(([k, v]) => [k, { title: v }])), lang, { field: "title" })] ?? null) || r.titles[""] || r.id,
       version: r.version,
       path: r.path,
       pathShort: shortPath(r.path),
@@ -1456,7 +1701,7 @@ export class PluginManager {
   // Catalog plugin title in language lang (the "catalog" marker in a request is in the display language, not the request's).
   catalogTitle(id, lang = this.langNow()) {
     const ce = this.catalog?.plugins.get(id);
-    return ce ? ce.i18n?.[lang]?.title || ce.title || null : null;
+    return ce ? pickLang(ce.title, ce.i18n, "title", lang) || null : null;
   }
 
   ownRequestList() {
@@ -1643,7 +1888,7 @@ export class PluginManager {
     for (const e of Object.values(this.lock().plugins)) {
       if (e.tier !== "own") continue;
       const st = this.ownState.get(e.id);
-      if (st && st.status !== "ok") problems.push({ id: e.id, title: e.i18n?.[lang]?.title || e.title || e.id, status: st.status, error: st.error || null });
+      if (st && st.status !== "ok") problems.push({ id: e.id, title: pickLang(e.title, e.i18n, "title", lang) || e.id, status: st.status, error: st.error || null });
     }
     return { requests: this.ownRequestList(), problems };
   }
@@ -1680,6 +1925,8 @@ export class PluginManager {
       archive: entry.archive,
       tier: entry.tier,
       official: entry.tier === "official",
+      // the registry it came from (G19): updates and officialness follow this registry only
+      ...(!own && entry.registry ? { registry: entry.registry } : {}),
       installedAt: before?.installedAt || now,
       updatedAt: now,
       granted: perms,
@@ -1721,7 +1968,7 @@ export class PluginManager {
     rmSync(old, { recursive: true, force: true });
     this.clearLowered(id);
     // the previous version's attestation is no longer needed: the current catalog signs the new one
-    for (const f of Object.values(this.attestFiles(id))) rmSync(f, { force: true });
+    this.dropAttest(id, before);
     // Archive of this version — for the officialness check (officialNow). If it fails to write, the plugin runs as community.
     // An own plugin has no archive: the previous registry archive (switch) is deleted — the copy won't become official.
     try {
@@ -1767,7 +2014,7 @@ export class PluginManager {
     }
     rmSync(off, { recursive: true, force: true });
     rmSync(join(this.dirs.archives, `${id}.tar.gz`), { force: true });
-    for (const f of Object.values(this.attestFiles(id))) rmSync(f, { force: true });
+    this.dropAttest(id, lock.plugins[id]);
     rmSync(join(this.paths.pluginCache, id), { recursive: true, force: true });
     if (purge) rmSync(join(this.paths.pluginData, id), { recursive: true, force: true });
     const version = lock.plugins[id]?.version || null;
@@ -1812,7 +2059,7 @@ export class PluginManager {
         const growth = st.growth || [];
         out.push({
           id,
-          title: inst.i18n?.[lang]?.title || inst.title || id,
+          title: pickLang(inst.title, inst.i18n, "title", lang) || id,
           installed: inst.version,
           version: st.version,
           sha256: st.fingerprint,
@@ -1827,10 +2074,10 @@ export class PluginManager {
         });
         continue;
       }
-      const ce = this.catalog?.plugins.get(id);
+      const ce = this.catalogEntry(id, inst);
       if (!ce || ce.sha256 === inst.sha256) continue;
       if (compareVersions(ce.version, inst.version) <= 0) continue;
-      if (this.blockReason(id, { version: ce.version, sha256: ce.sha256 })) continue;
+      if (this.blockReason(id, { version: ce.version, sha256: ce.sha256, registry: ce.registry })) continue;
       if (ce.platforms.length && !ce.platforms.includes(PLATFORM)) continue;
       // a version that needs a newer hub is not "update available": this hub wouldn't let it be installed anyway
       // (registry:hub-too-old); the catalog shows it with "Needs a newer hub" (listCatalog → needsHub)
@@ -1838,11 +2085,13 @@ export class PluginManager {
       const growth = permissionGrowth(inst.granted, ce.permissions, { pluginId: ce.id }).map(({ key, ...p }) => p);
       out.push({
         id,
-        title: ce.i18n?.[lang]?.title || ce.title,
+        title: pickLang(ce.title, ce.i18n, "title", lang),
         installed: inst.version,
         version: ce.version,
         sha256: ce.sha256,
         tier: ce.tier,
+        registry: ce.registry || null,
+        registryLabel: registryLabel(ce.registry, this.sources()),
         permissionsGrow: growth.length > 0,
         added: localizePerms(growth, ce.i18n, lang),
       });
@@ -1851,7 +2100,7 @@ export class PluginManager {
   }
 
   configured() {
-    return Boolean(this.indexUrl() && this.publicKey());
+    return this.sources().some((r) => r.indexUrl && r.publicKey);
   }
 
   // ---------- lists for the shell ----------
@@ -1859,17 +2108,22 @@ export class PluginManager {
     const lock = this.lock();
     const builtin = this.builtinIds();
     const plugins = [];
-    for (const e of this.catalog?.plugins.values() || []) {
-      const inst = lock.plugins[e.id] || null;
+    const srcs = this.sources();
+    for (const first of this.catalog?.plugins.values() || []) {
+      const inst = lock.plugins[first.id] || null;
       // an own plugin with this id is installed: the catalog doesn't update it (switching to the catalog only explicitly, with a window)
       const own = inst?.tier === "own";
+      // an installed registry plugin is shown from the registry it came from (G19); gone from there — the first listing, no update
+      const pinned = inst && !own ? this.catalogEntry(first.id, inst) : null;
+      const e = pinned || first;
+      const elsewhere = Boolean(inst && !own && !pinned);
       const growth = inst && !own ? permissionGrowth(inst.granted, e.permissions, { pluginId: e.id }).map(({ key, ...p }) => p) : null;
       const lang = this.langNow();
       plugins.push({
         id: e.id,
         version: e.version,
-        title: e.i18n?.[lang]?.title || e.title,
-        desc: e.i18n?.[lang]?.desc || e.desc,
+        title: pickLang(e.title, e.i18n, "title", lang),
+        desc: pickLang(e.desc, e.i18n, "desc", lang),
         author: e.author,
         platforms: e.platforms,
         type: e.type,
@@ -1877,19 +2131,24 @@ export class PluginManager {
         tier: e.tier,
         official: e.tier === "official",
         label: e.tier === "official" ? "official" : null,
+        // G19: the registry listing it, the label suffix (null with only the default registry) and the full tier label
+        registry: e.registry || null,
+        registryLabel: registryLabel(e.registry, srcs),
+        tierLabel: tierLabel(e.tier, e.registry, srcs),
+        ...(e.capped ? { capped: true } : {}),
         sha256: e.sha256,
         size: e.size,
         permissions: localizePerms(permissionList(e.permissions, { pluginId: e.id }).map(({ key, ...p }) => p), e.i18n, lang),
         installed: inst ? inst.version : null,
         installedOwn: own ? { path: inst.own?.path || null, pathShort: shortPath(inst.own?.path || "") } : null,
-        updateAvailable: Boolean(inst && !own && inst.sha256 !== e.sha256),
+        updateAvailable: Boolean(inst && !own && !elsewhere && inst.sha256 !== e.sha256),
         growth,
         // "Requires <program>": the dependency and whether it's installed (whether the check path exists in the plugins' HOME)
         requires: (e.requires || []).map((r) => {
-          const tr = e.i18n?.[lang]?.requires?.[r.name] || {};
+          const tr = contentOf(e.i18n, lang, { field: "requires" }).requires?.[r.name] || {};
           return { name: tr.name || r.name, url: r.url, note: tr.note || r.note || null, check: r.check, present: existsSync(expandPath(r.check, this.homeDir())) };
         }),
-        blocked: this.blockReason(e.id, { version: e.version, sha256: e.sha256 }),
+        blocked: this.blockReason(e.id, { version: e.version, sha256: e.sha256, registry: e.registry }),
         builtin: builtin.has(e.id),
         platformOk: !e.platforms.length || e.platforms.includes(PLATFORM),
         // contract 2: icon from the index and "needs a newer hub" (the plugin needs a newer contract than this core)
@@ -1899,11 +2158,15 @@ export class PluginManager {
       });
     }
     return {
-      configured: Boolean(this.indexUrl() && this.publicKey()),
-      // what's missing to connect the registry: the index URL, the public key, or both
+      configured: this.configured(),
+      // what's missing to connect the (first) registry: the index URL, the public key, or both
       missing: [!this.indexUrl() && "index-url", !this.publicKey() && "public-key"].filter(Boolean),
       generatedAt: this.catalog?.generatedAt || null,
       fetchedAt: this.catalog?.fetchedAt || null,
+      // G19: every configured registry ({name, trust, label, configured, missing, generatedAt, fetchedAt, plugins, error,
+      // tierLabel}) and the ids a later registry also lists (hidden: the earlier registry wins)
+      registries: this.registriesView(),
+      shadowed: (this.catalog?.shadowed || []).map((x) => ({ ...x })),
       error: this.catalogError,
       // for the "how to connect" hint: CLI with the full path and the hub directory (non-default — AGENTHUB_HOME=…)
       connect: { cli: CLI_PATH, home: this.paths.home, defaultHome: samePath(this.paths.home, liveStateDir()) },
@@ -1917,11 +2180,12 @@ export class PluginManager {
       if (e.tier === "own") return this.ownInstalledView(e);
       // tier — as in the policy: by the verified catalog right now, not by the lock entry
       const official = this.officialNow(e.id, e);
-      const ce = this.catalog?.plugins.get(e.id) || null;
+      const ce = this.catalogEntry(e.id, e);
       const lang = this.langNow();
+      const reg = this.registryOf(e);
       return {
         id: e.id,
-        title: ce ? ce.i18n?.[lang]?.title || ce.title : e.id,
+        title: ce ? pickLang(ce.title, ce.i18n, "title", lang) : e.id,
         // official in the catalog, but the archive is of another version: until updated it runs as a community plugin
         officialPending: !official && ce?.tier === "official" && ce.sha256 !== e.sha256,
         updateAvailable: Boolean(ce && ce.sha256 !== e.sha256),
@@ -1929,6 +2193,10 @@ export class PluginManager {
         sha256: e.sha256,
         tier: official ? "official" : "community",
         official,
+        // G19: the registry it was installed from; registryLabel — null with only the default registry
+        registry: reg,
+        registryLabel: registryLabel(reg, this.sources()),
+        tierLabel: tierLabel(official ? "official" : "community", reg, this.sources()),
         source: "installed",
         // official and third-party plugins are removed by the manager; built-ins (app directory) are not
         removable: true,
@@ -1963,7 +2231,7 @@ export class PluginManager {
     const st = this.ownState.get(e.id) || null;
     return {
       id: e.id,
-      title: e.i18n?.[lang]?.title || e.title || e.id,
+      title: pickLang(e.title, e.i18n, "title", lang) || e.id,
       officialPending: false,
       updateAvailable: st?.status === "update",
       version: e.version,
@@ -2013,8 +2281,10 @@ function readPluginOpts(path) {
 function cleanI18n(v) {
   if (!v || typeof v !== "object" || Array.isArray(v)) return {};
   const out = {};
-  for (const [lang, x] of Object.entries(v)) {
-    if (!/^[a-z]{2}$/.test(lang) || !x || typeof x !== "object") continue;
+  for (const [raw, x] of Object.entries(v).slice(0, 64)) {
+    // any BCP-47 tag (G14), canonical case; malformed — dropped
+    const lang = normTag(raw);
+    if (!lang || !x || typeof x !== "object") continue;
     const e = {};
     if (isStr(x.title, 200) && x.title) e.title = x.title;
     if (isStr(x.desc, 1000) && x.desc) e.desc = x.desc;
@@ -2087,14 +2357,17 @@ export function ownRisk(writable) {
 // For watching, "why" is part of the entry itself (the permission key depends on it), so we separate it for display.
 // Keys and the "new" mark don't change: translation affects labels only.
 export function localizePerms(list, i18n, lang) {
-  const tr = i18n?.[lang] || {};
+  const trWhy = contentOf(i18n, lang, { field: "why" });
+  const trAct = contentOf(i18n, lang, { field: "actions" });
   return (list || []).map((p) => {
     let what = p.what;
     let why = p.why;
     if (p.kind === "watch" && !why) ({ what, why } = splitWhy(what));
     const norm = (v) => String(v).trim().replace(/\s+/g, " ");
-    const byWhat = tr.why ? Object.entries(tr.why).find(([k]) => norm(k) === norm(what))?.[1] : undefined;
-    const byAction = p.kind === "actions" ? tr.actions?.[String(what).split(" ")[0]] : undefined;
+    // a recursive watch (B10) is translated by its path
+    const key = p.kind === "watch" ? norm(what).replace(/ recursive$/, "") : norm(what);
+    const byWhat = trWhy.why ? Object.entries(trWhy.why).find(([k]) => norm(k) === key || norm(k) === norm(what))?.[1] : undefined;
+    const byAction = p.kind === "actions" ? trAct.actions?.[String(what).split(" ")[0]] : undefined;
     return { ...p, what, why: byWhat ?? byAction ?? why ?? null };
   });
 }

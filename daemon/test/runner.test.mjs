@@ -32,6 +32,7 @@ test("environment is cleaned: only the base set, AGENTHUB_*, OS_* and secrets", 
   delete process.env.AGENTHUB_TEST_LEAK;
   assert.deepEqual(Object.keys(env).sort(), [
     "AGENTHUB_LANG",
+    "AGENTHUB_LOCALE",
     "AGENTHUB_PAUSED",
     "AGENTHUB_PLUGIN_CACHE_PATH",
     "AGENTHUB_PLUGIN_DATA_PATH",
@@ -50,6 +51,11 @@ test("environment is cleaned: only the base set, AGENTHUB_*, OS_* and secrets", 
   assert.equal(env.AGENTHUB_LANG, "ru", "default language is ru");
   assert.equal(buildEnv({ pluginId: "p", dataPath: "/d", cachePath: "/c", reason: "Schedule", lang: "en", home: "/Users/x" }).AGENTHUB_LANG, "en");
   assert.equal(buildEnv({ pluginId: "p", dataPath: "/d", cachePath: "/c", reason: "Schedule", lang: "de", home: "/Users/x" }).AGENTHUB_LANG, "ru", "only ru|en");
+  // G14: the system preferred languages for plugin content, canonical BCP-47, malformed ones dropped; a service cannot override them
+  const loc = buildEnv({ pluginId: "p", dataPath: "/d", cachePath: "/c", reason: "Schedule", locale: ["de_DE", "pt-br", "bad tag", "en-US"], extra: { AGENTHUB_LOCALE: "xx" }, home: "/Users/x" });
+  assert.equal(loc.AGENTHUB_LOCALE, "de-DE,pt-BR,en-US");
+  assert.equal(loc.AGENTHUB_LANG, "ru", "the hub UI language stays ru | en");
+  assert.equal(buildEnv({ pluginId: "p", dataPath: "/d", cachePath: "/c", reason: "Schedule", locale: [], home: "/Users/x" }).AGENTHUB_LOCALE, "", "no system list — empty, still present");
   // contract 3: the hub pause flag is always present, 0 or 1
   assert.equal(env.AGENTHUB_PAUSED, "0", "not paused — explicit 0");
   assert.equal(buildEnv({ pluginId: "p", dataPath: "/d", cachePath: "/c", reason: "Paused", paused: true, home: "/Users/x" }).AGENTHUB_PAUSED, "1");

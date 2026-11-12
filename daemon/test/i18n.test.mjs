@@ -28,7 +28,9 @@ test("message table: every key has ru and en", () => {
   const en = Object.keys(MESSAGES.en).sort();
   assert.deepEqual(en, ru);
   assert.equal(t("en", "hook.deny"), "Denied in Agent Hub");
-  assert.equal(t("de", "hook.deny"), "Отклонено в Agent Hub", "unknown language → ru");
+  // G14: an unknown language falls back to en, like the "system" rule (a non-Russian system → en) and currentLang
+  assert.equal(t("de", "hook.deny"), "Denied in Agent Hub", "unknown language → en");
+  assert.equal(t("ru", "hook.deny"), "Отклонено в Agent Hub");
   assert.equal(t("en", "нет-такого"), "нет-такого");
 });
 
@@ -37,7 +39,7 @@ test("Settings: system → OS language, explicit setting, file 0600, garbage →
   try {
     const p = join(dir, "settings.json");
     const s = new Settings(p, { detect: () => "en" });
-    assert.deepEqual(s.langInfo(), { setting: "system", effective: "en", system: "en" });
+    assert.deepEqual(s.langInfo(), { setting: "system", effective: "en", system: "en", locales: ["en"] });
     s.setLang("ru");
     assert.equal(s.effectiveLang(), "ru");
     assert.equal(statSync(p).mode & 0o777, 0o600);
@@ -102,7 +104,7 @@ exec sleep 30
   try {
     await waitFor(() => h.core.pluginState("lang")?.header[0]?.title === "lang=ru" && h.core.pluginState("slang")?.header[0]?.title === "s=ru");
     const st = await curl(h.sock, "GET", "/state");
-    assert.deepEqual(st.body.lang, { setting: "system", effective: "ru", system: "ru" });
+    assert.deepEqual(st.body.lang, { setting: "system", effective: "ru", system: "ru", locales: ["ru"] });
     assert.equal(st.body.plugins.find((p) => p.id === "lang").title, "Язык");
     assert.equal(st.body.plugins.find((p) => p.id === "lang").desc, "показывает язык");
     const denied = await curl(h.sock, "PUT", "/settings/lang", { lang: "en" });
@@ -111,7 +113,7 @@ exec sleep 30
     const firstPid = h.core.pluginState("slang").pid;
     const seen = [];
     h.core.on("settings.changed", (e) => seen.push(e.lang.effective));
-    assert.deepEqual(h.core.setLang("en", APP), { setting: "en", effective: "en", system: "ru" });
+    assert.deepEqual(h.core.setLang("en", APP), { setting: "en", effective: "en", system: "ru", locales: ["ru"] });
     assert.deepEqual(seen, ["en"]);
     assert.equal(h.core.pluginState("lang").title, "Language");
     assert.equal(h.core.pluginState("lang").desc, "shows the language");
@@ -153,15 +155,17 @@ echo "Tail | action=tail arg=ABC-2"
     const [skip, tail] = offers();
     const ru = await h.core.invoke({ id: skip.id, peer: APP });
     assert.equal(ru.status, 428);
-    assert.equal(ru.body.text, "«Прогоны» (встроенный плагин) просит: «Пропустить задачу» для ABC-1. Выполнится: act.5m.sh --action skip ABC-1");
+    // G10: the row carrying the button ends the text
+    assert.equal(ru.body.text, "«Прогоны» (встроенный плагин) просит: «Пропустить задачу» для ABC-1. Выполнится: act.5m.sh --action skip ABC-1 Кнопка в строке «Skip».");
     const ruTail = await h.core.invoke({ id: tail.id, peer: APP });
-    assert.match(ruTail.body.text, /просит выполнить: act\.5m\.sh --action tail ABC-2$/);
+    assert.match(ruTail.body.text, /просит выполнить: act\.5m\.sh --action tail ABC-2 Кнопка в строке «Tail»\.$/);
     h.core.setLang("en", APP);
     await waitFor(() => h.core.pluginState("act")?.title === "Runs" && offers().length === 2);
     const skipEn = offers()[0];
     const en = await h.core.invoke({ id: skipEn.id, peer: APP });
     assert.equal(en.status, 428);
-    assert.equal(en.body.text, '"Runs" (built-in plugin) asks to: "Skip task" for ABC-1. Will run: act.5m.sh --action skip ABC-1');
+    assert.equal(en.body.text, '"Runs" (built-in plugin) asks to: "Skip task" for ABC-1. Will run: act.5m.sh --action skip ABC-1 Button on the row "Skip".');
+    assert.equal(en.body.row, "Skip");
     const done = await h.core.invoke({ id: skipEn.id, confirmToken: en.body.token, peer: APP });
     assert.equal(done.status, 200, JSON.stringify(done.body));
     const argv = readFileSync(join(h.config.paths.pluginData, "act", "argv.txt"), "utf8").trim().split("\n");
@@ -322,8 +326,8 @@ test("library errors follow the hub language: cron, quotes, archive and key erro
 
 test("parser and linter warnings follow the hub language: metadata, output, forbidden paths", () => {
   const meta = "# <agenthub.type>odd</agenthub.type>\n# <agenthub.title lang=\"english\">x</agenthub.title>";
-  assert.deepEqual(inLang("ru", () => parseMetaText(meta).warnings), ["неизвестный type «odd»", "title: lang ждём двухбуквенный код (ru, en), а не «english»"]);
-  assert.deepEqual(inLang("en", () => parseMetaText(meta).warnings), ['unknown type "odd"', 'title: lang must be a two-letter code (ru, en), not "english"']);
+  assert.deepEqual(inLang("ru", () => parseMetaText(meta).warnings), ["неизвестный type «odd»", "title: lang ждём код языка BCP-47 (ru, en, de, pt-BR), а не «english»"]);
+  assert.deepEqual(inLang("en", () => parseMetaText(meta).warnings), ['unknown type "odd"', 'title: lang must be a BCP-47 language code (ru, en, de, pt-BR), not "english"']);
   assert.deepEqual(inLang("ru", () => parseOutput("x | status=odd bash=rm").warnings), ["неизвестный status «odd»", "параметр bash= запрещён и проигнорирован"]);
   assert.deepEqual(inLang("en", () => parseOutput("x | status=odd bash=rm").warnings), ['unknown status "odd"', "parameter bash= is forbidden and ignored"]);
   // the linter takes the language explicitly (registry CI: ru by default)

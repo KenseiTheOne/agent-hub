@@ -41,7 +41,8 @@ function num(v, d, min = 0) {
 
 // Keys of services.push the service reads; anything else (for example a channel removed from the hub) is ignored —
 // the push service writes one push-config-ignored line to the journal at startup (ignoredKeys).
-export const PUSH_KEYS = Object.freeze([...Object.keys(PUSH_DEFAULTS), "enabled"]);
+// channels — extra delivery channels (lib/push/channels.mjs parseChannelConfig), read by the push service itself.
+export const PUSH_KEYS = Object.freeze([...Object.keys(PUSH_DEFAULTS), "enabled", "channels"]);
 export function ignoredKeys(raw) {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return [];
   return Object.keys(raw).filter((k) => !PUSH_KEYS.includes(k)).slice(0, 20);

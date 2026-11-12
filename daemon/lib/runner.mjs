@@ -13,7 +13,7 @@ import { homedir, tmpdir, userInfo } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { expandHome, standardPath } from "./config.mjs";
 import { FrameSplitter } from "./output.mjs";
-import { msg } from "./i18n.mjs";
+import { currentLocales, msg, normLocales } from "./i18n.mjs";
 import { interpreterFor, isWindows, killTree, osInfoCommands, treeSpawnOptions } from "./platform.mjs";
 
 // → [command, ...args] for a plugin file. The interpreter by extension comes from the platform layer
@@ -70,7 +70,7 @@ async function collectOsVars(cmds) {
 }
 
 // The plugin's cleaned environment. Secrets: { NAME: value } → AGENTHUB_SECRET_NAME.
-export function buildEnv({ pluginId, dataPath, cachePath, reason, lang = "ru", paused = false, os = {}, secrets = {}, extra = {}, home = homedir(), platform = process.platform, sysEnv = process.env }) {
+export function buildEnv({ pluginId, dataPath, cachePath, reason, lang = "ru", locale = currentLocales(), paused = false, os = {}, secrets = {}, extra = {}, home = homedir(), platform = process.platform, sysEnv = process.env }) {
   let user = "";
   try {
     user = userInfo().username;
@@ -87,6 +87,9 @@ export function buildEnv({ pluginId, dataPath, cachePath, reason, lang = "ru", p
     AGENTHUB_REFRESH_REASON: reason,
     // The hub UI language (ru | en). LANG stays en_US.UTF-8 for predictable parsing of program output.
     AGENTHUB_LANG: lang === "en" ? "en" : "ru",
+    // The system preferred languages, BCP-47, in order ("de-DE,en-US,ru-RU"; may be empty): for plugin content in any
+    // language (G14, lib/i18n.mjs contentLang). The hub UI stays ru | en.
+    AGENTHUB_LOCALE: normLocales(locale).join(","),
     // Hub pause (contract 3): 1 means ESTOP is set, 0 means it is not. Always passed: an explicit 0 tells the plugin the hub
     // is new enough and background work is allowed; setting and clearing the pause restarts plugins (Paused|Resumed).
     AGENTHUB_PAUSED: paused ? "1" : "0",
@@ -117,7 +120,9 @@ function killGroup(child, signal) {
 // A one-shot run with a timeout. → { code, signal, stdout, timedOut, overflow, durationMs, error? }
 // onSpawn(kill, pid) receives a function that kills the process group (to stop the daemon mid-run) and the pid
 // of the started process (the core uses it to identify the plugin process: fact pluginByPid, oauth service).
-export function runOnce(argv, { env, cwd, timeoutMs = 5000, maxBytes = 1024 * 1024, stdin = null, onSpawn = null } = {}) {
+// onLeaderExit(pid) — the started process itself exited (B4): its pid is free for reuse from now on, even if a descendant
+// still holds stdout and the run is not finished yet — whoever attributes the pid to the plugin drops it here, not at the end.
+export function runOnce(argv, { env, cwd, timeoutMs = 5000, maxBytes = 1024 * 1024, stdin = null, onSpawn = null, onLeaderExit = null } = {}) {
   return new Promise((resolve) => {
     const started = Date.now();
     let child;
@@ -172,6 +177,7 @@ export function runOnce(argv, { env, cwd, timeoutMs = 5000, maxBytes = 1024 * 10
       stderrBytes += b.length; // stderr is not kept: it may contain anything
     });
     child.on("error", (e) => finish(null, null, e.code || e.message));
+    child.on("exit", () => onLeaderExit?.(child.pid));
     child.on("close", (code, signal) => finish(code, signal));
     child.stdin.on("error", () => {});
     if (stdin != null) child.stdin.end(stdin);
@@ -180,14 +186,21 @@ export function runOnce(argv, { env, cwd, timeoutMs = 5000, maxBytes = 1024 * 10
 }
 
 // A long-lived streamable process.
+// envFn — async () => env: called before every automatic restart after an exit (G8), so a restarted process sees a fresh
+// environment (a secret written meanwhile, a new service variable); a failure keeps the previous environment.
+// onBacklog() — the process stopped reading stdin and more than STDIN_BACKLOG_MAX bytes wait in the pipe (B6): from then on
+// writes are dropped (write → false) until the pipe drains; called once per such episode.
 export class StreamProcess {
-  constructor(argv, { env, cwd, maxBytes = 1024 * 1024, onFrame, onExit, onStart }) {
+  constructor(argv, { env, envFn = null, cwd, maxBytes = 1024 * 1024, onFrame, onExit, onStart, onBacklog = null }) {
     this.argv = argv;
     this.opts = { env, cwd };
+    this.envFn = envFn;
     this.maxBytes = maxBytes;
     this.onFrame = onFrame;
     this.onExit = onExit;
     this.onStart = onStart;
+    this.onBacklog = onBacklog;
+    this.backlogged = false;
     this.child = null;
     this.stopped = false;
     this.backoffMs = 1000;
@@ -206,6 +219,10 @@ export class StreamProcess {
       return;
     }
     this.child = child;
+    this.backlogged = false;
+    child.stdin.on("drain", () => {
+      if (this.child === child) this.backlogged = false;
+    });
     const splitter = new FrameSplitter((frame, overflow) => this.onFrame?.(frame, overflow), this.maxBytes);
     child.stdout.setEncoding("utf8");
     child.stdout.on("data", (s) => splitter.push(s));
@@ -225,13 +242,33 @@ export class StreamProcess {
   scheduleRestart() {
     if (this.stopped) return;
     clearTimeout(this.restartTimer);
-    this.restartTimer = setTimeout(() => this.start(), this.backoffMs);
+    this.restartTimer = setTimeout(() => this.restart(), this.backoffMs);
     this.restartTimer.unref?.();
     this.backoffMs = Math.min(this.backoffMs * 2, 60_000);
   }
-  // NDJSON to stdin
+  async restart() {
+    if (this.stopped || this.child) return;
+    if (this.envFn) {
+      try {
+        const env = await this.envFn();
+        if (env && typeof env === "object") this.opts = { ...this.opts, env };
+      } catch {}
+    }
+    this.start();
+  }
+  // NDJSON to stdin. A process that doesn't read its stdin must not grow the daemon's memory without bound (B6): past
+  // STDIN_BACKLOG_MAX buffered bytes the message is dropped (→ false) and onBacklog is told once.
   write(obj) {
     if (!this.child || !this.child.stdin.writable) return false;
+    if (this.child.stdin.writableLength > STDIN_BACKLOG_MAX) {
+      if (!this.backlogged) {
+        this.backlogged = true;
+        try {
+          this.onBacklog?.();
+        } catch {}
+      }
+      return false;
+    }
     try {
       this.child.stdin.write(JSON.stringify(obj) + "\n");
       return true;
@@ -239,29 +276,118 @@ export class StreamProcess {
       return false;
     }
   }
+  // The pid while the process itself is alive (B4): once it exited, the pid may be reused by another process — even if a
+  // descendant still holds stdout and 'close' has not come yet.
   get pid() {
-    return this.child?.pid ?? null;
+    const c = this.child;
+    return c && c.exitCode === null && c.signalCode === null ? (c.pid ?? null) : null;
   }
-  stop() {
+  // reason (G18) — why the hub stops the process: the plugin first gets {"type":"stopping","reason":…} on stdin (and EOF), then
+  // after graceMs SIGTERM to the group (if it has not exited by itself), after another second SIGKILL. Reasons: restart (the
+  // hub restarts it with a new environment: language, pause, secret — `cause` is the new AGENTHUB_REFRESH_REASON), updated (the
+  // plugin file changed), policy (its tier or permissions changed), removed (deleted or disabled), shutdown (the daemon stops).
+  stop(reason = null, { cause = null, graceMs = STOP_GRACE_MS } = {}) {
     this.stopped = true;
     clearTimeout(this.restartTimer);
     const child = this.child;
     if (!child) return Promise.resolve();
     return new Promise((res) => {
-      const t = setTimeout(() => {
-        killGroup(child, "SIGKILL");
-        res();
-      }, 1000);
+      let kill = null;
+      const term = setTimeout(
+        () => {
+          killGroup(child, "SIGTERM");
+          kill = setTimeout(() => {
+            killGroup(child, "SIGKILL");
+            res();
+          }, 1000);
+        },
+        reason ? graceMs : 0,
+      );
       child.once("close", () => {
-        clearTimeout(t);
+        clearTimeout(term);
+        clearTimeout(kill);
         res();
       });
+      if (reason) this.write({ type: "stopping", reason, ...(cause ? { cause } : {}) });
       try {
         child.stdin.end();
       } catch {}
-      killGroup(child, "SIGTERM");
     });
   }
+}
+
+// How long a streamable process has between {"type":"stopping"} and SIGTERM.
+export const STOP_GRACE_MS = 200;
+// How many bytes may wait in a streamable process's stdin pipe before further messages are dropped (B6).
+export const STDIN_BACKLOG_MAX = 1024 * 1024;
+// A background job whose leader exited but whose stdout stays open (a descendant that left the group with setsid holds it):
+// how long to wait for 'close' before the job is finished anyway (B2).
+export const JOB_SETTLE_MS = 1000;
+
+// A background job (<agenthub.action background="true">, G6): its own process group, no timeout, stdout keeps only the
+// tail (for reason= / message=), stderr is dropped. → { pid, kill(signal) → whether a signal was sent } or { error }.
+// The job is its leader process (B2): when the leader exits, the rest of its group is killed at once (SIGKILL); if stdout is
+// still open JOB_SETTLE_MS later (a descendant that left the group with setsid holds it), stdout is closed and the job ends
+// anyway. After the leader exited kill() signals nothing: the group id may already belong to another process (B4).
+// onLeaderExit(pid) — the leader exited (its pid may be reused from now on).
+// onExit({code, signal, error, tail, durationMs}) — once, when the job has ended.
+export function spawnJob(argv, { env, cwd, stdin = null, tailBytes = 8192, onExit, onLeaderExit = null, settleMs = JOB_SETTLE_MS }) {
+  const started = Date.now();
+  let child;
+  try {
+    child = spawn(argv[0], argv.slice(1), { env, cwd, ...treeSpawnOptions(), stdio: ["pipe", "pipe", "ignore"] });
+  } catch (e) {
+    return { error: e.code || e.message };
+  }
+  let tail = "";
+  let done = false;
+  let leaderGone = false;
+  let settle = null;
+  child.stdout.setEncoding("utf8");
+  child.stdout.on("data", (s) => {
+    tail = (tail + s).slice(-tailBytes);
+  });
+  child.stdout.on("error", () => {});
+  const finish = (code, signal, error) => {
+    if (done) return;
+    done = true;
+    clearTimeout(settle);
+    if (!leaderGone) killGroup(child, "SIGKILL");
+    onExit?.({ code, signal, tail, durationMs: Date.now() - started, ...(error ? { error } : {}) });
+  };
+  child.on("error", (e) => finish(null, null, e.code || e.message));
+  child.on("exit", (code, signal) => {
+    // the leader has just been reaped: its group's survivors still carry the group id — kill them now, then never again
+    killGroup(child, "SIGKILL");
+    leaderGone = true;
+    try {
+      onLeaderExit?.(child.pid);
+    } catch {}
+    settle = setTimeout(() => {
+      try {
+        child.stdout.destroy();
+      } catch {}
+      finish(code, signal);
+    }, settleMs);
+    settle.unref?.();
+  });
+  child.on("close", (code, signal) => finish(code, signal));
+  child.stdin.on("error", () => {});
+  if (stdin != null) child.stdin.end(stdin);
+  else child.stdin.end();
+  if (!child.pid) {
+    // ENOENT and the like: the error event comes later — the caller already got the refusal, no onExit
+    done = true;
+    return { error: "spawn" };
+  }
+  return {
+    pid: child.pid,
+    kill: (signal = "SIGTERM") => {
+      if (done || leaderGone) return false;
+      killGroup(child, signal);
+      return true;
+    },
+  };
 }
 
 // ---------- watch ----------
@@ -275,11 +401,14 @@ function globToRe(mask) {
 export class Watcher {
   constructor(entries, onChange, { debounceMs = 300, retryMs = 30_000, home = homedir(), recursive = false } = {}) {
     this.recursive = recursive;
+    // an entry is a path string or { path, recursive } (<agenthub.watch recursive="true">: subdirectories too)
     this.targets = entries.map((e) => {
-      const p = expandHome(String(e).split(/\s+[—–-]{1,2}\s+/)[0].trim(), home);
+      const obj = e && typeof e === "object";
+      const p = expandHome(String(obj ? e.path : e).split(/\s+[—–-]{1,2}\s+/)[0].trim(), home);
       const base = basename(p);
-      if (/[*?]/.test(base)) return { dir: dirname(p), filter: globToRe(base), raw: p };
-      return { dir: p, filter: null, raw: p };
+      const rec = obj ? e.recursive === true : recursive;
+      if (/[*?]/.test(base)) return { dir: dirname(p), filter: globToRe(base), raw: p, recursive: rec };
+      return { dir: p, filter: null, raw: p, recursive: rec };
     });
     this.onChange = onChange;
     this.debounceMs = debounceMs;
@@ -306,10 +435,11 @@ export class Watcher {
       try {
         const target = isFile ? dirname(t.dir) : t.dir;
         const only = isFile ? basename(t.dir) : null;
-        t.w = watch(target, { persistent: false, recursive: this.recursive && !isFile }, (_ev, name) => {
+        t.w = watch(target, { persistent: false, recursive: t.recursive && !isFile }, (_ev, name) => {
           const n = name ? String(name) : "";
           if (only && n && n !== only) return;
-          if (t.filter && n && !t.filter.test(n)) return;
+          // recursive: name is relative ("sub/a.json") — the mask is for the file name
+          if (t.filter && n && !t.filter.test(basename(n))) return;
           this.pending.add(n ? join(target, n) : target);
           this.kick();
         });
@@ -471,9 +601,13 @@ export function nextCron(cron, from = new Date()) {
 // A plugin action's argv before the interpreter is prepended: the command per splitCommand rules, with the argument value
 // replacing a `{name}` word (except the first), or appended at the end if there is none. The same for running
 // (host.mjs runAction) and for the confirmation text (core.mjs shownCommand): a human sees exactly the argv that will run.
-export function actionArgv(command, argDecl, value) {
+// An input action (input="…", G1): the typed value never goes into argv (it arrives on stdin) — a `{name}` word is dropped.
+export function actionArgv(command, argDecl, value, { input = false } = {}) {
   let argv = splitCommand(String(command || ""));
-  if (argDecl) {
+  if (argDecl && input) {
+    const i = argv.indexOf(`{${argDecl.name}}`);
+    if (i >= 1) argv = argv.filter((_a, k) => k !== i);
+  } else if (argDecl) {
     const i = argv.indexOf(`{${argDecl.name}}`);
     if (i >= 1) argv = argv.map((a, k) => (k === i ? value : a));
     else argv = [...argv, value];

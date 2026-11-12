@@ -361,7 +361,8 @@ test("SSE: the client closed the connection during classification — no subscri
 test("Last-Event-ID buffer: a plugin event without a state snapshot; on replay — the current state (review)", async () => {
   const plugins = tempHome("ah-rcb-");
   writePlugin(plugins, "big.1h.sh", `#!/bin/sh\necho "B | status=ok"\n`);
-  const h = await startHub({ pluginsDir: plugins });
+  // without coalescing (G9): each applyFrame broadcasts at once — this test is about the replay buffer
+  const h = await startHub({ pluginsDir: plugins, overrides: { plugins: { emitMinIntervalMs: 0 } } });
   try {
     await waitFor(() => h.core.pluginState("big")?.lastRunAt);
     const from = h.core.seq;
@@ -384,7 +385,7 @@ test("Last-Event-ID buffer: on replay one plugin event per id — the latest, wi
   const plugins = tempHome("ah-rcb2-");
   writePlugin(plugins, "big.1h.sh", `#!/bin/sh\necho "B | status=ok"\n`);
   writePlugin(plugins, "small.1h.sh", `#!/bin/sh\necho "S | status=ok"\n`);
-  const h = await startHub({ pluginsDir: plugins });
+  const h = await startHub({ pluginsDir: plugins, overrides: { plugins: { emitMinIntervalMs: 0 } } });
   try {
     await waitFor(() => h.core.pluginState("big")?.lastRunAt && h.core.pluginState("small")?.lastRunAt);
     const from = h.core.seq;

@@ -696,8 +696,10 @@ test("a tier own entry in plugins.lock bypassing the manager — community (no i
     const st = h.core.pluginState("evil");
     assert.equal(st.tier, "community", "the tier field in lock doesn't grant the tier");
     assert.equal(st.trusted, false);
-    assert.deepEqual(st.actions || [], [], "community has no actions");
-    assert.equal((st.pushRules || []).length, 0, "no own push rules either");
+    // G3: community has actions, but never immediate (no window-less switch) and app only
+    assert.ok((st.actions || []).every((a) => a.level !== "immediate"), "community: no immediate actions");
+    // G3: as community, only kind="plugin" rules and only their label — no quiet, away, hold or security
+    assert.ok((st.pushRules || []).every((r) => r.community === true && r.kind === "plugin" && !r.quietException && !r.awayDelayMs && !r.hold), "no own push escalation either");
     assert.ok(journal(h).some((e) => e.type === "plugin-own-unexpected" && e.plugin === "evil"));
     assert.ok(events.some((e) => e.type === "plugins.own-unexpected" && e.plugin === "evil"));
     // a re-approval request from the entry's folder comes from the hub itself; the sheet's permissions — as for a new install

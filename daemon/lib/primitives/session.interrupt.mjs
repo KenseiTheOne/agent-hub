@@ -6,12 +6,12 @@
 // The check is repeated right before the key press: the turn may have ended while awaiting confirmation.
 // From app only (the core enforces this for session.*).
 //
-// Refusals (facts:<code>): actions-off, unknown-session, no-terminal (no adapter knows the tab), pid-mismatch, esc-unsupported
+// Refusals (facts:<code>): actions-off, unknown-session, external-session (a non-Claude agent session, G13), no-terminal (no adapter knows the tab), pid-mismatch, esc-unsupported
 // (the session's terminal cannot press Esc), the adapter's code when it is unavailable (bridge-offline), not-running.
 
 import { t } from "../i18n.mjs";
 import { availability, locate, supports } from "../terminals/index.mjs";
-import { UUID_SRC, cfgOf } from "./_actions-support.mjs";
+import { EXTERNAL_SESSION_SRC, cfgOf } from "./_actions-support.mjs";
 
 export const name = "session.interrupt";
 export const level = "confirm";
@@ -20,10 +20,14 @@ export const remoteAllowed = true;
 export const appOnly = true;
 
 export const argsSchema = {
-  sessionId: { type: "string", required: true, positional: true, pattern: UUID_SRC },
+  // a UUID (Claude Code) or an external agent session id (G13; UUIDs match this pattern too): a non-Claude session must get its
+  // documented refusal facts:external-session, not a pattern error (B8); any other non-UUID id is facts:unknown-session
+  sessionId: { type: "string", required: true, positional: true, pattern: EXTERNAL_SESSION_SRC },
 };
 
 function check(args, facts) {
+  // a non-Claude agent session (G13): only session.focus works for it — refused before anything else
+  if (!facts.session(args.sessionId) && facts.externalSession?.(args.sessionId)) return { ok: false, reason: "external-session" };
   const cfg = cfgOf(facts);
   if (!cfg) return { ok: false, reason: "actions-off" };
   const s = facts.session(args.sessionId);

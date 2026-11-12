@@ -13,9 +13,9 @@
 export const THIRD_PARTY_EFFECTS = ["open.*", "terminal.focus", "cmux.focus", "session.focus"];
 export const LOCAL_EFFECTS = ["open.*"];
 
-export const KINDS = ["fsRead", "fsWrite", "watch", "exec", "secrets", "net", "effects", "actions", "connections", "terminal"];
+export const KINDS = ["fsRead", "fsWrite", "watch", "exec", "secrets", "net", "effects", "actions", "connections", "terminal", "subscribe"];
 // Kinds for which the author must explain "why".
-const NEED_WHY = new Set(["fsRead", "fsWrite", "exec", "secrets", "net", "terminal"]);
+const NEED_WHY = new Set(["fsRead", "fsWrite", "exec", "secrets", "net", "terminal", "subscribe"]);
 
 export const ID_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
 export const RESERVED_IDS = new Set(["local", "staging", "disabled"]);
@@ -46,14 +46,19 @@ const norm = (s) => String(s).trim().replace(/\s+/g, " ");
 // meta — the result of parseMetaText (daemon/lib/meta.mjs). → { fsRead:[{what,why}], …, effects:[…], actions:[…] }
 export function permissionsFromMeta(meta) {
   const out = {};
+  // <agenthub.watch recursive="true"> (G17): subdirectories too — part of the permission (B10): the entry gets recursive: true and
+  // the key " recursive" (permissionList), so an update that adds it is permission growth; what stays the path for the linter
+  const deep = new Set(meta.watchRecursive || []);
   for (const k of ["fsRead", "fsWrite", "exec", "secrets", "net", "watch"]) {
     out[k] = (meta[k] || []).map((e) => {
       const { what, why } = splitWhy(e);
-      return { what: norm(what), why };
+      return { what: norm(what), why, ...(k === "watch" && deep.has(e) ? { recursive: true } : {}) };
     });
   }
   out.effects = [...new Set((meta.effects || []).map(norm))].sort();
-  out.actions = (meta.actions || []).map((a) => ({ id: a.id, level: a.level, command: norm(a.command), title: a.title || null, ...(a.arg ? { arg: `${a.arg.name}:${a.arg.pattern}` } : {}) }));
+  // net="none" and background="true" (G2, G6) are part of the permission (lifting the network floor, a job without a timeout);
+  // written only when declared — entries of actions without them stay as they were
+  out.actions = (meta.actions || []).map((a) => ({ id: a.id, level: a.level, command: norm(a.command), title: a.title || null, ...(a.arg ? { arg: `${a.arg.name}:${a.arg.pattern}` } : {}), ...(a.net === "none" ? { net: "none" } : {}), ...(a.background ? { background: true } : {}), ...(a.input ? { input: true } : {}) }));
   // Connections (<agenthub.connection>, contract 2): the hub handles signing in to the service, the plugin calls MCP tools through
   // it. An empty list is not written into permissions — index and lock entries from before contract 2 are compared as before.
   const conns = (meta.connections || []).map((c) => ({ what: connectionWhat(c), why: c.note || null }));
@@ -65,7 +70,26 @@ export function permissionsFromMeta(meta) {
     return { what: norm(what), why };
   });
   if (term.length) out.terminal = term;
+  // Event subscriptions (<agenthub.subscribe>, G11): another plugin's events on stdin. Like terminal, an empty list is not written.
+  const subs = (meta.subscribe || []).map((e) => {
+    const { what, why } = splitWhy(e);
+    return { what: norm(what), why };
+  });
+  if (subs.length) out.subscribe = subs;
   return out;
+}
+
+// ---------- event subscriptions (G11) ----------
+//
+//   <agenthub.subscribe>builds:failed — why</agenthub.subscribe>   events of plugin "builds" whose key starts with "failed"
+//   <agenthub.subscribe>builds: — why</agenthub.subscribe>         every event of "builds"
+//   <agenthub.subscribe>*:deploy — why</agenthub.subscribe>        events of every other plugin with keys starting with "deploy"
+// The same grammar as lib/meta.mjs SUBSCRIBE_RE (the module is self-contained — the registry takes a copy).
+export const SUBSCRIBE_RE = /^(\*|[A-Za-z0-9][A-Za-z0-9._-]{0,63}):([\w.:/-]{0,128})$/;
+export const SUBSCRIBE_MAX = 16;
+export function parseSubscribePerm(what) {
+  const m = SUBSCRIBE_RE.exec(norm(what || ""));
+  return m ? { plugin: m[1], prefix: m[2] } : null;
 }
 
 // ---------- terminal (contract 3) ----------
@@ -146,6 +170,11 @@ export function connectionIdOk(pluginId, id) {
 // The connection permission line: address, scope and allowlist — what a human agrees to. Interval and budget are not
 // access and are not part of the key.
 export function connectionWhat(c) {
+  // type="http" (G7): the client, the endpoints, the API hosts the token goes to, methods and path prefixes — what a human agrees to
+  if (c?.type === "http" && c.http) {
+    const h = c.http;
+    return norm(`${c.id ? `${c.id}: ` : ""}http client=${h.clientId} authorize=${h.authorize} token=${h.token} api=${(h.hosts || []).join(",")} scope=${c.scope || "-"} methods=${(h.methods || []).join(",")}${h.paths?.length ? ` paths=${h.paths.join(",")}` : ""}`);
+  }
   const hosts = Array.isArray(c?.hosts) && c.hosts.length ? ` +${c.hosts.join(",")}` : "";
   return norm(`${c?.id ? `${c.id}: ` : ""}${c?.url || "?"}${hosts} scope=${c?.scope || "-"} tools=${(c?.tools || []).join(",")}`);
 }
@@ -155,7 +184,45 @@ export function connectionWhat(c) {
 // the archive's permissions with the catalog entry (plugins.mjs prepare → registry:archive-permissions); a new daemon parses such
 // an entry via splitWhy (permissionList), the keys match. That way one index installs on both old and new cores.
 export function indexPermissions(meta) {
-  return { ...permissionsFromMeta(meta), watch: (meta.watch || []).map((w) => ({ what: norm(w), why: null })) };
+  const deep = new Set(meta.watchRecursive || []);
+  return { ...permissionsFromMeta(meta), watch: (meta.watch || []).map((w) => ({ what: norm(w), why: null, ...(deep.has(w) ? { recursive: true } : {}) })) };
+}
+
+// ---------- compatibility of index entries with older hubs (B11) ----------
+//
+// Attributes added to contract 3 after hub 0.1.2 (the contract number stays 3: every addition is optional). A hub that
+// doesn't know one of them would either refuse the archive with an opaque error (type="http" changes the connection permission:
+// registry:archive-permissions; community actions: registry:lint) or install the plugin and run it wrongly (a background job
+// killed after 30 s, an input action that can't get its text, no events, no subdirectories watched, confirm-cost instead of
+// net="none"). Hub 0.1.2 understands only an integer `contract` in an index entry; any other value means "needs a newer hub"
+// for that entry (contractUnknown: not offered as an update, install refused with registry:hub-too-old). So an index entry
+// that uses any of these features carries the object form {"version": 3, "features": [...]} — an older hub says "Needs a newer
+// hub", this hub checks every feature against CONTRACT_FEATURES. Entries without them keep the plain integer (or no field).
+export const CONTRACT_FEATURES = Object.freeze(["background", "community-actions", "http-connection", "input", "net-none", "subscribe", "watch-recursive"]);
+
+// The features of CONTRACT_FEATURES a plugin uses (sorted). official — the tier the registry assigns (community actions need a
+// newer hub, official ones don't).
+export function contractFeatures(meta, { official = false } = {}) {
+  const f = new Set();
+  for (const a of meta?.actions || []) {
+    if (a.background) f.add("background");
+    if (a.input) f.add("input");
+    if (a.net === "none") f.add("net-none");
+  }
+  if (!official && (meta?.actions || []).length) f.add("community-actions");
+  if ((meta?.connections || []).some((c) => c?.type === "http")) f.add("http-connection");
+  if ((meta?.subscribe || []).length) f.add("subscribe");
+  if ((meta?.watchRecursive || []).length) f.add("watch-recursive");
+  return [...f].sort();
+}
+
+// The `contract` field of an index entry (registry build-index): undefined — no <agenthub.contract> and no new features (the hub
+// assumes 1); an integer — as before; {version, features} — the plugin uses features newer than hub 0.1.2 (version at least 3).
+export function indexContract(meta, { official = false } = {}) {
+  const features = contractFeatures(meta, { official });
+  const version = Number.isInteger(meta?.contract) ? meta.contract : undefined;
+  if (!features.length) return version;
+  return { version: Math.max(version ?? 1, 3), features };
 }
 
 // Flat permission list. → [{ kind, what, why, key }]
@@ -163,12 +230,14 @@ export function indexPermissions(meta) {
 export function permissionList(perms, { pluginId = null } = {}) {
   const list = [];
   if (!perms || typeof perms !== "object") return list;
-  for (const k of ["fsRead", "fsWrite", "watch", "exec", "secrets", "net", "connections", "terminal"]) {
+  for (const k of ["fsRead", "fsWrite", "watch", "exec", "secrets", "net", "connections", "terminal", "subscribe"]) {
     for (const e of perms[k] || []) {
       if (!e || typeof e.what !== "string") continue;
       let what = e.what;
       let why = e.why ?? null;
       if (k === "watch" && why == null) ({ what, why } = splitWhy(what));
+      // recursive watch (B10): a separate permission from the same path watched flat
+      if (k === "watch" && e.recursive === true) what = `${norm(what)} recursive`;
       // writing where Claude Code or the system can be taken over (contract 3): the permission is allowed, but the consent window
       // shows it as a loud line with an explanation (risk — the kind of location, writeRisk); it is not part of the permission key.
       // Typing into a Claude Code tab (terminal send) is also a takeover: risk "terminal"; a permission for mode characters
@@ -182,7 +251,7 @@ export function permissionList(perms, { pluginId = null } = {}) {
   for (const a of perms.actions || []) {
     if (!a || typeof a.id !== "string") continue;
     // the argument pattern is part of the permission: widening it in an update is permission growth
-    const what = `${a.id} [${a.level}] ${norm(a.command || "")}${typeof a.arg === "string" ? ` {${a.arg}}` : ""}`;
+    const what = `${a.id} [${a.level}] ${norm(a.command || "")}${typeof a.arg === "string" ? ` {${a.arg}}` : ""}${a.input === true ? " input" : ""}${a.net === "none" ? " net=none" : ""}${a.background === true ? " background" : ""}`;
     list.push({ kind: "actions", what, why: a.title ?? null, key: `actions:${what}` });
   }
   // Loud push rules (only for own plugins: the manager puts them into permissions from loudPushRules; the registry does not have this
@@ -517,7 +586,8 @@ export function lintPlugin({ id, meta, source = "", official = false, local = fa
       if (v) errors.push(`<agenthub.exec>${e.what}: ${v}`);
     }
   }
-  for (const e of perms.secrets) if (!/^[a-z][\w.-]{0,63}$/.test(e.what)) errors.push(L(lang, `<agenthub.secrets>${e.what}: имя ключа a-z, 0-9, «._-»`, `<agenthub.secrets>${e.what}: key name a-z, 0-9, "._-"`));
+  // the same shape the secrets service accepts: "<service>.<account>" (service — the plugin id, up to 64; account up to 64)
+  for (const e of perms.secrets) if (!/^[a-z0-9][a-z0-9_-]{0,63}\.[a-z][a-z0-9_.-]{0,63}$/.test(e.what)) errors.push(L(lang, `<agenthub.secrets>${e.what}: ключ «<сервис>.<имя>»: a-z, 0-9, «_-» в сервисе (до 64), a-z, 0-9, «._-» в имени (с буквы, до 64)`, `<agenthub.secrets>${e.what}: the key is "<service>.<name>": a-z, 0-9, "_-" in the service (up to 64), a-z, 0-9, "._-" in the name (starting with a letter, up to 64)`));
   for (const e of perms.effects) if (!/^[a-z]\w*\.(?:[a-zA-Z]\w*|\*)$/.test(e)) errors.push(L(lang, `effects «${e}»: не имя примитива`, `effects "${e}": not a primitive name`));
   // effects are under the ceiling for all registry plugins (official ones too: control only via their own actions)
   const ceiling = local ? LOCAL_EFFECTS : THIRD_PARTY_EFFECTS;
@@ -525,7 +595,11 @@ export function lintPlugin({ id, meta, source = "", official = false, local = fa
   // cmux.focus is an alias of terminal.focus until the next contract
   if (perms.effects.includes("cmux.focus")) warnings.push(L(lang, `effects «cmux.focus»: устарело — пишите terminal.focus (то же, для любого терминала) или session.focus <sessionId>`, `effects "cmux.focus": deprecated — write terminal.focus (the same, for any terminal) or session.focus <sessionId>`));
   if (!official) {
-    if (perms.actions.length) errors.push(L(lang, `<agenthub.action>: действия есть только у официальных плагинов`, `<agenthub.action>: only official plugins have actions`));
+    // community actions (G3): the core runs them only from the app and never below confirm — immediate is raised
+    for (const a of meta.actions || []) {
+      if (a.level === "immediate") warnings.push(L(lang, `<agenthub.action id="${a.id}">: у плагина сообщества ядро поднимет immediate до confirm — окно подтверждения будет всегда`, `<agenthub.action id="${a.id}">: for a community plugin the core raises immediate to confirm — there is always a confirmation window`));
+    }
+    if ((meta.actions || []).length) warnings.push(L(lang, `<agenthub.action>: действия плагина сообщества — только из приложения, с окном подтверждения; ревьюер проверяет, что команда делает ровно то, что сказано в title`, `<agenthub.action>: community plugin actions run only from the app, with a confirmation window; the reviewer checks the command does exactly what its title says`));
   } else {
     // an official action may be immediate (no confirmation window, app only; decision 2026-11-09) —
     // if the plugin declares no network and the action no cost: otherwise the core would raise it to confirm-cost (core.actionLevel),
@@ -533,10 +607,19 @@ export function lintPlugin({ id, meta, source = "", official = false, local = fa
     // is flagged with a warning: the registry reviewer checks that it spends nothing beyond what its title says.
     for (const a of meta.actions || []) {
       if (a.level !== "immediate") continue;
-      if ((perms.net || []).length) errors.push(L(lang, `<agenthub.action id="${a.id}">: immediate — только у плагина без сети (с сетью ядро спросит подтверждения)`, `<agenthub.action id="${a.id}">: immediate only for a plugin without network (with network the core asks for confirmation)`));
+      if ((perms.net || []).length && a.net !== "none") errors.push(L(lang, `<agenthub.action id="${a.id}">: immediate — только у плагина без сети (с сетью ядро спросит подтверждения)`, `<agenthub.action id="${a.id}">: immediate only for a plugin without network (with network the core asks for confirmation)`));
       else if (a.cost || Object.values(a.i18n || {}).some((x) => x?.cost)) errors.push(L(lang, `<agenthub.action id="${a.id}">: immediate с ценой (cost=) — ядро спросит подтверждения с ценой; цену без окна — только словами в title`, `<agenthub.action id="${a.id}">: immediate with a cost (cost=) — the core asks for confirmation with the cost; a cost without a window — only in words in title`));
       else warnings.push(L(lang, `<agenthub.action id="${a.id}">: immediate — запуск одним щелчком, без окна: ревьюер проверяет, что действие ничего не тратит (квота, деньги, запуск агентов) сверх сказанного в title`, `<agenthub.action id="${a.id}">: immediate — runs in one click, no window: the reviewer checks it spends nothing (quota, money, starting agents) beyond what the title says`));
     }
+  }
+  // Action attributes the reviewer checks by reading the code (G1, G2, G6) — for every tier.
+  for (const a of meta.actions || []) {
+    if (a.net === "none") {
+      if (!(perms.net || []).length) warnings.push(L(lang, `<agenthub.action id="${a.id}">: net="none" без <agenthub.net> ничего не меняет`, `<agenthub.action id="${a.id}">: net="none" without <agenthub.net> changes nothing`));
+      else warnings.push(L(lang, `<agenthub.action id="${a.id}">: net="none" — ядро снимает для этого действия порог confirm-cost от <agenthub.net>; ревьюер проверяет, что команда не выходит в сеть (ни сама, ни через запускаемые программы)`, `<agenthub.action id="${a.id}">: net="none" — the core lifts the confirm-cost floor <agenthub.net> puts on this action; the reviewer checks the command never reaches the network (neither itself nor through programs it starts)`));
+    }
+    if (a.background) warnings.push(L(lang, `<agenthub.action id="${a.id}">: background="true" — фоновая задача без ограничения по времени; ревьюер проверяет, что она завершается сама и по SIGTERM и не тратит больше, чем сказано в title`, `<agenthub.action id="${a.id}">: background="true" — a background job with no time limit; the reviewer checks it ends by itself and on SIGTERM and spends no more than its title says`));
+    if (a.input) warnings.push(L(lang, `<agenthub.action id="${a.id}">: input= — текст человека приходит на stdin; ревьюер проверяет, что команда обращается с ним как с данными (без eval, оболочки и подстановки в команды)`, `<agenthub.action id="${a.id}">: input= — the person's text arrives on stdin; the reviewer checks the command treats it as data (no eval, shell or splicing into commands)`));
   }
   // Connections: only for official and own plugins (the core takes them only from builtin/official/own — for a third-party plugin
   // the permission in the consent window would promise something that will not happen); the address host (and the authorization server's hosts) only from
@@ -547,6 +630,13 @@ export function lintPlugin({ id, meta, source = "", official = false, local = fa
     const name = c.id || id;
     for (const h of [c.host, ...(c.hosts || [])]) {
       if (h && !netHosts.has(String(h).toLowerCase())) errors.push(L(lang, `<agenthub.connection id="${name}">: хост ${h} не объявлен в <agenthub.net>`, `<agenthub.connection id="${name}">: host ${h} isn't declared in <agenthub.net>`));
+    }
+    // type="http" (G7): the hub sends the token to the API hosts and proxies the plugin's requests — the reviewer checks the hosts
+    // belong to the service, writes (methods beyond GET/HEAD) match what the plugin says, and paths narrow access where possible
+    if (c.type === "http" && c.http) {
+      warnings.push(L(lang, `<agenthub.connection id="${name}" type="http">: хаб отправляет токен на ${(c.http.hosts || []).join(", ")} и проксирует запросы плагина; ревьюер проверяет, что это хосты самого сервиса, а client_id — публичный клиент автора (без секрета)`, `<agenthub.connection id="${name}" type="http">: the hub sends the token to ${(c.http.hosts || []).join(", ")} and proxies the plugin's requests; the reviewer checks these are the service's own hosts and client_id is the author's public client (no secret)`));
+      const writes = (c.http.methods || []).filter((m) => m !== "GET" && m !== "HEAD");
+      if (writes.length) warnings.push(L(lang, `<agenthub.connection id="${name}">: methods=${writes.join(",")} — запись в сервис от имени человека; ревьюер проверяет, что плагин пишет только по действию человека${c.http.paths?.length ? "" : " (paths= не задан — доступ ко всему API)"}`, `<agenthub.connection id="${name}">: methods=${writes.join(",")} — writes to the service on the person's behalf; the reviewer checks the plugin writes only on the person's action${c.http.paths?.length ? "" : " (no paths= — the whole API is reachable)"}`));
     }
     if (id && !connectionIdOk(id, c.id)) errors.push(L(lang, `<agenthub.connection id="${name}">: id подключения — id плагина или «${id}.<имя>» (имя: a-z, 0-9, «-», с буквы, до 32; целиком — с буквы, до 64)`, `<agenthub.connection id="${name}">: the connection id must be the plugin id or "${id}.<name>" (name: a-z, 0-9, "-", starting with a letter, up to 32; the whole id starts with a letter, up to 64)`));
   }
@@ -559,6 +649,17 @@ export function lintPlugin({ id, meta, source = "", official = false, local = fa
     else if (t.op === "send" && t.modes.length) warnings.push(L(lang, `<agenthub.terminal>${e.what}: ${writeRiskText("terminal-mode", "ru")}. Право нужно только плагину, который без этого не может; проверьте, что плагин набирает такие строки только по явному действию человека и показывает их текст в окне подтверждения`, `<agenthub.terminal>${e.what}: ${writeRiskText("terminal-mode", "en")}. Only a plugin that cannot do without it needs this; check the plugin types such lines only on an explicit action of the person and shows their text in the confirmation`));
     else if (t.op === "send") warnings.push(L(lang, `<agenthub.terminal>${e.what}: ${writeRiskText("terminal", "ru")}. Проверьте, что плагин набирает только обещанное и только по действию человека или его настройке${t.any ? "; «send *» — любой запрос и любая slash-команда (кроме строк с «!», «#», «&» в начале — на них отдельное право «send !»)" : ""}`, `<agenthub.terminal>${e.what}: ${writeRiskText("terminal", "en")}. Check the plugin types only what it promises and only on the person's action or setting${t.any ? '; "send *" — any prompt and any slash command (except lines starting with "!", "#", "&" — those need the separate "send !" right)' : ""}`));
   }
+  // Event subscriptions (G11): the core delivers them only to trusted streamable plugins — for the rest the tag is ignored (a warning,
+  // not an error: the plugin still works); a malformed entry or too many is an error; "*" (every plugin) is a warning for the reviewer.
+  const subs = perms.subscribe || [];
+  if (subs.length && !official) warnings.push(L(lang, "<agenthub.subscribe>: подписки на события получают только официальные и свои плагины — у этого плагина ядро их пропустит", "<agenthub.subscribe>: only official and your own plugins get event subscriptions — the core ignores them for this plugin"));
+  if (subs.length && meta.type !== "streamable") warnings.push(L(lang, "<agenthub.subscribe>: события приходят на stdin только плагину <agenthub.type>streamable</agenthub.type> — у этого плагина ядро их пропустит", "<agenthub.subscribe>: events arrive on stdin only for a <agenthub.type>streamable</agenthub.type> plugin — the core ignores them for this one"));
+  if (subs.length > SUBSCRIBE_MAX) errors.push(L(lang, `<agenthub.subscribe>: не больше ${SUBSCRIBE_MAX} подписок`, `<agenthub.subscribe>: at most ${SUBSCRIBE_MAX} subscriptions`));
+  for (const e of subs) {
+    const sp = parseSubscribePerm(e.what);
+    if (!sp) errors.push(L(lang, `<agenthub.subscribe>${e.what}: ждём «<id плагина>:<начало ключа события>» или «*:<начало ключа>»`, `<agenthub.subscribe>${e.what}: expected "<plugin id>:<event key prefix>" or "*:<key prefix>"`));
+    else if (sp.plugin === "*") warnings.push(L(lang, `<agenthub.subscribe>${e.what}: события всех плагинов (с текстом их строк) — ревьюер проверяет, что плагину это нужно и он не уносит их наружу`, `<agenthub.subscribe>${e.what}: events of every plugin (with their row text) — the reviewer checks the plugin needs this and doesn't send them anywhere`));
+  }
   // Writing to takeover locations of Claude Code and the system (contract 3): allowed, but the reviewer checks that the plugin writes
   // exactly what it promises there (an allowlist of keys, a backup before editing) — the consent window shows it loudly.
   for (const e of perms.fsWrite) {
@@ -570,6 +671,14 @@ export function lintPlugin({ id, meta, source = "", official = false, local = fa
     if (r?.legacyKind && r.kind === "plugin" && !r.wasDeclared) {
       // was= declared explicitly — this is not a deprecated entry but a switch migration (parsePushRule marks wasDeclared)
       warnings.push(L(lang, `<agenthub.push key="${r.key}" kind="${r.legacyKind}">: вид устарел (контракт 1) — пишите kind="plugin" was="${r.legacyKind}"`, `<agenthub.push key="${r.key}" kind="${r.legacyKind}">: the kind is deprecated (contract 1) — write kind="plugin" was="${r.legacyKind}"`));
+    }
+  }
+  // Community push rules (G3): the core takes only kind="plugin" ones and only their label — the rest is ignored, say so.
+  if (!official) {
+    for (const r of meta.push || []) {
+      if (!r || typeof r.key !== "string") continue;
+      if (r.kind !== "plugin") warnings.push(L(lang, `<agenthub.push key="${r.key}">: у плагина сообщества действуют только правила kind="plugin" — это правило ядро пропустит`, `<agenthub.push key="${r.key}">: a community plugin only gets kind="plugin" rules — the core skips this one`));
+      else if (r.quietException || r.awayDelayMs || r.hold || r.cooldownMs) warnings.push(L(lang, `<agenthub.push key="${r.key}">: у плагина сообщества quiet, away, hold и cooldown не действуют — только подпись`, `<agenthub.push key="${r.key}">: for a community plugin quiet, away, hold and cooldown have no effect — only the label is used`));
     }
   }
   // Icon: the symbol name and color are checked by metadata parsing; an invalid tag is a parsing warning (not here).

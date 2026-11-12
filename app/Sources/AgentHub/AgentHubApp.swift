@@ -7,8 +7,11 @@ import SwiftUI
 /// Launch arguments (for manual checks; a normal launch has none).
 ///   --home <dir>              daemon directory (otherwise AGENTHUB_HOME, otherwise ~/Library/Application Support/AgentHub)
 ///   --open-panel              open the panel right away; prints `panel-window-id=<N>` for `screencapture -l`
-///   --snapshot-panel <png>    wait for a live snapshot and save an image of the panel window (own window, no screen recording permission)
+///   --snapshot-panel <png>    wait for a live snapshot and save an image of the panel window (own window, no screen recording permission);
+///                             prints `first-responder=<class>[ field-editor] key=<bool>` (a text field that took focus by itself)
 ///   --quit-after-snapshot     quit after the snapshot
+///   --reopen-panel            with --open-panel/--snapshot-panel: once the state is live, close the panel and open it
+///                             again (a reopen from the popover: the content exists at the window's first display)
 ///   --tooltip <text part>     with --snapshot-panel: print the window's AppKit tooltips (`tooltip=x,y,w,h <text>`) and
 ///                             show the real tooltip whose text contains this part in the snapshot (`HoverTip`,
 ///                             `TooltipProbe`), under its element; if not found, `tooltip-error=not-found`
@@ -29,6 +32,7 @@ import SwiftUI
 ///   --snapshot-popover <png>  show the popover as a window (like --show-popover), wait for a live snapshot, save an image
 ///                             (own window, no screen recording permission) and quit
 ///   --idle-expanded           the "Can I shut down" card in the popover starts expanded (snapshots)
+///   --open-tile <plugin id>   the popover starts with that plugin's tile expanded (its detail card; snapshots)
 ///   --snapshot-consent <png>  capture the consent window and quit (own window, no screen recording permission): from the
 ///                             first request for an own plugin (`POST /registry/own/approve` without a token installs
 ///                             nothing) or, with --consent-install <id>, from `POST /registry/install` (an update with
@@ -50,10 +54,12 @@ struct LaunchOptions {
     var demoSessions = false
     var popoverSnapshot: String?
     var idleExpanded = false
+    var openTile: String?
     var settingsFocus: String?
     var consentSnapshot: String?
     var consentInstall: String?
     var tooltip: String?
+    var reopenPanel = false
 
     static let current: LaunchOptions = {
         let a = CommandLine.arguments
@@ -64,6 +70,7 @@ struct LaunchOptions {
             o.openPanel = true
         }
         o.quitAfterSnapshot = a.contains("--quit-after-snapshot")
+        o.reopenPanel = a.contains("--reopen-panel")
         o.showPopover = a.contains("--show-popover")
         o.demoCards = a.contains("--demo-cards")
         o.demoSessions = a.contains("--demo-sessions")
@@ -75,6 +82,7 @@ struct LaunchOptions {
             o.showPopover = true
         }
         o.idleExpanded = a.contains("--idle-expanded")
+        if let i = a.firstIndex(of: "--open-tile"), i + 1 < a.count { o.openTile = a[i + 1] }
         if let i = a.firstIndex(of: "--snapshot-consent"), i + 1 < a.count { o.consentSnapshot = (a[i + 1] as NSString).expandingTildeInPath }
         if let i = a.firstIndex(of: "--consent-install"), i + 1 < a.count { o.consentInstall = a[i + 1] }
         if let i = a.firstIndex(of: "--tooltip"), i + 1 < a.count { o.tooltip = a[i + 1] }
@@ -289,11 +297,27 @@ final class AppModel {
         fflush(stdout)
     }
 
+    /// `--reopen-panel`: close the panel once the state is live and open it again, the way a human reopens it from the
+    /// popover — the page content already exists at the window's first display (where AppKit picks a first responder).
+    private func reopenPanel() async {
+        for _ in 0..<100 where !(panelWindow()?.isVisible == true && store.connection.isLive && store.state != nil) {
+            try? await Task.sleep(for: .milliseconds(100))
+        }
+        try? await Task.sleep(for: .milliseconds(800))
+        panelWindow()?.close()
+        for _ in 0..<50 where panelWindow()?.isVisible == true { try? await Task.sleep(for: .milliseconds(100)) }
+        try? await Task.sleep(for: .milliseconds(300))
+        router.open(LaunchOptions.current.section)
+        print("panel-reopened")
+        fflush(stdout)
+    }
+
     private func panelWindow() -> NSWindow? {
         NSApp.windows.first { ($0.identifier?.rawValue ?? "").hasPrefix(PanelWindow.id) || $0.title == "Agent Hub" }
     }
 
     private func reportPanelWindow() async {
+        if LaunchOptions.current.reopenPanel { await reopenPanel() }
         for _ in 0..<100 {
             if let w = panelWindow(), w.isVisible {
                 // a size set for snapshots (and a test copy's window) does not become the live hub's panel size
@@ -394,6 +418,9 @@ final class AppModel {
             try? await Task.sleep(for: .milliseconds(100))
         }
         try? await Task.sleep(for: .milliseconds(1500))
+        // who has the keyboard when the window shows: a text field's editor here means it grabbed focus by itself
+        let fr = w.firstResponder
+        print("first-responder=\(fr.map { String(describing: type(of: $0)) } ?? "none")\((fr as? NSTextView)?.isFieldEditor == true ? " field-editor" : "") key=\(w.isKeyWindow)")
         guard let view = w.contentView?.superview ?? w.contentView,
               let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { return }
         view.cacheDisplay(in: view.bounds, to: rep)

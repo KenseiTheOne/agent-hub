@@ -1087,3 +1087,94 @@ test("a daily budget above 500 works: at least as many call marks as the budget 
     cleanup(plugins);
   }
 });
+
+// G7: an action process (a human pressed the button) calls MCP through the hub; fresh: true — a write past the interval
+// cache, which then marks the plugin's cached reads stale (read after write).
+test("MCP from an action process; fresh call: past the cache, invalidates reads, gated → 429 mcp:wait, a tool error is no backoff", async () => {
+  const f = await fakeMcp();
+  const plugins = tempHome("ah-oplug-");
+  writePlugin(
+    plugins,
+    "tix.1h.mjs",
+    `#!/usr/bin/env node
+// <agenthub.net>mcp.example.com — tickets through the hub</agenthub.net>
+// <agenthub.connection id="tix" type="mcp" url="https://mcp.example.com/mcp" scope="read" title="Tix" tools="get_user,filter_tasks,get_task" interval="15m" budget="100">tickets</agenthub.connection>
+// <agenthub.action id="touch" level="confirm" title="Touch">tix.1h.mjs --action touch</agenthub.action>
+import { request } from "node:http";
+import { writeFileSync } from "node:fs";
+const call = (body) => new Promise((res) => {
+  const data = JSON.stringify(body);
+  const r = request({ socketPath: process.env.AGENTHUB_HUB_SOCKET, path: "/connections/tix/mcp", method: "POST", headers: { Host: "hub", "content-type": "application/json", "content-length": Buffer.byteLength(data) } }, (resp) => {
+    let s = ""; resp.on("data", (c) => (s += c)); resp.on("end", () => res({ status: resp.statusCode, body: JSON.parse(s || "null") }));
+  });
+  r.on("error", (e) => res({ status: 0, error: e.code }));
+  r.end(data);
+});
+if (process.argv.includes("--action")) {
+  const bad = await call({ tool: "get_task", args: { id: "abc1" }, fresh: "yes" });
+  const w = await call({ tool: "get_task", args: { id: "abc1" }, fresh: true });
+  writeFileSync(process.env.AGENTHUB_PLUGIN_DATA_PATH + "/action.json", JSON.stringify({ bad, w }));
+  console.log("message=" + w.status);
+  process.exit(0);
+}
+const r = await call({ tool: "filter_tasks", args: { assignees: ["me"] } });
+console.log(\`http=\${r.status} ok=\${r.body?.ok} fresh=\${r.body?.fresh} | status=ok\`);
+`,
+  );
+  const { h, sec, bin } = await hubWith({ f, plugins, extraOauth: { intervalMs: 600_000 } });
+  try {
+    await waitFor(async () => (await req(h.sock, "GET", "/connections")).body?.connections?.[0]?.state === "disconnected");
+    const c = await req(h.sock, "POST", "/connections/tix/connect");
+    const a = f.s.approve(c.body.authorizeUrl);
+    await get(`${a.redirect}?code=${a.code}&state=${a.state}&iss=${encodeURIComponent(a.iss)}`);
+    await waitFor(() => /http=200 ok=true fresh=true/.test(header(h, "tix")), { timeoutMs: 8000 });
+    assert.equal(f.s.toolCalls, 1);
+    h.core.host.refresh("tix", "Manual");
+    await waitFor(() => /fresh=false/.test(header(h, "tix")), { timeoutMs: 8000 });
+    assert.equal(f.s.toolCalls, 1, "a read within the interval comes from memory");
+
+    // the action process is a plugin process for connections too; fresh goes to the service right away
+    const inst = h.core.host.get("tix");
+    const ar = await inst.runAction(inst.plugin.meta.actions.find((x) => x.id === "touch"));
+    assert.equal(ar.ok, true, JSON.stringify(ar));
+    const out = JSON.parse(readFileSync(join(h.config.paths.pluginData, "tix", "action.json"), "utf8"));
+    assert.deepEqual([out.bad.status, out.bad.body.error], [400, "args:fresh:type"]);
+    assert.equal(out.w.status, 200, JSON.stringify(out.w));
+    assert.deepEqual([out.w.body.ok, out.w.body.fresh], [true, true]);
+    assert.match(out.w.body.result.content[0].text, /abc1/);
+    assert.equal(f.s.toolCalls, 2);
+    assert.deepEqual(f.s.lastToolArgs, { name: "get_task", arguments: { id: "abc1" } });
+    const conn = h.core.facts.get("oauth.api").get("tix");
+    assert.ok(![...conn.cache.keys()].some((k) => k.includes("get_task")), "a fresh result is not kept in memory");
+    assert.ok(h.core.journal.tail(200).some((e) => e.type === "mcp-call" && e.tool === "get_task" && e.fresh === true));
+
+    // read after write: the cached read is stale — the next run goes to the service
+    h.core.host.refresh("tix", "Manual");
+    await waitFor(() => f.s.toolCalls === 3, { timeoutMs: 8000 });
+    await waitFor(() => /http=200 ok=true fresh=true/.test(header(h, "tix")), { timeoutMs: 8000 });
+
+    // gated (backoff): a fresh call is not made and does not pretend — 429 mcp:wait
+    conn.persist.backoff = { n: 1, until: Date.now() + 60_000, reason: "error" };
+    const g = await conn.call({ id: "tix" }, "get_task", { id: "abc1" }, { fresh: true });
+    assert.deepEqual([g.status, g.body.error, g.body.why], [429, "mcp:wait", "error"]);
+    assert.ok(g.body.nextAt);
+    assert.equal(f.s.toolCalls, 3);
+    // while gated an ordinary read still gets the previous result
+    const rd = await conn.call({ id: "tix" }, "filter_tasks", { assignees: ["me"] });
+    assert.deepEqual([rd.status, rd.body.ok, rd.body.fresh], [200, true, false]);
+    conn.persist.backoff = null;
+
+    // a tool error on a write: returned as is, no backoff for the connection, the reads stay
+    f.s.mode = "tool-error";
+    const te = await conn.call({ id: "tix" }, "get_task", { id: "nope" }, { fresh: true });
+    assert.deepEqual([te.status, te.body.ok, te.body.error], [200, false, "mcp:tool-error"]);
+    assert.match(te.body.errorText, /workspace_id required/);
+    assert.equal(conn.persist.backoff, null);
+    noSecrets(h, sec);
+  } finally {
+    await h.stop();
+    await f.close();
+    cleanup(bin);
+    cleanup(plugins);
+  }
+});

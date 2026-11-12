@@ -7,8 +7,9 @@ import SwiftUI
 /// The permissions window and plugin removal are custom modal windows following the prototype (Consent.dc.html), the rest is NSAlert.
 @MainActor
 final class AlertPresenter: ConfirmPresenter {
-    func confirm(_ request: ConfirmRequest, actionLabel: String) async -> Bool {
-        NSApp.activate(ignoringOtherApps: true)
+    /// The core's confirmation as an alert: title by level, the core text, the row the button is on (G10, only when the
+    /// core didn't already quote it), the cost and the token lifetime.
+    private func confirmAlert(_ request: ConfirmRequest, actionLabel: String) -> NSAlert {
         let alert = NSAlert()
         alert.alertStyle = request.level == .confirmCost ? .critical : .warning
         alert.messageText = request.title
@@ -16,9 +17,65 @@ final class AlertPresenter: ConfirmPresenter {
                 ? tr("Подтвердите: действие тратит квоту или выходит в сеть", "Confirm: this uses quota or the network")
                 : tr("Подтвердите действие", "Confirm the action"))
         var info = request.text
+        if let row = request.extraRow(actionLabel: actionLabel) { info += "\n\n" + tr("Кнопка в строке «\(row)».", "Button on the row \"\(row)\".") }
         if let cost = request.cost, !cost.isEmpty { info += "\n\n" + tr("Чем это обойдётся: ", "Cost: ") + cost }
         if let ms = request.expiresInMs { info += "\n\n" + tr("Подтверждение действует \(ms / 1000) с", "Valid for \(ms / 1000) s") }
         alert.informativeText = info
+        return alert
+    }
+
+    /// Typed text for an input action (G1): with `confirm` — the core's confirmation with a field (its token accepts any
+    /// valid text); without — the field alone (an immediate action pressed where there is no room for a field). The checks
+    /// the core makes run here first; a failed one reopens the sheet with the reason and the typed text kept.
+    func prompt(_ request: InputPrompt) async -> String? {
+        NSApp.activate(ignoringOtherApps: true)
+        var text = request.text
+        var error = request.error
+        while true {
+            let alert: NSAlert
+            if let c = request.confirm {
+                alert = confirmAlert(c, actionLabel: request.actionLabel)
+                alert.addButton(withTitle: c.button ?? tr("Выполнить", "Run"))
+            } else {
+                alert = NSAlert()
+                alert.alertStyle = .informational
+                alert.messageText = request.actionLabel
+                alert.informativeText = tr("Текст уйдёт команде плагина.", "The text goes to the plugin's command.")
+                alert.addButton(withTitle: tr("Отправить", "Send"))
+            }
+            let cancel = alert.addButton(withTitle: tr("Отмена", "Cancel"))
+            cancel.keyEquivalent = "\u{1b}"
+            if request.confirm?.level == .confirmCost { alert.buttons.first?.keyEquivalent = "" }
+            let field = NSTextField(string: text)
+            field.placeholderString = request.input.placeholder
+            field.lineBreakMode = .byTruncatingTail
+            field.usesSingleLineMode = true
+            field.frame = NSRect(x: 0, y: 0, width: 320, height: 24)
+            let note = NSTextField(wrappingLabelWithString: error ?? tr("Одна строка, до \(request.input.maxLength) символов.", "One line, up to \(request.input.maxLength) characters."))
+            note.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+            note.textColor = error == nil ? .secondaryLabelColor : .systemRed
+            note.preferredMaxLayoutWidth = 320
+            let stack = NSStackView(views: [field, note])
+            stack.orientation = .vertical
+            stack.alignment = .leading
+            stack.spacing = 6
+            field.widthAnchor.constraint(equalToConstant: 320).isActive = true
+            stack.frame = NSRect(origin: .zero, size: NSSize(width: 320, height: 24 + 6 + note.fittingSize.height))
+            alert.accessoryView = stack
+            alert.window.initialFirstResponder = field
+            guard alert.runModal() == .alertFirstButtonReturn else { return nil }
+            text = field.stringValue
+            if let code = InputCheck.code(text, maxLength: request.input.maxLength) {
+                error = InputCheck.message(code, maxLength: request.input.maxLength)
+                continue
+            }
+            return text
+        }
+    }
+
+    func confirm(_ request: ConfirmRequest, actionLabel: String) async -> Bool {
+        NSApp.activate(ignoringOtherApps: true)
+        let alert = confirmAlert(request, actionLabel: actionLabel)
         // "Details" (tag, commit) — small grey text under the main text: visible, but not competing with it
         if let d = request.details, !d.isEmpty {
             let field = NSTextField(wrappingLabelWithString: tr("Подробности: ", "Details: ") + d)
@@ -120,7 +177,8 @@ struct ConsentSheet: View {
                 VStack(alignment: .leading, spacing: 3) {
                     Text(title).font(.system(size: 16, weight: .bold)).fixedSize(horizontal: false, vertical: true)
                     // where it's installed from: the registry (signature and sha256) or an own folder (path and content fingerprint)
-                    Text((request.source ?? ConsentSource(kind: "registry")).line)
+                    // several registries (G19): which one it installs from
+                    Text((request.source ?? ConsentSource(kind: "registry")).line + (request.registryLabel.map { " · " + RegistryText.from($0) } ?? ""))
                         .font(.system(size: 12)).foregroundStyle(.secondary)
                         .lineLimit(2).truncationMode(.middle).fixedSize(horizontal: false, vertical: true)
                         .help(request.source?.path ?? "")

@@ -48,6 +48,25 @@ export function readItemResult(securityPath, service, account, { timeoutMs = 500
   });
 }
 
+// Whether an entry exists, without reading its value: `find-generic-password` without -w (exit 0 — found, 44 — none; the
+// attributes it prints are discarded). → { exists: true } | { missing: true } | { error }
+export function itemExists(securityPath, service, account, { timeoutMs = 5000 } = {}) {
+  if (!okName(service) || !okName(account)) return Promise.resolve({ error: "bad-name" });
+  return new Promise((resolve) => {
+    let child;
+    try {
+      child = execFile(securityPath, ["find-generic-password", "-s", service, "-a", account], { timeout: timeoutMs, maxBuffer: 64 * 1024, env: ENV }, (err) => {
+        if (!err) return resolve({ exists: true });
+        if (err.code === 44) return resolve({ missing: true });
+        resolve({ error: err.killed || err.signal ? "timeout" : typeof err.code === "number" ? `exit-${err.code}` : "spawn" });
+      });
+    } catch {
+      return resolve({ error: "spawn" });
+    }
+    child.stdin?.end();
+  });
+}
+
 // → string or null (no entry, denied, timeout), for plugin secrets where failure and absence are equivalent.
 export function readItem(securityPath, service, account, opts = {}) {
   return readItemResult(securityPath, service, account, opts).then((r) => r.value ?? null);
@@ -58,10 +77,17 @@ export function writeLine(service, account, value, keychain = null) {
   return `add-generic-password -U -s ${service} -a ${account} -w ${value}${keychain ? ` ${keychain}` : ""}`;
 }
 
+// A plugin secret typed by a human in the app (PUT /secrets/:plugin/:key) is stored as is — the plugin reads it raw
+// (AGENTHUB_SECRET_*), the same as an entry made with `security add-generic-password`. `security -i` splits its line on
+// whitespace and treats quotes and backslashes specially, so a raw value is printable ASCII without spaces, `"`, `'`
+// and `\`; anything else is refused (bad-value) and has to be entered with `security add-generic-password` instead.
+export const RAW_VALUE_RE = /^[!#-&(-\[\]-~]{1,4000}$/;
+
 // Write (or replace: -U) a value. → { ok, error? }. The value goes to the stdin of `security -i`.
-export async function writeItem(securityPath, service, account, value, { timeoutMs = 5000, keychain = null } = {}) {
+// raw: false — base64url (the connection store); true — RAW_VALUE_RE (a plugin secret, see above).
+export async function writeItem(securityPath, service, account, value, { timeoutMs = 5000, keychain = null, raw = false } = {}) {
   if (!okName(service) || !okName(account)) return { ok: false, error: "bad-name" };
-  if (typeof value !== "string" || !/^[A-Za-z0-9_-]{1,16384}$/.test(value)) return { ok: false, error: "bad-value" };
+  if (typeof value !== "string" || !(raw ? RAW_VALUE_RE : /^[A-Za-z0-9_-]{1,16384}$/).test(value)) return { ok: false, error: "bad-value" };
   if (keychain && !/^\/[\w./-]{1,500}$/.test(keychain)) return { ok: false, error: "bad-keychain" };
   // security -i will not notice a nonexistent keychain file and will write to login
   if (keychain && !isFile(keychain)) return { ok: false, error: "no-keychain-file" };
