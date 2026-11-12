@@ -117,12 +117,16 @@ test("built-in plugins via the daemon: sessions, workflows and quota in /state, 
       assert.equal(st[id].trusted, true, id);
     }
     assert.match(st.agents.header[0].title, /прогон|Прогон/);
-    assert.equal(st.agents.title, "Фоновые агенты");
+    assert.equal(st.agents.title, "Claude Code Фоновые агенты");
     assert.match(st.quota.header[0].title, /Неделя 20%/);
     assert.equal(st.quota.header[0].params.tile, "20%");
+    // the plugin name now starts with "Claude Code"; the popover tile keeps a short caption
+    assert.equal(st.quota.title, "Claude Code Квота");
+    assert.equal(st.quota.header[0].params.tileLabel, "Квота");
     if (IS_DARWIN) {
       assert.equal(st["claude-sessions"].type, "streamable");
       assert.match(st["claude-sessions"].header[0].title, /работает|работают|ждёт|ждут|свободны|Сессий нет/);
+      assert.equal(st["claude-sessions"].header[0].params.tileLabel, "Сессии");
       const sess = st["claude-sessions"].body.find((i) => i.session);
       assert.equal(sess.session.pid, sleeper.pid);
       assert.equal(sess.session.label, "подпись не подтверждена");

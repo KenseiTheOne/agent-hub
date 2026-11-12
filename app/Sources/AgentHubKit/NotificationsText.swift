@@ -98,15 +98,44 @@ public enum NotificationsText {
         }
     }
 
-    /// How notifications arrive: macOS banners only; when the person counts as away (idle threshold from the daemon).
+    /// How notifications arrive: macOS banners (plus the channels listed below, if any); when the person counts as away
+    /// (idle threshold from the daemon).
     public static func channels(_ n: NotificationsInfo) -> String {
+        let extra = n.externalChannels.count
+        let head = extra == 0 ? tr("Баннеры macOS.", "macOS banners.")
+            : tr("Баннеры macOS и ещё \(extra) \(pluralRu(extra, "канал", "канала", "каналов")) — список ниже.",
+                 "macOS banners and \(extra) more \(extra == 1 ? "channel" : "channels") — listed below.")
         // the "away" threshold comes from the daemon (services.push.idleThresholdMs); an older daemon gives no number
         if let ms = n.awayAfterMs, ms > 0 {
             let min = max(1, Int((Double(ms) / 60_000).rounded()))
-            return tr("Баннеры macOS. Без клавиатуры и мыши дольше \(min) мин — вы отошли от Mac: в тихие часы баннеры ждут сводки, а баннер сессии, которая ждёт ответа, придёт, когда вы вернётесь (или через несколько минут).",
-                      "macOS banners. No keyboard or mouse for more than \(min) min means you're away from the Mac: during quiet hours banners wait for the digest, and a waiting session's banner comes when you're back (or after a few minutes).")
+            return head + tr(" Без клавиатуры и мыши дольше \(min) мин — вы отошли от Mac: в тихие часы баннеры ждут сводки, а баннер сессии, которая ждёт ответа, придёт, когда вы вернётесь (или через несколько минут).",
+                             " No keyboard or mouse for more than \(min) min means you're away from the Mac: during quiet hours banners wait for the digest, and a waiting session's banner comes when you're back (or after a few minutes).")
         }
-        return tr("Баннеры macOS.", "macOS banners.")
+        return head
+    }
+
+    /// The block of channels that take notifications off this Mac (re-review 70): nil — the banner is the only channel.
+    public static var externalHeader: String { tr("Уходят и за пределы Mac", "Also sent off this Mac") }
+
+    /// A channel row: its name, kind and what it gets (names only — the daemon never sends an address).
+    public static func channelRow(_ c: NotificationsInfo.Channel) -> String {
+        let kind: String
+        switch c.type {
+        case "webhook": kind = "webhook"
+        case "ntfy": kind = "ntfy"
+        case "service": kind = tr("служба хаба", "hub service")
+        default: kind = c.type
+        }
+        let name = c.label.isEmpty || c.label == c.type ? c.id : c.label
+        let what = (c.events?.isEmpty == false) ? tr("только: ", "only: ") + c.events!.prefix(4).joined(separator: ", ") + (c.events!.count > 4 ? " …" : "") : tr("всё", "everything")
+        let sec = c.security ? tr(" · и исключения безопасности", " · security exceptions too") : ""
+        return "\(name) (\(kind)) — \(what)\(sec)"
+    }
+
+    /// Under the channel list: where they come from and how a plugin keeps an event on the Mac.
+    public static var externalExplain: String {
+        tr("Каналы задаются в config.json (services.push.channels) или подключаются службами хаба. Событие, которое плагин пометил macOnly, остаётся только баннером на этом Mac.",
+           "Channels are set in config.json (services.push.channels) or added by hub services. An event a plugin marks macOnly stays a banner on this Mac only.")
     }
 
     /// Time options for quiet hours: every 30 minutes, plus the current value if it falls between them.

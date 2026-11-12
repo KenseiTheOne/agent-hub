@@ -13,11 +13,25 @@
 //                                        API host with the bearer token { method?, host?, path, query?, headers?, body?, fresh? }
 //                                        → { ok, response: { status, headers, body, encoding, json?, truncated? }, fetchedAt,
 //                                        nextAt, why, fresh, … } (GET/HEAD cached per interval unless fresh; other methods — writes)
+//
+// An action declared with net="none" (G2) promised not to use the network: its process (and its background job) is refused
+// on both plugin routes with 403 net:none (journaled as mcp-denied / http-denied with the action id) before the service is
+// asked — the hub's own proxy is network too. A call from any other action process (a human pressed a button) is served
+// past the interval cache, like fresh: true (lib/services/oauth.mjs).
 
 import { pluginAllowed } from "../services/oauth.mjs";
 
 const svcOf = (ctx) => ctx.facts.get("oauth.api") || null;
 const unavailable = { status: 503, body: { error: "oauth:disabled" } };
+// The caller rule shared by /mcp and /http: the plugin process (pid from the core) → { pl } or { res } (403, journaled).
+function caller(ctx, c, peer, kind) {
+  const pl = ctx.facts.pluginByPid?.(peer.pid, { actions: true }) ?? null;
+  const why = pluginAllowed(pl, c);
+  const error = why ? why.replace(/^mcp:/, `${kind}:`) : pl.action?.net === "none" ? "net:none" : null;
+  if (!error) return { pl };
+  ctx.journal.write({ type: `${kind}-denied`, connector: c.id, plugin: pl?.id || null, pid: peer.pid ?? null, error, ...(pl?.action ? { action: pl.action.id } : {}) });
+  return { res: { status: 403, body: { error } } };
+}
 const ERR_STATUS = { orphan: 409, "no-keychain": 409, "port-busy": 409, keychain: 500, "keychain-read": 503, discovery: 502, register: 502, net: 502, http: 502 };
 
 function conn(ctx, id) {
@@ -96,15 +110,13 @@ export const routes = [
       if (res) return res;
       // only a plugin process the hub launched itself (the peer pid comes from the core, not from the request): a run,
       // the streamable process, or an action a human started (a write after a button press, like /terminal/*)
-      const pl = ctx.facts.pluginByPid?.(peer.pid, { actions: true }) ?? null;
-      const why = pluginAllowed(pl, c);
-      if (why) {
-        ctx.journal.write({ type: "mcp-denied", connector: c.id, plugin: pl?.id || null, pid: peer.pid ?? null, error: why });
-        return { status: 403, body: { error: why } };
-      }
+      const who = caller(ctx, c, peer, "mcp");
+      if (who.res) return who.res;
+      const pl = who.pl;
       if (!body || typeof body !== "object" || typeof body.tool !== "string") return { status: 400, body: { error: "args:tool:required" } };
       if (body.fresh !== undefined && typeof body.fresh !== "boolean") return { status: 400, body: { error: "args:fresh:type" } };
-      return c.call(pl, body.tool, body.args, { fresh: body.fresh === true });
+      // an action process (a human pressed a button) is never answered from the interval cache (re-review 76)
+      return c.call(pl, body.tool, body.args, { fresh: body.fresh === true || Boolean(pl.action) });
     },
   },
   {
@@ -116,15 +128,11 @@ export const routes = [
       const { res, c } = conn(ctx, params.id);
       if (res) return res;
       // the same caller rule as /mcp: a process the hub launched for the plugin that declared the connection (pid from the core)
-      const pl = ctx.facts.pluginByPid?.(peer.pid, { actions: true }) ?? null;
-      const why = pluginAllowed(pl, c);
-      if (why) {
-        const error = why.replace(/^mcp:/, "http:");
-        ctx.journal.write({ type: "http-denied", connector: c.id, plugin: pl?.id || null, pid: peer.pid ?? null, error });
-        return { status: 403, body: { error } };
-      }
+      const who = caller(ctx, c, peer, "http");
+      if (who.res) return who.res;
+      const pl = who.pl;
       if (!body || typeof body !== "object" || Array.isArray(body)) return { status: 400, body: { error: "args:body:type" } };
-      return c.httpRequest(pl, body);
+      return c.httpRequest(pl, Boolean(pl.action) && body.fresh === undefined ? { ...body, fresh: true } : body);
     },
   },
 ];

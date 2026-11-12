@@ -53,6 +53,14 @@ that an older hub ignores, so plugins keep declaring `<agenthub.contract>3</agen
   API version headers — `X-Override-URL`, `X-Envoy-*`, `x-middleware-subrequest` and other `X-…` are refused); the query
   key `_method` is `403 http:query-not-allowed`.
 
+- **A plugin's process group stays the plugin's until its run ends.** A descendant left in the group of a run, action,
+  job or streamable process (`( sleep 1; curl … ) &`, a child that outlives its parent) was a plain `cli` once the
+  group's first process exited — an untrusted plugin's background child got the full CLI view of the socket for the rest
+  of the run. Now the group counts until the run is over and the group killed (re-review 63).
+- **`net="none"` holds on the hub's own proxy.** An action that promised no network (or its background job) could still
+  reach a service through `POST /connections/:id/mcp|http`. Now its process gets `403 net:none` there, journaled as
+  `mcp-denied`/`http-denied` with the action id (re-review 66).
+
 ### Plugin contract (additive, contract 3)
 
 - **Typed input for actions.** `<agenthub.action … input="Placeholder" input-ru="…" arg="name:^pattern$" maxLength="N">`:
@@ -143,6 +151,31 @@ that an older hub ignores, so plugins keep declaring `<agenthub.contract>3</agen
   numeric `highlight=` moves with them, `spark=` is trimmed on its own, and each trimmed key leaves a journal warning.
   Before, the keys were cut at the end, dropping the newest days silently.
 
+- **An input action bound to a row: `inputPattern=`.** `<agenthub.action … arg="thread:^t[0-9]{1,9}$" input="Your reply"
+  inputPattern="^[^<>]{1,500}$">`: the typed text is checked against `inputPattern`, and `arg=` becomes an ordinary row
+  argument — the line carries `action=reply arg=t2`, the value goes to argv, the text still only to stdin; the
+  confirmation, `offer.label` and `actionResult.arg` name the row's value. Without `inputPattern=` an input action works
+  as before (re-review 65).
+- **The confirmation names the pressed row.** The same button on rows with different titles was one offer, and every
+  window quoted the first row ("delete the prod database?" confirmed as "harmless question"). Now each such row has its
+  own offer; a child button that only repeats the action's title (banner buttons, `--Approve` under a request) is
+  confirmed with its parent row's title. An offer on a single row keeps its id (re-review 64).
+- **No dead link buttons.** `href=`/`effect="open.url …"` with a link `open.url` never opens (`message://`, `mailto:`,
+  credentials in the URL) no longer renders a button that answers `409 facts:scheme`; the core drops it when it reads the
+  frame and journals a warning. Primitives may export `checkOffer(args)` for such checks (re-review 71).
+- **`writes=` on `<agenthub.connection type="mcp">`.** The tools of the allowlist that change something
+  (`writes="create_task,update_task"`) are never served from the interval cache, as if every call carried
+  `fresh: true`; a name not in `tools=` rejects the declaration. `GET /connections` and `/state` show `writes`
+  (re-review 76).
+- **`macOnly="true"` works again.** An `<agenthub.push>` rule with it (or `services.push.rules.<name>.macOnly`) goes to
+  the Mac banner only, never to webhook, ntfy or service channels; held overnight, its item stays in the Mac digest and
+  out of what the extra channels get. Community plugins may declare it. Before, it was parsed and ignored (re-review 70).
+- **`>` inside a quoted attribute value** (`arg="text:^[^<>]{1,500}$"`) no longer ends the metadata tag; the action was
+  dropped with a misleading "input= needs arg=" warning (re-review 72).
+- **Contract feature `input-pattern`.** An index entry whose action declares `inputPattern=` lists the feature
+  `input-pattern` in its `contract.features`, so a hub that doesn't know the attribute shows "Requires a newer hub"
+  instead of installing an action it would read differently (`CONTRACT_FEATURES`, `daemon/lib/registry/perms.mjs`).
+
 ### Daemon
 
 - **Frame rate.** `plugin` SSE events are coalesced per plugin to at most one per 250 ms (`plugins.emitMinIntervalMs`),
@@ -197,6 +230,25 @@ that an older hub ignores, so plugins keep declaring `<agenthub.contract>3</agen
   `registry`, `registryLabel` (null with only `default`) and `tierLabel` ("official plugin · corp"); a running plugin
   picks up a new label without a restart.
 
+- **No phantom jobs after a plugin update.** The jobs of a removed or updated plugin instance are no longer listed for the
+  new instance: its first `{"type":"jobs"}` and `/state.plugins[].jobs` leave them out (the new process never got their
+  `jobExit` and showed them running forever). They are still stopped and journaled (re-review 67).
+- **watch fires under constant writes.** The 300 ms debounce now has a 2 s maximum wait: a log written every 100 ms gives
+  a run at least every 2 s instead of none until the writes stop (re-review 68).
+- **Distinguishable job titles.** A job's title carries its `arg=` value ("Start dev server web"); a second running job
+  with the same title gets its start time ("Long (14:05:31)") (re-review 73).
+- **`job.cancel` from cli on a test hub.** With `AGENTHUB_TEST_TIER=own` a script may stop a test-tier plugin's job
+  (`POST /actions/job.cancel`); jobs of other plugins stay app-only. Primitives may export `pluginOf(args, facts)` to
+  take part in this exception (re-review 75).
+- **Actions never read a connection from the cache.** A call to `/connections/:id/mcp|http` from an action process or a
+  background job (a human pressed the button) is served fresh, like `fresh: true`; a second identical write no longer
+  comes back as `ok: true, fresh: false` without reaching the service (re-review 76).
+- **Push channels in `/state`.** `notifications.channels` lists where notifications go — `mac` first, then the
+  config.json and service channels: `id`, `type`, `label`, `security`, `events`, never a URL or token (re-review 70).
+- **Linter `*.key`.** The source check matches file paths only (a last word with `/`, `\`, `~`, `*`, or a single-dot
+  name); an SF Symbol such as `sfimage=person.badge.key` no longer fails the registry CI or an own-folder install
+  (re-review 69). The registry's vendored `scripts/vendor/perms.mjs` is the same file.
+
 ### App
 
 - **Typed input.** An immediate action with `input` draws a text field and a send button in place of its capsule on the
@@ -239,9 +291,24 @@ that an older hub ignores, so plugins keep declaring `<agenthub.contract>3</agen
   default registry everything looks as before.
 - **HTTP connections.** A `type="http"` connection says which hosts, methods and paths the hub calls instead of the MCP
   tools line; `409 oauth:port-busy` reads in ru/en.
+- **Charts.** The average line stays on the plot, its caption ("avg $330") moved under the chart next to a dashed
+  sample of the line: on the plot it covered the bars' value captions.
+- **Segmented controls.** An option declined in the confirmation ("No"), refused or failed lights the real selection
+  again at once; it used to stay lit for another 1.5 s waiting for a page that never brings it.
+- **Notification channels in Settings.** Settings → Notifications says "macOS banners and N more channels" and lists
+  each channel that takes notifications off the Mac (name, webhook/ntfy/hub service, its filter, whether it gets
+  security exceptions), with a note on `services.push.channels` and `macOnly` (re-review 70).
+- **`font=mono` everywhere it is promised.** Table rows (the title and its cells, a bar cell's text, gray notes in the
+  row), buttons and text links now use the monospaced font too (re-review 74).
+- **Tests don't depend on the macOS language.** Each test case runs with its own language (`.hubLang` trait, a
+  task-local `L10n.$scope`), so the suite passes on an English system and parallel suites can't switch each other's
+  language (re-review 62).
 
 ### Built-in plugins
 
+- **Names.** The plugins about Claude Code carry its name: Claude Code Sessions, Claude Code Background Agents, Claude
+  Code Quota, Claude Code Spend (ru: «Claude Code Сессии», «… Фоновые агенты», «… Квота», «… Расход»). Plugin ids stay,
+  so settings, data and notification switches carry over; the popover tiles keep short captions (`tileLabel`).
 - **New: Spend (`spend`)** — a journal of Claude Code token spend ([`plugins/spend`](plugins/spend/README.md)), built on
   the chart elements: a header with today's cost large, its tokens and requests, yesterday's total and a 14-day
   sparkline with the average; cards for yesterday (flagged when it is over 1.5× the average), the last 7 days and this
@@ -273,6 +340,12 @@ that an older hub ignores, so plugins keep declaring `<agenthub.contract>3</agen
   of the screenshots as part of the repository.
 - [`plugins-registry.md`](docs/plugins-registry.md): reviewer rules for foreign text in output, community actions and
   push rules, `net="none"`, `background="true"`, `input=`, `<agenthub.subscribe>` and the hub socket.
+- Re-review corrections: header buttons in the popover's expanded tile card (up to three) and how a run interval
+  drifts (it counts from the end of the previous run; `<agenthub.schedule>` for clock times) are documented; an agent
+  session in cmux has no switch (neither `session.focus` nor `terminal.focus`); input actions take the test-hub CLI
+  exception too; §9.1 says what the CLI class may press on the live hub versus a test hub; extension terminal adapters
+  ignore `order` and get no `ctx`, only `facts`. The linter now says a community `immediate` action with network or
+  `cost=` is raised to `confirm-cost`, not `confirm`, and the action confirmation text puts a period after the command.
 
 ## 0.1.2 — 2026-11-11
 

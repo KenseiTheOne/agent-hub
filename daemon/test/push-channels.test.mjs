@@ -194,3 +194,51 @@ test("hub: a local (untrusted) plugin's banner gets no buttons and no click targ
     await rx.close();
   }
 });
+
+// Re-review 70: macOnly keeps an event on this Mac; /state names the channels (never their URLs).
+test("macOnly: accepts() refuses every extra channel, security ones too", () => {
+  assert.equal(accepts({ id: "w", security: true, events: null }, { kind: "plugin", key: "mail:new", macOnly: true }), false);
+  assert.equal(accepts({ id: "w", security: false, events: ["mail:*"] }, { kind: "plugin", key: "mail:new", macOnly: true }), false);
+  assert.equal(accepts({ id: "w", security: false, events: ["mail:*"] }, { kind: "plugin", key: "mail:new" }), true);
+});
+
+test("hub: a macOnly event reaches the banner but not the webhook; /state.notifications.channels lists ids and types, no URL", async () => {
+  const rx = await receiver();
+  const plugins = tempHome("ah-pc-");
+  writePlugin(
+    plugins,
+    "mailx.1h.sh",
+    `#!/bin/sh
+# <agenthub.push key="mail-new" macOnly="true">New mail</agenthub.push>
+echo "Mail | status=warning"
+echo "---"
+echo "Subject: private | event=mail-new"
+echo "Sync failed | event=sync-failed"
+`,
+  );
+  const h = await startHub({
+    pluginsDir: plugins,
+    services: "push",
+    overrides: { services: { push: { ackTimeoutMs: 100, channels: [{ type: "ntfy", url: `${rx.url}/topic-SECRET9`, label: "Phone" }, { type: "webhook", url: `${rx.url}/hook?token=SECRET123`, id: "ops", events: ["mailx:*"] }] } } },
+  });
+  const notes = [];
+  h.core.on("push.notify", (ev) => notes.push(ev));
+  try {
+    await waitFor(() => notes.find((n) => n.key === "mailx:mail-new"));
+    await waitFor(() => rx.got.find((g) => g.body?.key === "mailx:sync-failed"));
+    await waitFor(() => rx.got.filter((g) => /sync-failed|Sync failed/.test(JSON.stringify(g.body))).length >= 2);
+    await new Promise((r) => setTimeout(r, 200));
+    assert.ok(!rx.got.some((g) => /private/.test(JSON.stringify(g.body ?? g.raw))), "the macOnly text never leaves the Mac");
+    const st = h.core.snapshot().notifications;
+    assert.deepEqual(st.channels, [
+      { id: "mac", type: "mac", label: "macOS", security: true, events: null },
+      { id: "ntfy-1", type: "ntfy", label: "Phone", security: false, events: null },
+      { id: "ops", type: "webhook", label: "webhook", security: false, events: ["mailx:*"] },
+    ]);
+    assert.doesNotMatch(JSON.stringify(h.core.snapshot()), /SECRET9|SECRET123|127\.0\.0\.1:/);
+  } finally {
+    await h.stop();
+    await rx.close();
+    cleanup(plugins);
+  }
+});

@@ -3,7 +3,7 @@ import Testing
 @testable import AgentHubKit
 
 // Plugin page controls (hub 0.1.1, optional within contract 3): segment, select, toggle and table lines.
-@Suite struct PluginControlsTests {
+@Suite(.hubLang(.ru)) struct PluginControlsTests {
     private func items(_ json: String) throws -> [Item] {
         try JSONDecoder().decode([Item].self, from: Data(json.utf8))
     }

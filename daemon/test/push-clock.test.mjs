@@ -84,7 +84,7 @@ test("event table: name, alias, instance suffix, longest match, override", () =>
   assert.equal(matchRule(rules, "quota-week-80").name, "quota-week");
   assert.equal(matchRule(rules, "session-waitingX").name, "default");
   assert.equal(matchRule(rules, "my-event.a").label, "Mine");
-  assert.equal(matchRule(rules, "my-event.a").macOnly, undefined, "macOnly is not a rule field any more");
+  assert.equal(matchRule(rules, "my-event.a").macOnly, true, "macOnly is a rule field again: the Mac banner only (re-review 70)");
   const qp = matchRule(rules, "pace-85:20261109");
   assert.equal(qp.quietException, true);
   assert.equal(qp.hold, undefined, "unknown hold value is dropped");

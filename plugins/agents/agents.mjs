@@ -1,7 +1,7 @@
 #!/usr/bin/env node
-// <agenthub.title>Фоновые агенты</agenthub.title>
-// <agenthub.title lang="en">Background agents</agenthub.title>
-// <agenthub.version>1.2.0</agenthub.version>
+// <agenthub.title>Claude Code Фоновые агенты</agenthub.title>
+// <agenthub.title lang="en">Claude Code Background Agents</agenthub.title>
+// <agenthub.version>1.2.1</agenthub.version>
 // <agenthub.desc>Фоновые прогоны Workflow в Claude Code: что идёт, что упало, сколько потрачено</agenthub.desc>
 // <agenthub.desc lang="en">Claude Code Workflow runs in the background: what's running, what failed, what it cost</agenthub.desc>
 // <agenthub.status value="ok" label="Прогоны в порядке">Идущие и завершённые прогоны без сбоев</agenthub.status>
@@ -582,7 +582,7 @@ export class Tracker {
         activity = en ? `${running.length} runs in progress: ${nm}` : `${running.length} ${plural(running.length, "прогон идёт", "прогона идут", "прогонов идут")}: ${nm}`;
       }
     }
-    // tileLabel — the popover tile label: "Background agents" does not fit in the tile (~110 pt, one line)
+    // tileLabel — the popover tile label: "Claude Code Background Agents" does not fit in the tile (~110 pt, one line)
     const head = line(title, { status, tile, tileLabel: en ? "Agents" : "Агенты", sfimage: running.length ? "gearshape.2" : bad.length ? "exclamationmark.triangle" : "gearshape", activity });
     const out = [activity ? head : `${head} activity=""`];
     if (running.length) {

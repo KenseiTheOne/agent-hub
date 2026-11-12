@@ -114,7 +114,15 @@ test("linter: effects=session.stop is rejected for both third-party and official
   assert.deepEqual(lintPlugin({ id: "t", meta: act("immediate"), official: true }).errors, []);
   const netMeta = META(`# <agenthub.net>api.example.com — данные</agenthub.net>\n# <agenthub.action id="go" level="immediate">t.1m.mjs --action go</agenthub.action>`);
   assert.ok(lintPlugin({ id: "t", meta: netMeta, official: true }).errors.some((e) => e.includes("immediate — только у плагина без сети")));
-  assert.ok(lintPlugin({ id: "t", meta: act("immediate") }).warnings.some((w) => w.includes("поднимет immediate до confirm")));
+  assert.ok(lintPlugin({ id: "t", meta: act("immediate") }).warnings.some((w) => w.includes("поднимет immediate до confirm —")));
+  // re-review (doc mismatch): a community immediate with the plugin's network or a cost= is raised to confirm-cost
+  // (core.actionLevel), and the note says so; net="none" on the action keeps it at confirm
+  const commNet = lintPlugin({ id: "t", meta: netMeta, lang: "en" }).warnings;
+  assert.ok(commNet.some((w) => w.includes("raises immediate to confirm-cost")), commNet.join("\n"));
+  assert.ok(lintPlugin({ id: "t", meta: act("immediate", ' cost="квота"') }).warnings.some((w) => w.includes("до confirm-cost")));
+  const netNone = META(`# <agenthub.net>api.example.com — данные</agenthub.net>\n# <agenthub.action id="go" level="immediate" net="none">t.1m.mjs --action go</agenthub.action>`);
+  const nn = lintPlugin({ id: "t", meta: netNone }).warnings;
+  assert.ok(nn.some((w) => w.includes("поднимет immediate до confirm —")) && !nn.some((w) => w.includes("до confirm-cost")), nn.join("\n"));
   // review 2026-11-09 (low): immediate with a cost — an error (the core would ask with the cost); without a cost — a warning for the reviewer
   for (const cost of [' cost="квота"', ' cost-en="quota"']) {
     const r = lintPlugin({ id: "t", meta: act("immediate", cost), official: true });

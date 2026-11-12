@@ -13,7 +13,9 @@
 // ancestors (any depth, not above the daemon) is a plugin run, a streamable process, an action or a background job
 // (the pluginByPid fact), or the process group of the peer or of one of those ancestors is one of them: every plugin
 // process is spawned detached, so it leads its own group and its descendants stay in it even after a double fork to
-// launchd. The answer is bound to the connection as peer.plugin = {id, trusted, tier, source}.
+// launchd. A group stays the plugin's until its run, action, job or streamable process has ended and the group was killed —
+// not only while the group's leader lives (task 63: a background `( … ) &` that outlives the leader stays restricted).
+// The answer is bound to the connection as peer.plugin = {id, trusted, tier, source}.
 // A process of an untrusted plugin (community, local) gets only the routes marked `untrustedPlugin: true`
 // (GET /health, GET /peer): everything else is 403 peer:untrusted-plugin, journaled (once a minute per plugin and route).
 // Such a plugin has no use for the hub API: it doesn't get AGENTHUB_HUB_SOCKET, and its own actions are pressed by a
@@ -49,7 +51,8 @@ export function pluginOfPid(core, pid, { depth = PLUGIN_ANCESTOR_DEPTH } = {}) {
   const byPid = core.facts?.pluginByPid;
   if (typeof byPid !== "function") return null;
   const found = (pl, at) => ({ id: pl.id, trusted: pl.trusted === true, tier: pl.tier ?? null, source: pl.source ?? null, pid: at });
-  const groupOf = (pgid) => (Number.isInteger(pgid) && pgid > 1 && pgid !== process.pid ? byPid(pgid, { actions: true }) : null);
+  // a group counts until its run ends and the group is killed, not only while its leader lives (task 63)
+  const groupOf = (pgid) => (Number.isInteger(pgid) && pgid > 1 && pgid !== process.pid ? byPid(pgid, { actions: true, group: true }) : null);
   let cur = pid;
   const seen = new Set();
   for (let i = 0; i <= depth; i++) {

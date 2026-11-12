@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { join } from "node:path";
-import { parseFileName, parseInterval, parseMetaText, readPluginMeta, splitWhy, XATTR_NAME } from "../lib/meta.mjs";
+import { parseConnection, parseFileName, parseInterval, parseMetaText, readPluginMeta, splitWhy, XATTR_NAME } from "../lib/meta.mjs";
 import { cleanup, tempHome, writePlugin } from "./helpers.mjs";
 
 test("intervals ms|s|m|h|d", () => {
@@ -150,4 +150,26 @@ test("core: argument value — by the pattern in ^(?:…)$, without control char
     assert.equal(checkActionArg(wide, v).error, "control", JSON.stringify(v));
   }
   assert.deepEqual(checkActionArg(wide, "задача-1"), { value: "задача-1" }, "ordinary non-ASCII text passes");
+});
+
+// Re-review 76: writes= names the tools that write; only tools of the allowlist.
+test("connection writes=: a subset of tools; anything else rejects the declaration", () => {
+  const ok = parseConnection({ id: "tix", url: "https://mcp.example.com/mcp", tools: "get_task,create_task", writes: "create_task, create_task" }, null);
+  assert.deepEqual(ok.writes, ["create_task"]);
+  assert.equal(parseConnection({ id: "tix", url: "https://mcp.example.com/mcp", tools: "get_task" }, null).writes, undefined);
+  const bad = parseConnection({ id: "tix", url: "https://mcp.example.com/mcp", tools: "get_task", writes: "delete_all" }, null);
+  assert.equal(typeof bad, "string");
+  assert.match(bad, /writes/);
+});
+
+// Re-review 72: a ">" inside a quoted attribute value does not end the tag.
+test(`metadata tag: ">" inside a quoted attribute value is part of the value`, () => {
+  const { meta, warnings } = parseMetaText(
+    `// <agenthub.action id="reply" level="confirm" title="Reply" input="Text" arg="text:^[^<>]{1,500}$">x.mjs --action reply</agenthub.action>\n` +
+      `// <agenthub.action id="cmp" level="immediate" title='a > b' arg='n:^[0-9>]{1,3}$'>x.mjs --action cmp</agenthub.action>\n` +
+      `// <agenthub.title>T</agenthub.title>\n`,
+  );
+  assert.deepEqual(warnings, []);
+  assert.deepEqual(meta.actions.map((a) => [a.id, a.arg?.pattern, a.title]), [["reply", "^[^<>]{1,500}$", "Reply"], ["cmp", "^[0-9>]{1,3}$", "a > b"]]);
+  assert.equal(meta.title, "T");
 });

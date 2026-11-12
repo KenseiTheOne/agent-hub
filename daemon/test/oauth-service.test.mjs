@@ -1178,3 +1178,84 @@ console.log(\`http=\${r.status} ok=\${r.body?.ok} fresh=\${r.body?.fresh} | stat
     cleanup(plugins);
   }
 });
+
+// Re-review 66: an action that promised net="none" does not reach the network through the hub's own connection proxy either.
+// Re-review 76: a call from an action process (a human pressed a button) and a declared write tool (writes=) are never
+// served from the interval cache.
+test(`net="none" action → 403 net:none on /connections/:id/mcp; action calls and writes= tools skip the cache`, async () => {
+  const f = await fakeMcp();
+  const plugins = tempHome("ah-oplug-");
+  writePlugin(
+    plugins,
+    "tix.1h.mjs",
+    `#!/usr/bin/env node
+// <agenthub.net>mcp.example.com — tickets through the hub</agenthub.net>
+// <agenthub.connection id="tix" type="mcp" url="https://mcp.example.com/mcp" scope="read" title="Tix" tools="get_user,filter_tasks,get_task" writes="get_task" interval="15m" budget="100">tickets</agenthub.connection>
+// <agenthub.action id="quiet" level="immediate" net="none" title="Quiet">tix.1h.mjs --action quiet</agenthub.action>
+// <agenthub.action id="read" level="confirm" title="Read">tix.1h.mjs --action read</agenthub.action>
+import { request } from "node:http";
+import { writeFileSync } from "node:fs";
+const call = (body) => new Promise((res) => {
+  const data = JSON.stringify(body);
+  const r = request({ socketPath: process.env.AGENTHUB_HUB_SOCKET, path: "/connections/tix/mcp", method: "POST", headers: { Host: "hub", "content-type": "application/json", "content-length": Buffer.byteLength(data) } }, (resp) => {
+    let s = ""; resp.on("data", (c) => (s += c)); resp.on("end", () => res({ status: resp.statusCode, body: JSON.parse(s || "null") }));
+  });
+  r.on("error", (e) => res({ status: 0, error: e.code }));
+  r.end(data);
+});
+const ai = process.argv.indexOf("--action");
+if (ai > 0) {
+  const r = await call({ tool: "filter_tasks", args: { assignees: ["me"] } });
+  writeFileSync(process.env.AGENTHUB_PLUGIN_DATA_PATH + "/" + process.argv[ai + 1] + ".json", JSON.stringify(r));
+  process.exit(0);
+}
+const r = await call({ tool: process.env.AGENTHUB_REFRESH_REASON === "Write" ? "get_task" : "filter_tasks", args: { assignees: ["me"] } });
+console.log(\`http=\${r.status} ok=\${r.body?.ok} fresh=\${r.body?.fresh} | status=ok\`);
+`,
+  );
+  const { h, sec, bin } = await hubWith({ f, plugins, extraOauth: { intervalMs: 600_000 } });
+  try {
+    await waitFor(async () => (await req(h.sock, "GET", "/connections")).body?.connections?.[0]?.state === "disconnected");
+    assert.deepEqual((await req(h.sock, "GET", "/connections")).body.connections[0].writes, ["get_task"]);
+    const c = await req(h.sock, "POST", "/connections/tix/connect");
+    const a = f.s.approve(c.body.authorizeUrl);
+    await get(`${a.redirect}?code=${a.code}&state=${a.state}&iss=${encodeURIComponent(a.iss)}`);
+    await waitFor(() => /http=200 ok=true fresh=true/.test(header(h, "tix")), { timeoutMs: 8000 });
+    assert.equal(f.s.toolCalls, 1);
+
+    const inst = h.core.host.get("tix");
+    const run = async (id) => {
+      const ar = await inst.runAction(inst.plugin.meta.actions.find((x) => x.id === id));
+      assert.equal(ar.ok, true, JSON.stringify(ar));
+      return JSON.parse(readFileSync(join(h.config.paths.pluginData, "tix", `${id}.json`), "utf8"));
+    };
+    // 66: the net="none" action is refused before the service is asked; journaled
+    const q = await run("quiet");
+    assert.deepEqual([q.status, q.body.error], [403, "net:none"]);
+    assert.equal(f.s.toolCalls, 1);
+    assert.ok(h.core.journal.tail(200).some((e) => e.type === "mcp-denied" && e.error === "net:none" && e.action === "quiet"));
+
+    // 76: the same read from an action process (no fresh flag) goes to the service, not to the cached run result
+    const rd = await run("read");
+    assert.deepEqual([rd.status, rd.body.ok, rd.body.fresh], [200, true, true], JSON.stringify(rd));
+    assert.equal(f.s.toolCalls, 2);
+
+    // 76: a declared write tool from a run, without fresh — to the service every time
+    h.core.host.refresh("tix", "Write");
+    await waitFor(() => f.s.toolCalls === 3, { timeoutMs: 8000 });
+    h.core.host.refresh("tix", "Write");
+    await waitFor(() => f.s.toolCalls === 4, { timeoutMs: 8000 });
+    // read after write goes to the service once; then an ordinary read within the interval comes from memory again
+    h.core.host.refresh("tix", "Manual");
+    await waitFor(() => f.s.toolCalls === 5, { timeoutMs: 8000 });
+    h.core.host.refresh("tix", "Manual");
+    await waitFor(() => /http=200 ok=true fresh=false/.test(header(h, "tix")), { timeoutMs: 8000 });
+    assert.equal(f.s.toolCalls, 5);
+    noSecrets(h, sec);
+  } finally {
+    await h.stop();
+    await f.close();
+    cleanup(bin);
+    cleanup(plugins);
+  }
+});

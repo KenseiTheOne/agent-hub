@@ -180,6 +180,12 @@ Rules the core enforces **regardless of the module**:
 - A primitive module may export `aliasOf: "<name>"` — a deprecated alias of another primitive (`cmux.focus` →
   `terminal.focus`); the core accepts both names as one in `<agenthub.effects>` (`PRIMITIVE_ALIASES` in `core.mjs`).
 - `verifyFacts` is called before every run — both for plugin offers and for direct calls from the app.
+- Optional `checkOffer(args) → {ok, reason?}` — the part of `verifyFacts` that needs no facts (synchronous): the core calls
+  it when a plugin's frame offers the primitive (`effect=`, `href=`), and a refusal drops the button with a journal
+  warning instead of rendering a button every press of which fails (`open.url`: a scheme other than http/https, re-review 71).
+- Optional `pluginOf(rawArgs, facts) → plugin id | null` — the plugin the call acts on (`job.cancel` → the job's plugin):
+  on a test hub (`AGENTHUB_TEST_TIER=own`) cli may call an app-only primitive whose `pluginOf` names a test-tier plugin
+  (re-review 75). The arguments are not validated yet when it is called.
 
 ## Route (`daemon/lib/routes/<name>.mjs`)
 
@@ -340,7 +346,7 @@ export async function sendText(target, text, facts) {}              // send-text
 export async function sendKey(target, "escape", facts) {}           // send-esc
 export async function launch({ cwd, name, sessionId, promptFile }, facts) {} // launch: runs bridge/launch.sh in a new tab
 export function registered(sessionId, facts, { workspaceId }) {}   // optional: the launched session appeared (default: the registry)
-export const order = 20;                     // optional: the place in the list (lower first, default 100; built-in: cmux 10, tmux 20, iterm2 30, terminal-app 40)
+export const order = 20;                     // optional, built-in adapters only: the place in the list (lower first, default 100; cmux 10, tmux 20, iterm2 30, terminal-app 40)
 export const autoLaunch = false;             // optional: "auto" never picks it for session.launch by "installed" (tmux)
 export const messages = {                    // optional: human texts for the adapter's own error codes, ru and en
   ru: { "no-remote": "Включите удалённое управление в настройках терминала" },
@@ -348,6 +354,11 @@ export const messages = {                    // optional: human texts for the ad
 };
 // available(facts) may answer { error: "no-remote", setup: true }: "needs setup" — the shell shows messages[error] as a hint
 ```
+
+`order` sorts only the built-in adapters. An approved extension adapter (`<home>/Extensions/terminals/`, below) always
+comes after all of them, extension adapters among themselves by file name; its `order` is accepted and ignored. Order
+matters only for a session two adapters could claim, so an extension adapter cannot take a session a built-in one
+knows.
 
 `messages` — codes `[a-z0-9][a-z0-9-]{0,47}`, one line ≤ 200 characters each, at most 40; the hub language first, the other
 as a fallback. The shell shows them for `available()` reasons and for refusals of the adapter's operations (`409 facts:<code>`,
@@ -394,8 +405,12 @@ The module contracts are exactly those of the built-in modules, `ctx` included. 
   restarts, not counted as waiting) and stops loading at the next start.
 - **What runs is what was hashed**: the daemon reads the file once, checks its sha256 and imports those bytes (a `data:`
   URL). So an extension is **one self-contained file**: `import` of `node:*` built-ins works, relative imports don't
-  (`import-failed`); hub helpers come through `ctx` (`ctx.t`, `ctx.exec`, `ctx.facts`, …). Importing hub files by an
-  absolute `file:` URL works but is not a contract — they change between versions.
+  (`import-failed`); hub helpers come through `ctx` (`ctx.t`, `ctx.exec`, `ctx.facts`, …) for services, routes and
+  primitives. **A terminal adapter has no `ctx`**: its functions get only `facts` (the process facts `processInfo`,
+  `processPath`, `processArgv`, `processTty`, the `terminalExec` runner, the session registry). The helpers the built-in
+  adapters share — `daemon/lib/terminals/_exec.mjs` (`LAUNCH_SH`, `shQuote`), `_proc.mjs` (`hostOf`, `ttyOf`),
+  `_screen.mjs` (`analyzeScreen`, `typeLine`) — are not part of it: copy what you need into your file. Importing hub
+  files by an absolute `file:` URL works but is not a contract — they change between versions.
 - **The file must be yours**: owned by your user, not writable by group or others (`unsafe-file`), ≤ 1 MB, a name
   `[A-Za-z0-9][A-Za-z0-9._-]{0,63}.mjs`; `_*.mjs` and `.*` are skipped like in the source tree.
 - **Built-ins win**: a service name, primitive name, route method and path (`:params` compared by position) or terminal id a
@@ -821,7 +836,8 @@ out the core kills the whole group, so children left behind die with it (a long 
 of the streamable process (language, pause, `ctx.restartPlugin`) kills its group too — background jobs are separate
 groups and survive it.
 
-**watch:** a path or a mask in the last segment (`~/.claude/sessions/*.json`); 300 ms debounce. If the path does not
+**watch:** a path or a mask in the last segment (`~/.claude/sessions/*.json`); 300 ms debounce with a 2 s maximum wait
+(`WATCH_MAX_WAIT_MS` in `runner.mjs`): writes that never pause still give a run at least every 2 s (re-review 68). If the path does not
 exist but its parent directory does — the directory is watched by name (a file appearing triggers a run right away); if
 the directory does not exist either — a retry every 30 s. An entry may start with a core service variable:
 `<agenthub.watch>$AGENTHUB_USAGE_FILE — why</agenthub.watch>`,
@@ -890,7 +906,9 @@ action attributes `input=`, `net="none"`, `background="true"`; community actions
 `<agenthub.subscribe>`; `<agenthub.connection type="http">`; `<agenthub.watch recursive="true">`; `agentSession=` lines;
 `until=`, `font=mono`, `max=`, `sparkMax=`; `lang` in any BCP-47 tag and `AGENTHUB_LOCALE`; `actionResult.arg`,
 `{"type":"jobExit"}`, `{"type":"stopping"}`; `event.raised.title`; banner buttons and click target (`push.notify`
-`actions`, `href`). A plugin that relies on one of them keeps `<agenthub.contract>3</agenthub.contract>` and should read
+`actions`, `href`); `writes=` on `<agenthub.connection>` (write tools never served from the cache); `macOnly="true"` on
+`<agenthub.push>` now keeps the event off the extra channels (older hubs ignore it); a `>` inside a quoted attribute
+value. A plugin that relies on one of them keeps `<agenthub.contract>3</agenthub.contract>` and should read
 on an older hub as the fallback each item describes.
 
 **Contract 3 and version 2 hubs.** A version 2 hub sees `<agenthub.contract>3` and refuses with "requires a newer hub" —

@@ -33,7 +33,7 @@ let stateJSON = #"""
 }
 """#
 
-@Test func decodesState() throws {
+@Test(.hubLang(.ru)) func decodesState() throws {
     let s = try JSONDecoder().decode(HubState.self, from: Data(stateJSON.utf8))
     #expect(s.seq == 57)
     #expect(s.status == .wait)
@@ -48,19 +48,19 @@ let stateJSON = #"""
     #expect(s.pluginsByAttention.map(\.id) == ["sessions", "quota"])
 }
 
-@Test func unknownStatusIsUnknown() throws {
+@Test(.hubLang(.ru)) func unknownStatusIsUnknown() throws {
     let s = try JSONDecoder().decode(PluginState.self, from: Data(#"{"id":"x","status":"weird"}"#.utf8))
     #expect(s.status == .unknown)
     #expect(s.title == "x")
 }
 
-@Test func worstStatusOrder() {
+@Test(.hubLang(.ru)) func worstStatusOrder() {
     #expect(HubStatus.worst([.ok, .unknown, .wait]) == .wait)
     #expect(HubStatus.worst([.block, .error, .ok]) == .error)
     #expect(HubStatus.worst([]) == .ok)
 }
 
-@Test func sseParserSplitsChunksAndUTF8() {
+@Test(.hubLang(.ru)) func sseParserSplitsChunksAndUTF8() {
     var p = SSEParser()
     let text = "id: 5\nevent: estop\ndata: {\"on\":true,\"t\":\"ё\"}\n\n: ping\n\nid: 6\r\nevent: plugin.removed\r\ndata: {\"plugin\":\"a\"}\r\n\r\n"
     let bytes = Array(text.utf8)
@@ -76,13 +76,13 @@ let stateJSON = #"""
     #expect(p.comments == 1)
 }
 
-@Test func sseMultilineData() {
+@Test(.hubLang(.ru)) func sseMultilineData() {
     var p = SSEParser()
     let ev = p.push(Array("data: a\ndata: b\n\n".utf8))
     #expect(ev == [SSEEvent(id: nil, event: "message", data: "a\nb")])
 }
 
-@Test func applyEvents() throws {
+@Test(.hubLang(.ru)) func applyEvents() throws {
     var s = try JSONDecoder().decode(HubState.self, from: Data(stateJSON.utf8))
     let pluginEv = SSEEvent(id: "58", event: "plugin",
                             data: #"{"id":58,"type":"plugin","plugin":{"id":"quota","status":"error","title":"Quota"},"status":"error"}"#)
@@ -108,7 +108,7 @@ let stateJSON = #"""
     }
 }
 
-@Test func itemTreeNestsAndSplitsBlocks() throws {
+@Test(.hubLang(.ru)) func itemTreeNestsAndSplitsBlocks() throws {
     let items = [
         Item(title: "A"), Item(title: "a1", level: 1), Item(title: "a11", level: 2), Item(title: "a2", level: 1),
         Item(title: "", separator: true),
@@ -124,21 +124,21 @@ let stateJSON = #"""
     #expect(blocks[1].map(\.item.title) == ["B", "C"])
 }
 
-@Test func socketPathResolution() {
+@Test(.hubLang(.ru)) func socketPathResolution() {
     #expect(HubPaths.socketPath(arguments: ["x", "--home", "/tmp/h"], environment: ["AGENTHUB_HOME": "/tmp/e"]) == "/tmp/h/hub.sock")
     #expect(HubPaths.socketPath(arguments: ["x"], environment: ["AGENTHUB_HOME": "/tmp/e"]) == "/tmp/e/hub.sock")
     #expect(HubPaths.socketPath(arguments: ["x"], environment: [:]).hasSuffix("/Library/Application Support/AgentHub/hub.sock"))
     #expect(HubPaths.checkSocket("/nonexistent/hub.sock") != nil)
 }
 
-@Test func journalEntrySummary() throws {
+@Test(.hubLang(.ru)) func journalEntrySummary() throws {
     let r = try JSONDecoder().decode(JournalResponse.self, from: Data(#"{"entries":[{"ts":"t","type":"action-denied","peer":"cli","error":"peer:cli","pid":7}]}"#.utf8))
     #expect(r.entries.first?.type == "action-denied")
     #expect(r.entries.first?.summary == "error=peer:cli peer=cli pid=7")
 }
 
 @MainActor
-@Test func storeHandlesSnapshotThenEvents() throws {
+@Test(.hubLang(.ru)) func storeHandlesSnapshotThenEvents() throws {
     let store = HubStore(client: HubClient(socketPath: "/nonexistent/hub.sock"))
     #expect(store.worstStatus == .unknown)
     let snap = "{\"id\":57,\"type\":\"snapshot\",\"state\":\(stateJSON)}"
@@ -168,7 +168,7 @@ let cardsJSON = #"""
  ],"paused":false,"estop":false}
 """#
 
-@Test func decodesHookCards() throws {
+@Test(.hubLang(.ru)) func decodesHookCards() throws {
     let r = try JSONDecoder().decode(HookCardsResponse.self, from: Data(cardsJSON.utf8))
     #expect(r.cards.count == 2)
     #expect(r.cards[0].kind == .permission)
@@ -179,7 +179,7 @@ let cardsJSON = #"""
     #expect(r.cards[1].questions[0].options[1].description == nil)
 }
 
-@Test func respondArgsAreNarrow() throws {
+@Test(.hubLang(.ru)) func respondArgsAreNarrow() throws {
     let r = try JSONDecoder().decode(HookCardsResponse.self, from: Data(cardsJSON.utf8))
     let q = r.cards[1]
     #expect(RespondChoice.allowOnce.args(requestId: "r") == ["requestId": .string("r"), "decision": .string("once")])
@@ -201,7 +201,7 @@ let cardsJSON = #"""
     #expect(Set(a.keys) == ["requestId", "decision", "answers"])
 }
 
-@Test func launchDraftValidation() {
+@Test(.hubLang(.ru)) func launchDraftValidation() {
     var d = LaunchDraft()
     #expect(!d.isValid)
     d.folder = "~/Projects"
@@ -216,7 +216,7 @@ let cardsJSON = #"""
     #expect(!d.isValid)
 }
 
-@Test func decodesRegistry() throws {
+@Test(.hubLang(.ru)) func decodesRegistry() throws {
     let cat = try JSONDecoder().decode(RegistryCatalog.self, from: Data(#"""
     {"configured":true,"generatedAt":"2026-11-04T00:00:00Z","fetchedAt":null,"error":null,"plugins":[
       {"id":"demo","version":"1.2.0","title":"Demo","desc":"d","author":{"github":"someone"},"official":false,"label":null,
@@ -242,7 +242,7 @@ let cardsJSON = #"""
     #expect(inst.local[0].label == "непроверенный")
 }
 
-@Test func tierFromDaemonNotFromMetadata() throws {
+@Test(.hubLang(.ru)) func tierFromDaemonNotFromMetadata() throws {
     // tier present — taken as is; absent (old daemon) — derived from source and official
     let inst = try JSONDecoder().decode(RegistryInstalled.self, from: Data(#"""
     {"installed":[{"id":"my-runner","version":"0.2.0","tier":"official","official":true,"removable":true,"permissions":[]},
@@ -261,7 +261,7 @@ let cardsJSON = #"""
 }
 
 @MainActor
-@Test func storeRoutesNotifyAndCardEvents() throws {
+@Test(.hubLang(.ru)) func storeRoutesNotifyAndCardEvents() throws {
     let store = HubStore(client: HubClient(socketPath: "/nonexistent/hub.sock"))
     let snap = "{\"id\":57,\"type\":\"snapshot\",\"state\":\(stateJSON)}"
     store.handle(SSEEvent(id: "57", event: "snapshot", data: snap))
@@ -279,7 +279,7 @@ let cardsJSON = #"""
     #expect(store.visibleCards.count == 1)
 }
 
-@Test func hookPausedEventDecodes() throws {
+@Test(.hubLang(.ru)) func hookPausedEventDecodes() throws {
     let ev = SSEEvent(id: "70", event: "hook.paused", data: #"{"until":"2026-11-04T12:00:00.000Z","limit":10}"#)
     if case .hookPaused(let until)? = HubEvent.decode(ev) {
         #expect(until == "2026-11-04T12:00:00.000Z")
@@ -290,7 +290,7 @@ let cardsJSON = #"""
 
 // MARK: - pinning the build (appPin, app-pin.changed event)
 
-@Test func appPinDecodesAndApplies() throws {
+@Test(.hubLang(.ru)) func appPinDecodesAndApplies() throws {
     let json = #"{"seq":1,"estop":false,"status":"ok","plugins":[],"sessions":[],"appPin":{"kind":"cdhash","fingerprint":"cdhash:1347dd31e6cd68e8bc2f1d14281796fcecc09afd","changedAt":"2026-11-05T10:00:00.000Z","by":"agenthub pin-app","under":"terminal","source":"check","generation":2}}"#
     var st = try JSONDecoder().decode(HubState.self, from: Data(json.utf8))
     let pin = try #require(st.appPin)
@@ -319,7 +319,7 @@ let cardsJSON = #"""
 
 // MARK: - language and texts (UI pass 2026-11-05). Serialized: the language is a process-wide setting.
 
-@Suite(.serialized) struct TextTests {
+@Suite(.serialized, .hubLang(.ru)) struct TextTests {
     @Test func explainCodes() {
         L10n.shared.lang = .ru
         #expect(HubStore.explain(code: "peer:app-signature", status: 403, label: "X").contains("не закреплена"))
@@ -401,7 +401,7 @@ let cardsJSON = #"""
     }
 }
 
-@Test func splitHeadlineKeepsQuotedColons() {
+@Test(.hubLang(.ru)) func splitHeadlineKeepsQuotedColons() {
     #expect(PluginState.splitHeadline("Прогоны не запустятся: Unity открыт")! == ("Прогоны не запустятся", "Unity открыт"))
     #expect(PluginState.splitHeadline("Задача «demo: утренний итог» упала") == nil)
     #expect(PluginState.splitHeadline("Прогон «a: b» упал: код 1")! == ("Прогон «a: b» упал", "код 1"))
@@ -409,7 +409,7 @@ let cardsJSON = #"""
     #expect(PluginState.splitHeadline("12:30 старт") == nil)
 }
 
-@Test func blockSegmentsGroupStatsGaugesStrips() {
+@Test(.hubLang(.ru)) func blockSegmentsGroupStatsGaugesStrips() {
     let items = [
         Item(title: "04:30", params: ["stat": "Следующий запуск"]), Item(title: "3", params: ["stat": "План"]),
         Item(title: "5-часовое окно", params: ["gauge": "31"]), Item(title: "спокойно", level: 1),
@@ -426,7 +426,7 @@ let cardsJSON = #"""
     #expect(Item(title: "x", params: ["details": "true"]).isDetails)
 }
 
-@Test func consentOrderPutsWeightiestAndNewFirst() {
+@Test(.hubLang(.ru)) func consentOrderPutsWeightiestAndNewFirst() {
     let list = [
         PluginPermission(kind: "fsRead", what: "a"), PluginPermission(kind: "fsRead", what: "b"),
         PluginPermission(kind: "exec", what: "c"), PluginPermission(kind: "actions", what: "stop"),
@@ -446,14 +446,14 @@ let cardsJSON = #"""
     #expect(five == "5 своих кнопок" || five == "5 own buttons")
 }
 
-@Test func registryConnectCommandUsesFullCliPathAndHome() throws {
+@Test(.hubLang(.ru)) func registryConnectCommandUsesFullCliPathAndHome() throws {
     let custom = try JSONDecoder().decode(RegistryCatalog.self, from: Data(#"{"configured":false,"missing":["index-url","public-key"],"plugins":[],"connect":{"cli":"/Users/u/My Projects/agent-hub/daemon/bin/agenthub","home":"/tmp/ahr","defaultHome":false}}"#.utf8))
     #expect(custom.connectCommand(url: "U", key: "K") == "AGENTHUB_HOME=/tmp/ahr '/Users/u/My Projects/agent-hub/daemon/bin/agenthub' install --registry-url U --registry-pubkey K --apply --no-launchd")
     let std = try JSONDecoder().decode(RegistryCatalog.self, from: Data(#"{"configured":false,"plugins":[],"connect":{"cli":"/x/bin/agenthub","home":"/h","defaultHome":true}}"#.utf8))
     #expect(std.connectCommand(url: "U", key: "K").hasPrefix("/x/bin/agenthub install"))
 }
 
-@Test func menuBarLookByState() {
+@Test(.hubLang(.ru)) func menuBarLookByState() {
     #expect(MenuBarLook.make(status: .ok, waiting: 0, live: true, estop: false) == .calm)
     #expect(MenuBarLook.make(status: .ok, waiting: 0, live: true, estop: false).isTemplate)
     #expect(MenuBarLook.make(status: .ok, waiting: 3, live: true, estop: false) == .waiting(3))
@@ -478,7 +478,7 @@ let cardsJSON = #"""
     #expect(MenuBarLook.offline.count == nil && MenuBarLook.offline.emblem == nil && MenuBarLook.offline.glyphAlpha < 1)
 }
 
-@Test func menuBarTextAndTooltip() {
+@Test(.hubLang(.ru)) func menuBarTextAndTooltip() {
     // the language is shared (L10n.shared), and TextTests switch it in parallel — check both variants
     let test = MenuBarLook.calm.labelText(test: true)
     #expect(test == "ТЕСТ" || test == "TEST")
@@ -496,7 +496,7 @@ let cardsJSON = #"""
     #expect(withTest.hasSuffix("\nТЕСТ · /tmp/ahl"))
 }
 
-@Test func testMarkForCustomHome() {
+@Test(.hubLang(.ru)) func testMarkForCustomHome() {
     let def = "/Users/u/Library/Application Support/AgentHub"
     #expect(TestMark.label(home: def, defaultHome: def, daemonTestMode: false) == nil)
     #expect(TestMark.label(home: def + "/", defaultHome: def, daemonTestMode: nil) == nil)
@@ -510,7 +510,7 @@ let cardsJSON = #"""
     #expect(st?.hub == HubInfo(home: "/tmp/ahl", testMode: true, builtinDir: "/tmp/ahl/Builtin", builtin: "copy"))
 }
 
-@Test func pluginAuthorNameFirstAndProfileLink() throws {
+@Test(.hubLang(.ru)) func pluginAuthorNameFirstAndProfileLink() throws {
     let a = try JSONDecoder().decode(PluginAuthor.self, from: Data(#"{"name":"Kensei","github":"KenseiTheOne"}"#.utf8))
     #expect(a.display == "Kensei · @KenseiTheOne")
     #expect(a.profileURL?.absoluteString == "https://github.com/KenseiTheOne")
@@ -525,7 +525,7 @@ let cardsJSON = #"""
     #expect(none.author == nil)
 }
 
-@Test func catalogUpdateVersionOnlyWhenNewer() {
+@Test(.hubLang(.ru)) func catalogUpdateVersionOnlyWhenNewer() {
     #expect(PluginVersion.compare("1.10.0", "1.9.3") == .orderedDescending)
     #expect(PluginVersion.compare("1.2", "1.2.0") == .orderedSame)
     #expect(PluginVersion.compare("0.3.0", "1.0.0") == .orderedAscending)
@@ -554,7 +554,7 @@ let cardsJSON = #"""
 }
 
 // Session effort (last turn) and cmux bridge state (2026-11-05, notes after a live build).
-@Test func sessionEffortDecodesOnlyKnownLevels() throws {
+@Test(.hubLang(.ru)) func sessionEffortDecodesOnlyKnownLevels() throws {
     let list = try JSONDecoder().decode([SessionInfo].self, from: Data(#"[{"sessionId":"a","effort":"xhigh","ultracode":true},{"sessionId":"b","effort":"ultra"},{"sessionId":"c"}]"#.utf8))
     #expect(list[0].effortLabel == "xhigh")
     #expect(list[0].ultracode == true)
@@ -562,7 +562,7 @@ let cardsJSON = #"""
     #expect(list[2].effort == nil && list[2].ultracode == nil)
 }
 
-@Test func bridgeLaunchCommandAddsHomeOnlyForCustomHub() throws {
+@Test(.hubLang(.ru)) func bridgeLaunchCommandAddsHomeOnlyForCustomHub() throws {
     let s = try JSONDecoder().decode(HubState.self, from: Data(#"{"bridge":{"online":false,"command":"/Users/u/My Projects/agent-hub/bridge/agenthub-bridge","home":"/tmp/ahk","defaultHome":false}}"#.utf8))
     #expect(s.bridge?.online == false)
     #expect(s.bridge?.launchCommand == "AGENTHUB_HOME=/tmp/ahk '/Users/u/My Projects/agent-hub/bridge/agenthub-bridge'")
@@ -573,7 +573,7 @@ let cardsJSON = #"""
 }
 
 @MainActor
-@Test func bridgeEventsToggleFocusAvailability() throws {
+@Test(.hubLang(.ru)) func bridgeEventsToggleFocusAvailability() throws {
     // a daemon before the terminal layer: a cmux tab, through the bridge
     let state = try JSONDecoder().decode(HubState.self, from: Data(#"{"primitives":[{"name":"cmux.focus","level":"immediate"}],"bridge":{"online":false,"command":"/x/agenthub-bridge","home":"/h","defaultHome":true},"sessions":[{"sessionId":"a","status":"idle","surfaceId":"S1","workspaceId":"W1"}]}"#.utf8))
     let store = HubStore(client: HubClient(socketPath: "/tmp/none.sock"), preview: state)
@@ -591,7 +591,7 @@ let cardsJSON = #"""
 
 // MARK: - plugin updates (daemon background check)
 
-@Suite struct PluginUpdatesTests {
+@Suite(.hubLang(.ru)) struct PluginUpdatesTests {
     static let snapshot = #"""
     {"seq":3,"plugins":[],"pluginUpdates":{"enabled":true,"setting":true,"config":true,"configured":true,
      "checkedAt":"2026-11-05T10:00:00.000Z","nextCheckAt":null,"error":null,

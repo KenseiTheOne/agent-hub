@@ -386,3 +386,15 @@ test("B11: index entries using attributes newer than hub 0.1.2 carry an object c
   // hub 0.1.2 accepts only an integer contract: anything else is "contractUnknown" → "Needs a newer hub" (registry:hub-too-old)
   assert.ok(!Number.isInteger(indexContract(bg, { official: true })));
 });
+
+// Re-review 65 (registry side): an action with inputPattern= gates its index entry on hubs that know the feature.
+test("contract feature input-pattern: an action with inputPattern= adds it next to input; known to this hub", () => {
+  const head = "# <agenthub.title>T</agenthub.title>\n# <agenthub.contract>3</agenthub.contract>\n";
+  const both = parseMetaText(head + '# <agenthub.action id="reply" level="confirm" input="Reply" inputPattern="^[^<>]{1,500}$" arg="row:^[a-z0-9]{1,16}$">t.sh --reply {row}</agenthub.action>\n').meta;
+  assert.ok(both.actions[0].input?.pattern, "the parser keeps the pattern");
+  assert.deepEqual(contractFeatures(both, { official: true }), ["input", "input-pattern"]);
+  assert.deepEqual(indexContract(both, { official: true }), { version: 3, features: ["input", "input-pattern"] });
+  const plain = parseMetaText(head + '# <agenthub.action id="reply" level="confirm" input="Reply" arg="text:^[^<>]{1,500}$">t.sh --reply</agenthub.action>\n').meta;
+  assert.deepEqual(contractFeatures(plain, { official: true }), ["input"]);
+  assert.ok(CONTRACT_FEATURES.includes("input-pattern"));
+});

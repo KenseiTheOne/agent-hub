@@ -44,7 +44,7 @@ final class KickstartedDaemon: @unchecked Sendable {
     }
 }
 
-@Suite(.serialized) struct LifecycleTests {
+@Suite(.serialized, .hubLang(.ru)) struct LifecycleTests {
     @MainActor @Test func quitSendsShutdownFromPinnedBuild() async throws {
         let d = try FakeDaemon()
         defer { d.shutdown() }
@@ -182,7 +182,7 @@ final class KickstartedDaemon: @unchecked Sendable {
 }
 
 // "Launch at login" (decision 2026-11-07): the setting for the daemon + app pair lives in the daemon.
-@Suite(.serialized) struct LaunchAtLoginTests {
+@Suite(.serialized, .hubLang(.ru)) struct LaunchAtLoginTests {
     @MainActor @Test func launchAtLoginWritesToDaemonAndFollowsEvents() async throws {
         let d = try FakeDaemon()
         defer { d.shutdown() }
@@ -268,7 +268,7 @@ final class KickstartedDaemon: @unchecked Sendable {
     }
 }
 
-@Test func lifecycleJournalLabels() {
+@Test(.hubLang(.ru)) func lifecycleJournalLabels() {
     func label(_ type: String, _ f: [String: JSONValue] = [:]) -> String {
         JournalEntry(index: 0, raw: f.merging(["type": .string(type)]) { a, _ in a }).typeLabel
     }
@@ -287,7 +287,7 @@ final class KickstartedDaemon: @unchecked Sendable {
     #expect(JournalEntry(index: 0, raw: ["type": .string("shutdown-requested")]).isAction)
 }
 
-@Test func daemonProbeSeesListeningSocket() throws {
+@Test(.hubLang(.ru)) func daemonProbeSeesListeningSocket() throws {
     #expect(!DaemonProbe.listening("/tmp/ahf-none-\(UUID().uuidString.prefix(6)).sock"), "no file — no daemon")
     let d = try FakeDaemon()
     #expect(DaemonProbe.listening(d.path), "the double is listening — daemon present, no kickstart needed")

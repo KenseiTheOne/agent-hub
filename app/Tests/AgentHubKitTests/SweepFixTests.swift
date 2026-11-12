@@ -5,7 +5,7 @@ import Testing
 // Tests for the findings of the 2026-11-07 pass (sweep-1): texts and counts in the shell. The language is a process-wide setting, so
 // the tests run serially with an explicit L10n.shared.lang at the start of each one.
 
-@Suite(.serialized) struct SweepFixTests {
+@Suite(.serialized, .hubLang(.ru)) struct SweepFixTests {
     // without a daemon connection — this hub's last effective language, not the macOS language
     @Test func languageRememberedPerHub() {
         let suite = "agenthub-test-\(UUID().uuidString)"

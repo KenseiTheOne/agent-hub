@@ -282,6 +282,11 @@ export class StreamProcess {
     const c = this.child;
     return c && c.exitCode === null && c.signalCode === null ? (c.pid ?? null) : null;
   }
+  // The process group id until 'close' (task 63): the group is killed on 'close', so until then a descendant left in it is
+  // still this process's, even after the leader itself exited.
+  get groupId() {
+    return this.child?.pid ?? null;
+  }
   // reason (G18) — why the hub stops the process: the plugin first gets {"type":"stopping","reason":…} on stdin (and EOF), then
   // after graceMs SIGTERM to the group (if it has not exited by itself), after another second SIGKILL. Reasons: restart (the
   // hub restarts it with a new environment: language, pause, secret — `cause` is the new AGENTHUB_REFRESH_REASON), updated (the
@@ -398,8 +403,12 @@ function globToRe(mask) {
   return new RegExp("^" + mask.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, "[^/]*").replace(/\?/g, "[^/]") + "$");
 }
 
+// Under writes that never pause for debounceMs (a dev server's log), a debounced event still fires at least this often (task 68):
+// the first change of a burst starts the clock, and the call comes no later than this much after it.
+export const WATCH_MAX_WAIT_MS = 2000;
+
 export class Watcher {
-  constructor(entries, onChange, { debounceMs = 300, retryMs = 30_000, home = homedir(), recursive = false } = {}) {
+  constructor(entries, onChange, { debounceMs = 300, maxWaitMs = WATCH_MAX_WAIT_MS, retryMs = 30_000, home = homedir(), recursive = false } = {}) {
     this.recursive = recursive;
     // an entry is a path string or { path, recursive } (<agenthub.watch recursive="true">: subdirectories too)
     this.targets = entries.map((e) => {
@@ -412,6 +421,8 @@ export class Watcher {
     });
     this.onChange = onChange;
     this.debounceMs = debounceMs;
+    this.maxWaitMs = Math.max(maxWaitMs, debounceMs);
+    this.burstAt = 0; // when the first change of the pending burst came (0 — nothing pending)
     this.retryMs = retryMs;
     this.watchers = [];
     this.timer = null;
@@ -504,13 +515,19 @@ export class Watcher {
     }, this.retryMs);
     this.retry.unref?.();
   }
+  // Debounce with a maximum wait (task 68): each change pushes the call back by debounceMs, but never past maxWaitMs after the
+  // first change of the burst — constant writes give a call every maxWaitMs, not none at all.
   kick() {
+    const now = Date.now();
+    if (!this.burstAt) this.burstAt = now;
     clearTimeout(this.timer);
+    const delay = Math.max(0, Math.min(this.debounceMs, this.burstAt + this.maxWaitMs - now));
     this.timer = setTimeout(() => {
       const paths = [...this.pending];
       this.pending.clear();
+      this.burstAt = 0;
       if (!this.closed) this.onChange(paths);
-    }, this.debounceMs);
+    }, delay);
     this.timer.unref?.();
   }
   close() {

@@ -141,7 +141,7 @@ final class RecordingPresenter: ConfirmPresenter {
 
 // MARK: - finding 5: after re-pinning, a snapshot rather than a replay; new class and cards
 
-@Suite(.serialized) struct ReconnectTests {
+@Suite(.serialized, .hubLang(.ru)) struct ReconnectTests {
     @MainActor @Test func peerChangeOnReconnectForcesSnapshot() async throws {
         let d = try FakeDaemon()
         defer { d.shutdown() }
@@ -254,7 +254,7 @@ final class RecordingPresenter: ConfirmPresenter {
 
 // MARK: - finding 33: when to recheck the pause
 
-@Test func pauseRecheckDelay() {
+@Test(.hubLang(.ru)) func pauseRecheckDelay() {
     let now = Date()
     #expect(HubStore.pauseRecheckDelay(until: nil, now: now) == 15)
     #expect(abs(HubStore.pauseRecheckDelay(until: now.addingTimeInterval(60), now: now) - 60.5) < 0.001)
@@ -264,7 +264,7 @@ final class RecordingPresenter: ConfirmPresenter {
 
 // MARK: - finding 32: semver with prereleases
 
-@Test func semverPrereleaseOrder() {
+@Test(.hubLang(.ru)) func semverPrereleaseOrder() {
     func lt(_ a: String, _ b: String) -> Bool { PluginVersion.compare(a, b) == .orderedAscending && PluginVersion.compare(b, a) == .orderedDescending }
     #expect(lt("1.3.0-beta.1", "1.3.0"))
     #expect(lt("1.2.0-rc.1", "1.2.0"))
@@ -287,7 +287,7 @@ final class RecordingPresenter: ConfirmPresenter {
 
 // MARK: - findings 6, 7, 39: notification "Open" and the sessions plugin page
 
-@Test func notifyTargetForHubAndSessions() {
+@Test(.hubLang(.ru)) func notifyTargetForHubAndSessions() {
     #expect(NotifyTarget.of(plugin: "@hub", key: "@hub:approvals-paused") == .sessions)
     #expect(NotifyTarget.of(plugin: "claude-sessions", key: "claude-sessions:waiting:abc") == .sessions)
     #expect(NotifyTarget.of(plugin: "claude-sessions", key: "claude-sessions:died:abc") == .sessions)
@@ -298,7 +298,7 @@ final class RecordingPresenter: ConfirmPresenter {
 // MARK: - findings 40, 41, 42: buttons the core is sure to reject
 
 // regression review: the claude-sessions page leads to "Sessions", so dead sessions and "no sessions visible" must be there
-@Test func sessionsPluginExtrasKeepDiedAndBroken() {
+@Test(.hubLang(.ru)) func sessionsPluginExtrasKeepDiedAndBroken() {
     // a frame like claude-sessions render(): a dead session, a live one (already in the registry), the source
     var p = PluginState(id: "claude-sessions", title: "Сессии", status: .wait, header: [Item(title: "1 сессия оборвалась", status: .wait)], body: [
         Item(title: "ES — оборвалась посреди работы (процесс пропал)", status: .wait, event: "died:abc", params: ["color": "red"]),
@@ -334,7 +334,7 @@ final class RecordingPresenter: ConfirmPresenter {
     #expect(SessionsPluginExtras(nil).isEmpty)
 }
 
-@Test func actionBlockMirrorsCore() throws {
+@Test(.hubLang(.ru)) func actionBlockMirrorsCore() throws {
     let prims = try JSONDecoder().decode([PrimitiveInfo].self, from: Data(#"""
     [{"name":"open.url","level":"immediate","appOnly":false},{"name":"open.file","level":"immediate","appOnly":false},
      {"name":"cmux.focus","level":"immediate","appOnly":false},{"name":"session.interrupt","level":"confirm","appOnly":true},
@@ -397,7 +397,7 @@ final class RecordingPresenter: ConfirmPresenter {
 
 // MARK: - finding 34: a journal entry id does not shift on reload
 
-@Test func journalIdsStableAcrossReload() throws {
+@Test(.hubLang(.ru)) func journalIdsStableAcrossReload() throws {
     func entries(_ json: String) throws -> [JournalEntry] { try JSONDecoder().decode(JournalResponse.self, from: Data(json.utf8)).entries }
     let a = #"{"ts":"2026-11-05T10:00:00.000Z","type":"action","action":"x","ok":true}"#
     let b = #"{"ts":"2026-11-05T10:00:01.000Z","type":"action-denied","action":"y","error":"estop"}"#

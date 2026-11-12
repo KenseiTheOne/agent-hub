@@ -301,7 +301,8 @@ export class PushEngine {
   ruleFor(bare, trusted, own = null, plugin = null) {
     if (!trusted) {
       const mine = own?.length ? matchRule(pluginRules(own.filter((r) => r?.kind === "plugin")), bare) : null;
-      if (mine && mine.name !== "default") return { name: mine.name, label: mine.label || null, cooldownMs: this.cfg.flapCooldownMs, community: true };
+      // macOnly only narrows delivery (Mac banner only), so a community plugin may ask for it too
+      if (mine && mine.name !== "default") return { name: mine.name, label: mine.label || null, cooldownMs: this.cfg.flapCooldownMs, community: true, ...(mine.macOnly === true ? { macOnly: true } : {}) };
       return { name: "untrusted", label: null, cooldownMs: this.cfg.flapCooldownMs };
     }
     const core = matchRule(DEFAULT_RULES, bare);
@@ -490,7 +491,7 @@ export class PushEngine {
       const kind = this.kindOf(rule, e);
       // security: a security exception or a bannerAlways event — in the morning it goes to extra channels only as its own
       // kind "security" message (security channels), never inside the plain digest (sendDigest)
-      this.digest.push({ key: e.key, subtitle: e.msg.subtitle, body: e.msg.body, at: t, kind, ...(kind === "security" || rule.bannerAlways === true ? { security: true } : {}) });
+      this.digest.push({ key: e.key, subtitle: e.msg.subtitle, body: e.msg.body, at: t, kind, ...(kind === "security" || rule.bannerAlways === true ? { security: true } : {}), ...(rule.macOnly === true ? { macOnly: true } : {}) });
       this.journal({ type: "push-deferred", key: e.key, rule: rule.name });
       return;
     }
@@ -517,7 +518,7 @@ export class PushEngine {
 
   sendMac(e, rule, t) {
     const kind = this.kindOf(rule, e);
-    const { done, channels } = this.mac.notify({ title: "Agent Hub", subtitle: e.msg.subtitle, body: e.msg.body, plugin: e.plugin, key: e.key, kind, bannerAlways: rule.bannerAlways === true, ...this.extrasOf(e, rule) });
+    const { done, channels } = this.mac.notify({ title: "Agent Hub", subtitle: e.msg.subtitle, body: e.msg.body, plugin: e.plugin, key: e.key, kind, bannerAlways: rule.bannerAlways === true, ...(rule.macOnly === true ? { macOnly: true } : {}), ...this.extrasOf(e, rule) });
     this.macPending.push(done);
     if (this.macPending.length > 100) this.macPending.splice(0, 50);
     e.sentMac = true;
@@ -566,10 +567,12 @@ export class PushEngine {
     const digestOf = (list, extra = {}) => ({ title: "Agent Hub", subtitle: tr(this.lang(), "push.digest.subtitle", { n: list.length }), body: clean(list.slice(0, this.cfg.digestMaxItems).map((it) => it.body).join("; "), 240), plugin: null, key: "push:digest", digest: true, kind: null, actions: [], href: null, ...extra });
     // The banner on the Mac lists everything. Extra channels (lib/push/channels.mjs, msg.extra) get the plain items as the
     // digest and the security ones (a security exception or bannerAlways event held overnight, older files: kind
-    // "security") as a separate kind "security" message — so only channels marked security: true ever see them.
-    const secure = items.filter((it) => it.security === true || this.digestKind(it) === "security");
-    const plain = items.filter((it) => !secure.includes(it));
-    const extra = secure.length ? [...(plain.length ? [digestOf(plain)] : []), digestOf(secure, { digest: false, kind: "security" })] : undefined;
+    // "security") as a separate kind "security" message — so only channels marked security: true ever see them. macOnly items
+    // (the rule's macOnly) are on the Mac banner only.
+    const shared = items.filter((it) => it.macOnly !== true);
+    const secure = shared.filter((it) => it.security === true || this.digestKind(it) === "security");
+    const plain = shared.filter((it) => !secure.includes(it));
+    const extra = secure.length || shared.length < items.length ? [...(plain.length ? [digestOf(plain)] : []), ...(secure.length ? [digestOf(secure, { digest: false, kind: "security" })] : [])] : undefined;
     const { done, channels } = this.mac.notify({ ...digestOf(items), ...(extra ? { extra } : {}) });
     this.macPending.push(done);
     for (const it of items) {

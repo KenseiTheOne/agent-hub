@@ -65,7 +65,7 @@ test("metadata: streamable, no effects, the set-alert and set-range actions and 
   assert.ok(pm.meta.fsRead.every((e) => / — \S/.test(e)), "every read has a why");
   assert.deepEqual(pm.warnings || [], []);
   const src = readFileSync(PLUGIN, "utf8");
-  assert.match(src, /<agenthub\.title lang="en">Spend<\/agenthub\.title>/);
+  assert.match(src, /<agenthub\.title lang="en">Claude Code Spend<\/agenthub\.title>/);
   assert.match(src, /<agenthub\.icon symbol="dollarsign\.circle"/);
 });
 

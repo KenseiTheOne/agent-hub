@@ -39,7 +39,8 @@ must contain metadata only**: a task name, a tab, a reason; no conversation text
 
 `hold="evening"`, `quiet="true"` (urgent: shown right away during quiet hours too, not held for the digest),
 `cooldown=<interval>`, `away=<interval>` (at the Mac — right away; away — the banner waits until the human is back or the
-event stays raised that long), `macOnly="true"` (accepted from older plugins and ignored: banners are the only channel),
+event stays raised that long), `macOnly="true"` (the Mac banner only, never the extra channels below — keep sensitive
+text such as a mail subject on this Mac; quiet hours and the digest work as usual; hub 0.1.3+, community plugins too),
 `kind=<kind>` (the switch in
 "Settings": a shared core kind `sessions`, `updates`, `problems`, `other`; `plugin` — **the plugin's own toggle** (a
 line with the plugin name in "Settings → Notifications"); `security` — a security exception, cannot be turned off; an
@@ -219,6 +220,10 @@ the engine tracks) and in the background to every extra channel that accepts it:
   overnight: the morning digest goes to extra channels without them, and they follow as a separate kind `security`
   message (subtitle "Overnight: N", key `push:digest`) for security channels only; the Mac banner lists everything. `events` narrows to kinds
   (`sessions`, `updates`, `problems`, `other`, `plugin`, `security`, `hub`, `digest`) or key prefixes `<plugin>:<key>*`.
+  A rule with `macOnly` (the plugin tag or `services.push.rules`) goes to `mac` only, security channels included; held
+  overnight, its item is in the Mac digest banner and left out of what extra channels get.
+- visible: `/state.notifications.channels` (and Settings → Notifications in the app) lists every channel — `id`, `type`,
+  `label`, `security`, `events`, never its URL.
 - payload: `{source: "agent-hub", title, subtitle, body, plugin, key, kind, digest, href, ts}` (no `actions`: offer ids are for
   the shell). Everything the engine decides — quiet hours, digest, switches, limits — applies before any channel.
 - failures: `push-channel-error {channel, key, code}`; `push-sent`/`push-digest` carry `also: [channel ids]`.
@@ -233,7 +238,7 @@ Details and examples — [`docs/extension-points.md`](../../../docs/extension-po
 `staleGraceMs` (600000), `digestMaxItems` (30), `maxPerPluginPerMin` (20), `maxPerUntrustedPerMin` (5),
 `maxEntriesPerPlugin` (500), `maxEntriesPerUntrusted` (100), `rules` — overrides/additions to the table:
 `{"my-key": {"label": "…", "hold": "evening"}}` (fields `label`, `hold`, `awayDelayMs`, `quietException`, `cooldownMs`,
-`aliases`). Plugin rules from `<agenthub.push>` go ahead of this table, but user overrides apply to them too:
+`macOnly`, `aliases`). Plugin rules from `<agenthub.push>` go ahead of this table, but user overrides apply to them too:
 `{"service-silent": {"awayDelayMs": 0}}` (by rule name) or `{"<plugin>:service-silent": {…}}` (for that plugin only) —
 the fields are layered over the plugin rule. `channels` — extra delivery channels (above). `enabled: false` — the service does not start. Any other key is ignored
 (journal `push-config-ignored {keys}` once at startup).

@@ -26,6 +26,12 @@ export function verifyFacts(args) {
   return { ok: true };
 }
 
+// The same check when a plugin's frame offers the link (href=, effect="open.url …", task 71): a link that can never open gets
+// no button — the core warns the author instead.
+export function checkOffer(args) {
+  return verifyFacts(args);
+}
+
 export function describe(args, facts, lang = "ru") {
   let host = "";
   try {

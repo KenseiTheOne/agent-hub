@@ -94,7 +94,8 @@ sets a preload (cmux does): it crashes child node processes.
 plugin in `$H/Plugins/local` then runs with the `own` tier — actions, your own `<agenthub.push>` rules, hub service
 variables, the session registry (`/state.plugins[].testTier: true` marks it) — and the CLI class (a script, `curl`) may
 press its actions without the pinned app, a `confirm` level included (the 428 token is not bound to the requester's
-process there). The variable is honoured only when `AGENTHUB_HOME` points to a directory other than the live state
+process there), and stop its background jobs (`POST /actions/job.cancel` with `{"args":{"job":"<id>"}}` — the "Stop"
+button of the app; jobs of other plugins stay app-only). The variable is honoured only when `AGENTHUB_HOME` points to a directory other than the live state
 directory: the live hub never has it.
 
 `AGENTHUB_TEST_EXTENSIONS=1` (also honoured only on a test hub) is the same shortcut for daemon extensions: every file
@@ -160,7 +161,10 @@ section 2) or `<agenthub.platforms>` does not include this system.
 
 **File name.** `{id}.{interval}.{ext}`, `{id}.{ext}` or a folder `{id}/` containing such a file.
 
-- `interval` — a number and `ms|s|m|h|d` (`30s`, `5m`, `2h`); runs are at least 1 s apart.
+- `interval` — a number and `ms|s|m|h|d` (`30s`, `5m`, `2h`); runs are at least 1 s apart. The interval counts from
+  the **end** of the previous run, and every other run (`refresh`, a `watch` change, the run after an action or a job's
+  end) starts it over: a `1m` plugin whose run takes 3 s runs about every 63 s and drifts against the clock. For runs at
+  fixed clock times (on the hour, 09:00 on weekdays) drop the interval and use `<agenthub.schedule>`.
 - No interval — the plugin runs at start, on `refresh`, on a `watch` change and per `<agenthub.schedule>` (a 5-field
   cron line: `<agenthub.schedule>0 9 * * 1-5</agenthub.schedule>`).
 - `id` — for the registry and own sources `a-z`, `0-9`, `-`, up to 64 characters, not `local`, `staging`, `disabled`,
@@ -228,7 +232,9 @@ plugin's folder is exactly the files that were agreed to, and anything extra sen
 ## 3. Metadata tags
 
 A tag is `<agenthub.NAME attr="…">value</agenthub.NAME>`, always closed. A multi-line value is joined with spaces (the
-comment prefix on continuation lines is dropped). Unknown tags are ignored — including `<agenthub.tier>`: the tier never
+comment prefix on continuation lines is dropped). Quote attribute values that hold `>` (`arg="text:^[^<>]{1,500}$"`):
+since hub 0.1.3 a `>` inside quotes is part of the value; outside quotes it ends the tag (older hubs end the tag at any
+`>`, so there such an action is dropped). Unknown tags are ignored — including `<agenthub.tier>`: the tier never
 comes from metadata. Parse problems (a bad `lang`, an invalid icon, a broken action) are warnings in the journal; for the
 registry and own sources they are errors.
 
@@ -252,7 +258,7 @@ registry and own sources they are errors.
 |---|---|---|
 | `type` | `standard` (default) or `streamable` | `<agenthub.type>streamable</agenthub.type>` |
 | `schedule` | a 5-field cron line, for a file without an interval | `<agenthub.schedule>*/10 9-18 * * 1-5</agenthub.schedule>` |
-| `watch` | a path or a mask in the last segment; a change starts a run (300 ms debounce). `~` is the plugins' HOME; `$AGENTHUB_PLUGIN_DATA_PATH`/`$AGENTHUB_PLUGIN_CACHE_PATH` are your own directories (any tier); `recursive="true"` — subdirectories too (the mask then matches the file name). Repeatable | `<agenthub.watch recursive="true">$AGENTHUB_PLUGIN_DATA_PATH/inbox — a job dropped into the inbox</agenthub.watch>` |
+| `watch` | a path or a mask in the last segment; a change starts a run (300 ms debounce; under writes that never pause — a log written every 100 ms — a run still comes at least every 2 s). `~` is the plugins' HOME; `$AGENTHUB_PLUGIN_DATA_PATH`/`$AGENTHUB_PLUGIN_CACHE_PATH` are your own directories (any tier); `recursive="true"` — subdirectories too (the mask then matches the file name). Repeatable | `<agenthub.watch recursive="true">$AGENTHUB_PLUGIN_DATA_PATH/inbox — a job dropped into the inbox</agenthub.watch>` |
 
 **Permissions** — every entry is `what — why`; the "why" is shown to the human in the consent window. All of these are
 repeatable (section 6):
@@ -296,6 +302,12 @@ Line after a separator
 
 - **Header** — lines before the first `---`. The first header line is the main one: the tile and the page title. The
   plugin status is the worst `status=` among header lines.
+- **Header buttons reach the popover.** A header line with an offer (`action=`, `effect=`, `href=`) is a button in the
+  page header; the first three of them are also buttons in the popover. The tile itself is not a button: a click on it
+  expands a card under the tiles (the headline, up to four body lines, then those buttons), and a click on the card's
+  text opens the plugin page. The buttons behave as on the page — the same gate, confirmation and spinner; an `input=`
+  action asks for its text in a sheet. Put what people press without opening the panel (Start, Skip) on header lines,
+  most important first; body buttons are on the page only. A hub app older than 0.1.3 shows no buttons in the popover.
 - **Body** — lines after it. `--` in front adds a nesting level; a `---` line in the body is a separator (`-----` is a
   separator one level down).
 - **Parameters** — after the **last** unescaped `|` that is followed only by `key=value` pairs; values with spaces go
@@ -379,7 +391,7 @@ every hub.
 | `bar=0…100`, `barColumn=<n>` | body line, table row | a thin progress bar; in a table — in column `n` ([4.4](#44-charts)) |
 | `spark="1,2,3"`, `sparkAvg=`, `sparkMax=`, `sparkLabel=`, `sparkNote=` | first header line | a sparkline in the page header (a large value, [4.4](#44-charts)) and the popover tile |
 | `until=<ISO-8601>` | first header line | a live countdown the app runs itself (hub 0.1.3+): the tile value and the page header value show `mm:ss` (from an hour on `h:mm:ss`) to that moment and stop at `00:00`; no frames needed while it runs. Give a time zone (`2026-11-12T18:30:00Z` or `…+03:00`); unparsable — ignored. Keep a `tile=` too: an older hub shows it instead |
-| `font=mono` | any line | the line title in a monospaced font (ids, hashes, aligned figures; hub 0.1.3+); other `font=` values are ignored |
+| `font=mono` | any line | the line title in a monospaced font (ids, hashes, aligned figures; hub 0.1.3+): plain lines, header lines and cards, table rows (the title and its `cells=`), buttons and links; other `font=` values are ignored |
 | `activity="…"`, `needsOn="…"` | header | the "can I shut down" verdict (4.6) |
 | `event=<key>` | any line | a notification key (section 9) |
 | `effect="<primitive> <args>"`, `href=<url>` | any line | a button that runs a core primitive (section 5) |
@@ -586,7 +598,7 @@ checks the arguments itself; the plugin only proposes.
 
 | Effect | Arguments | Who may offer it |
 |---|---|---|
-| `open.url <url>` | `http(s)` only, no credentials in the URL | everyone (`href=<url>` is the same) |
+| `open.url <url>` | `http(s)` only, no credentials in the URL — another link (`message://`, `mailto:`, `file:`) gets no button at all: the core drops it when it reads the frame and journals a warning (`open.url would refuse this button (scheme)`); open such a link from your own `net="none"` action | everyone (`href=<url>` is the same) |
 | `open.file <path> [reveal=true]` | an absolute or `~/` path; documents and plain folders open, anything executable or unknown is refused — only revealed in Finder with `reveal=true`; a folder with a dot in its name (`site.com`, `notes.d`) counts as a package and is only revealed too (deliberately) | everyone |
 | `session.focus <sessionId>` | a Claude Code session UUID, or the id of another agent's session (below); the hub finds the terminal tab itself | everyone except `local` (contract 3) |
 | `terminal.focus <surfaceId> [workspaceId=…]` | a terminal tab by its UUID (the `surfaceId` of a session record — in practice a cmux surface) — prefer `session.focus` | everyone except `local` |
@@ -631,7 +643,10 @@ Refactor auth | agentSession=cx-1 pid=48213 agent=codex agentName="Refactor auth
 - `<id>` is `[A-Za-z0-9][A-Za-z0-9._-]{0,63}` (a UUID works too). The process `pid` must exist; the hub records its start
   time and drops the entry when the process ends or the pid is reused, and when the line disappears from your output.
 - There is no signature check, so **only switching to the tab works**: `session.focus <id>` finds the tab by the pid
-  (tmux, iTerm2, Terminal.app; cmux knows only its Claude Code tabs — offer `terminal.focus <surfaceId>` there).
+  in tmux, iTerm2 and Terminal.app. **In cmux it cannot**: the cmux adapter knows only the Claude Code tabs (the session
+  registry and cmux's own hook file), so `session.focus` refuses such a session with `409 facts:no-terminal` and
+  `terminal.focus <surfaceId>` with a non-Claude tab's surface with `409 facts:unknown-surface` — offer no switch button
+  for an agent running in cmux.
   `session.interrupt` and `session.stop` refuse such a session with `409 facts:external-session`, the `/terminal/*`
   routes with `409 terminal:external-session`.
 - An id is held by the plugin that registered it while its process lives; another plugin's line with the same id is
@@ -663,28 +678,47 @@ core's confirmation window; `local` plugins get none (except on a test hub with 
   to an API): the `confirm-cost` floor that `<agenthub.net>` puts on every action is lifted for this one (a `cost=` still
   counts). It is a promise, not a sandbox: the registry reviewer checks the command reaches no host, and the permission
   key carries it (`actions: <id> [<level>] <command> net=none`), so adding it in an update asks for consent again.
+  The hub holds it to the promise on its own proxy (hub 0.1.3+): the action's process gets `403 net:none` on
+  `/connections/<id>/mcp` and `/connections/<id>/http`.
 - `input="Placeholder"` (+ `input-ru="…"`, `maxLength="N"` 1…4000, default 256) — **the human types the value**: the app
   shows a text field (the offer carries `input: {placeholder, maxLength, pattern}`), and the core checks the text like an
   argument — against the pattern of the required `arg="name:^pattern$"`, no control characters (so a single line), no
   leading `-`, at most `maxLength` characters. The text never goes into argv (a `{name}` word in the command is dropped):
   it arrives on the action's **stdin** as the text followed by one `\n`, then end of input — read it with
   `IFS= read -r text` in sh or by reading stdin to the end and dropping the final newline in node. The output line carries
-  only `action=<id>` (an `arg=` on it is refused). Input actions are pressed only in the app, whatever the tier; the
-  journal records the text's length, never the text. At `confirm` the app may ask for the text inside the confirmation
+  only `action=<id>` (an `arg=` on it is refused). Input actions are pressed only in the app, whatever the tier (the one
+  exception is the CLI on a test hub with `AGENTHUB_TEST_TIER=own`, section 1.2, as for any action); the journal records
+  the text's length, never the text. At `confirm` the app may ask for the text inside the confirmation
   sheet (`POST /actions/:id` without `input` → the 428 carries the field).
+- `inputPattern="^pattern$"` (with `input=`, contract 3, hub 0.1.3+) — **a reply bound to a row**: the typed text is checked
+  against this pattern instead, and `arg=` (optional then) becomes an ordinary row argument — the output line names the
+  row (`Thread t2: deploy? | action=reply arg=t2`), the core checks the value and passes it in argv as for any `arg=`
+  action, and the typed text still goes only to stdin. Each row then has its own button, the confirmation names the
+  bound value, and `actionResult` carries it in `arg`. Without `inputPattern=` an input action keeps the rule above:
+  `arg=` is the text's pattern and the line can't carry `arg=`. A hub older than 0.1.3 ignores `inputPattern=` and
+  drops such a button (the line has `arg=`), so declare `<agenthub.contract>3</agenthub.contract>` and say so in your README.
+
+  ```
+  # <agenthub.action id="reply" level="confirm" title="Reply" arg="thread:^t[0-9]{1,9}$" input="Your reply" inputPattern="^[^<>]{1,500}$" maxLength="500">chat.mjs --action reply {thread}</agenthub.action>
+  Thread t2: deploy now? | action=reply arg=t2
+  ```
 - `background="true"` — a **job**: the command keeps running after the click, with no 30 s timeout, in its own process
   group. The click returns at once with the job id; `/state.plugins[].jobs` lists running jobs (the app shows them with a
   "Stop" button — the `job.cancel` primitive), and "Can I shut down?" counts them. At most 4 jobs per plugin at once
   (`409 facts:jobs-limit`). A job survives restarts of your streamable process (language, a new secret) but
   is stopped (SIGTERM, SIGKILL 2 s later) when the plugin is removed, disabled or updated, when the hub is paused and
   when the daemon stops. When it ends, a streamable plugin gets `{"type":"jobExit","job","actionId","ok","code","signal",
-  "durationMs","cancelled"?,"reason"?,"message"?}` on stdin (`cancelled`: `cancelled` | `paused` | `plugin-removed` |
-  `plugin-restarted` | `shutdown`); a standard one gets an extra run with `AGENTHUB_REFRESH_REASON=JobExit`. A job that
+  "durationMs","cancelled"?,"reason"?,"message"?}` on stdin (`cancelled`: `cancelled` | `paused` | `shutdown`); a standard
+  one gets an extra run with `AGENTHUB_REFRESH_REASON=JobExit`. When the plugin is removed, disabled or updated its jobs
+  belong to the old instance: they are stopped (journaled as `job-exit` with `cancelled: plugin-removed` |
+  `plugin-restarted`, and the `job.exited` event), and the new process neither lists them in `jobs` nor gets their
+  `jobExit` — after an update it starts with no jobs. A job that
   ends while your streamable process is being restarted is not lost: its `jobExit` is kept and delivered right after the
   new process starts. Every start of a streamable plugin with background actions begins with
   `{"type":"jobs","running":[{"id","actionId","title","startedAt","pid"}]}` — the jobs running at that moment (an empty
   list on the first start), so a restarted process can resynchronize. Keep the job's own progress in your data directory
-  and show it in your frame.
+  and show it in your frame. A job's `title` is the action's title plus its `arg=` value ("Start dev server web"); a
+  second running job with the same title gets its start time ("Long (14:05:31)").
   The job **is its first process**: when that process exits, whatever is left in its group is killed (SIGKILL) and the
   job ends — do not background children and exit. A descendant that left the group (`setsid`) and keeps stdout open
   does not keep the job alive: a second after the first process exited its stdout is closed and the job ends anyway.
@@ -701,7 +735,11 @@ core's confirmation window; `local` plugins get none (except on a test hub with 
   are refused (423).
 - The confirmation window is written by the core: plugin, tier, action title, argument, the command as it will run, the
   typed text (for `input=`), and — at the end — the title of **the row that carries the button** (sanitized, up to 120
-  characters: "Button on the row "…""). Keep row titles meaningful: they tell the human what the click is about.
+  characters: "Button on the row "…""). Keep row titles meaningful: they tell the human what the click is about. The same
+  button (same action and argument) on several rows with different titles is a separate button per row, so each window
+  names the row actually pressed. A child button whose own text only repeats the action's title (`--Approve | action=approve
+  arg=r8` under `Request r8: wipe the cache`, the layout of banner buttons) is confirmed with its **parent row's** title. Still put a unique request id in `arg=`, not a list position: the token is bound to the action and its argument,
+  not to the row text.
 - Before the confirmation and the run the core re-reads your file: a changed command, level, pattern or version cancels
   the click (`409 facts:action-changed`).
 
@@ -771,7 +809,10 @@ Declare everything your code really touches and nothing it does not.
 `~/.claude/projects` (conversation text), `~/.cmuxterm/workstream.jsonl`, `*.key`, `.env*`, `auth.json`, and any path
 or mask that covers them — `~/.claude`, `~/.claude/*`, `~/.claude/sessions` as a whole, `/`, `~`. Allowed masks are
 narrower: `~/.claude/sessions/*.json`. `exec` tokens that look like paths are checked the same way: `/bin/df -k /` is an
-error (`/` covers `~/.claude/projects`), `/bin/df -k` is fine. `..` in a path is an error.
+error (`/` covers `~/.claude/projects`), `/bin/df -k` is fine. `..` in a path is an error. In the source text `*.key`
+means a file path at the end of a string literal: a last word with a path character (`/`, `\`, `~`, `*`) or a single-dot
+name (`"server.key"`, `"~/certs/a.b.key"`); a dotted identifier such as an SF Symbol name (`sfimage=person.badge.key`) is
+not a path and passes.
 
 **Loud permissions** (contract 3) are allowed but shown first in the consent window as a red line, and the linter
 warns the reviewer:
@@ -861,8 +902,8 @@ or python plugin. A background job (5.2) is an action process too.
 
 `AGENTHUB_HUB_SOCKET` is not the boundary — the socket path is no secret. The boundary is the tier: a process of a
 **community or local** plugin, its action, or any descendant of them (a `curl`, an `agenthub` call — found by its
-parents or its process group, at any depth) gets only `GET /health`
-and `GET /peer`; everything else answers `403 peer:untrusted-plugin` and is journaled ([`api.md`](api.md#peer-classes)).
+parents or its process group, at any depth; the group counts until the run is over, even after its first process
+exited) gets only `GET /health` and `GET /peer`; everything else answers `403 peer:untrusted-plugin` and is journaled ([`api.md`](api.md#peer-classes)).
 Processes of trusted plugins keep the plain `cli` view (reading `/state`, `/events`, `/journal`).
 
 ### 8.1 A request helper (node)
@@ -915,6 +956,9 @@ Declare the connection and the hosts (in a plugin with id `tasks`):
 - `url` — `https://` on a host name (not an IP), no port or credentials. The `url` host and any extra authorization
   hosts (`hosts="auth.example.com"`) **must be in `<agenthub.net>`**.
 - `tools` — the allowlist (1–32); nothing else can be called. `scope` — what to request at sign-in.
+- `writes` (optional, hub 0.1.3+) — the tools of that list that change something (`writes="create_task,update_task"`):
+  every call of them skips the interval cache as if it carried `fresh: true`. A name not in `tools` rejects the
+  declaration.
 - `interval` — the same call runs at most once per interval (5 min … 24 h, default 15 min); in between the hub returns
   the previous result. `budget` — calls per rolling day (1…10000, default 100).
 - Only `builtin`, `official`, `own`. A new connection or tool is permission growth.
@@ -930,12 +974,15 @@ else if (r.status === 200) {
 }
 ```
 
-Errors: `403 mcp:not-a-plugin|untrusted|not-owner|net-not-declared|tool-not-allowed`, `409 oauth:not-connected|expired|
+Errors: `403 mcp:not-a-plugin|untrusted|not-owner|net-not-declared|tool-not-allowed`, `403 net:none` (the calling action
+declares `net="none"`: the hub's proxy is network too), `409 oauth:not-connected|expired|
 unavailable`, `413 too-large` (arguments over 8 KB); a slow service gives `pending: true` and the result lands in the
 hub's memory for the next call. Details: [`api.md`](api.md), "Connections".
 
 **Writes and read after write.** A call that changes something (create, update, comment) — or a "refresh now" a human
-asked for — passes `fresh: true`:
+asked for — passes `fresh: true`. Since hub 0.1.3 a write is never served from the cache even without it: a tool
+listed in `writes=` and **any call from an action process** (a button the human pressed, a background job) count as
+fresh. Older hubs need the flag, so keep passing it:
 
 ```js
 const w = await hubPost("/connections/tasks/mcp", { tool: "update_task", args: { id, status: "done" }, fresh: true }, 25_000);
@@ -1064,7 +1111,7 @@ An instance suffix after `:` makes separate events per thing: `event=build-faile
 | `hold="evening"` | hold until the evening |
 | `quiet="true"` | urgent: a banner right away during quiet hours too (otherwise, while the human is away, it waits for the morning digest) |
 | `away="5m"` | at the Mac — right away; away — the banner waits until the human is back or the event stays raised that long |
-| `macOnly="true"` | deprecated, no effect: macOS banners are the hub's only channel (accepted so older plugins parse cleanly) |
+| `macOnly="true"` | the event goes to the Mac banner only, never to the extra channels the human configured (webhook, ntfy, channels of hub services): keep sensitive text (a mail subject) on this Mac. Timing (quiet hours, the digest) is unchanged. Hub 0.1.3+; older 0.1.x hubs accept and ignore it. Community plugins may declare it too |
 | `was="runs\|night"` | with `kind="plugin"`: carry over a choice from the contract 1 kinds `runs`/`night` |
 
 Up to 32 rules; the rule without `lang` must come first. Without a rule a key gets the shared table rule with the same
@@ -1123,7 +1170,13 @@ socket. Declare what you want, each entry with its "why" (a permission: adding o
 - Untrusted or `standard` plugins: the tag is ignored with a journal warning (the linter warns too).
 
 When your plugin presses buttons over the hub socket (`POST /actions/:id`), the journal names it (`byPlugin`) next to
-`peer: cli`.
+`peer: cli`. On the live hub that class reaches only what any script may press: effect buttons of the primitives that
+are `immediate` and not app-only (`open.*`, `session.focus`, `terminal.focus` — on any plugin's line, or called
+directly) and `immediate` actions of the built-in plugins. The actions of every other plugin — your own and the one
+whose events you follow included — are app-only at any level and answer `403 peer:cli`, and so do the other
+primitives (`job.cancel`, `session.stop`, …). A test hub with
+`AGENTHUB_TEST_TIER=own` lets the CLI press its test-tier plugins' actions and stop their jobs (section 1.2), so an
+automation that works there may get `403` on the live hub: test it with the targets it will really press.
 
 ## 10. Language
 

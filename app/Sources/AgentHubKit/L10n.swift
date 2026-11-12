@@ -27,11 +27,38 @@ public enum LangSetting: String, Sendable, Codable, CaseIterable {
     case system, ru, en
 }
 
+/// A language of its own for one task tree (re-review 62): inside `L10n.$scope.withValue(LangScope(.en)) { … }` the shared
+/// language (`L10n.shared.lang`, so `tr`, `plural`, `locale`) is read from and written to this box, not the app-wide value.
+/// Tests run each case in its own scope (the `.hubLang` trait), so parallel suites can neither see nor break another suite's
+/// language, and the macOS language does not matter. The app never sets a scope.
+public final class LangScope: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: Lang
+    public init(_ lang: Lang) { value = lang }
+    public var lang: Lang {
+        get { lock.lock(); defer { lock.unlock() }; return value }
+        set { lock.lock(); value = newValue; lock.unlock() }
+    }
+}
+
 @Observable
 public final class L10n: @unchecked Sendable {
     public static let shared = L10n()
 
-    public var lang: Lang = Lang.system
+    /// The task tree's own language box (tests); nil — the app-wide language.
+    @TaskLocal public static var scope: LangScope?
+
+    private var appLang: Lang = Lang.system
+    /// The effective language: the app-wide value, or the task's scope for `shared` (see `LangScope`).
+    public var lang: Lang {
+        get {
+            if let s = L10n.scope, self === L10n.shared { return s.lang }
+            return appLang
+        }
+        set {
+            if let s = L10n.scope, self === L10n.shared { s.lang = newValue } else { appLang = newValue }
+        }
+    }
     public var setting: LangSetting = .system
     /// The language setting is known: it came from the daemon or was remembered for this hub. If not, "Language" in Settings has no
     /// selected segment rather than an invented "System".

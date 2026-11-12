@@ -6,7 +6,7 @@ import Testing
 // in code points like the core (D3), the inline field's text kept by offer id across row shifts (D4), banner categories
 // keyed by SHA-256 and verified on a hit (D5), the `revoked` extension status, the secrets list cap (`more`). The daemon is the FakeDaemon double (ReviewFixTests.swift).
 
-@Suite(.serialized) struct AppReviewFixTests {
+@Suite(.serialized, .hubLang(.ru)) struct AppReviewFixTests {
     // MARK: D2 — no silent stop after repeated refusals
 
     @MainActor @Test func inputRefusedEveryTimeEndsWithAReason() async throws {

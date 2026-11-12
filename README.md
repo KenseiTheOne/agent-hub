@@ -151,7 +151,7 @@ contract in [`docs/extension-points.md`](docs/extension-points.md); registry, co
 | [`docs/plugins-registry.md`](docs/plugins-registry.md) | the plugin registry, manager, tiers and own sources |
 | [`docs/hook.md`](docs/hook.md) | answering Claude Code sessions: hook, cards, `session.respond` |
 | [`docs/hub-updates.md`](docs/hub-updates.md) | hub auto-update, the installer and the release procedure |
-| [`daemon/lib/push/README.md`](daemon/lib/push/README.md) | push notifications (macOS banners): rules, kinds, quiet hours, the morning digest |
+| [`daemon/lib/push/README.md`](daemon/lib/push/README.md) | push notifications (macOS banners, plus webhook/ntfy and service channels): rules, kinds, quiet hours, the morning digest |
 | [`app/README.md`](app/README.md) | the SwiftUI shell: features, building without Xcode, diagnostic flags |
 | [`bridge/README.md`](bridge/README.md) | the cmux bridge and action primitives |
 | [`docs/windows.md`](docs/windows.md) | Windows groundwork |

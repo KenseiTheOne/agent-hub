@@ -110,7 +110,12 @@ class PluginInstance {
     this.cron = null;
     this.kills = new Set(); // group killers for current runs
     this.runPids = new Set(); // pids of ongoing standard runs (not actions): the pluginByPid fact
-    this.actionPids = new Set(); // pids of ongoing actions (<agenthub.action>): the pluginByPid fact with { actions: true }
+    this.actionPids = new Map(); // pid → action of ongoing actions (<agenthub.action>): the pluginByPid fact with { actions: true }
+    // Process groups of ongoing runs and actions (task 63): the leader's pid is dropped when the leader exits (B4), but its group
+    // lives on until the run ends — the runner kills it then. While it lives, POSIX does not reuse the group id, so a descendant
+    // left in the group stays the plugin's (pluginByPid with { group: true }, the socket's group check) until that moment.
+    this.runGroups = new Set();
+    this.actionGroups = new Set();
     this.streamGen = 0; // streamable process generation: a stale launch (overlapping language changes) doesn't start
   }
   get id() {
@@ -238,13 +243,17 @@ class PluginInstance {
         maxBytes: cfg.maxOutputBytes,
         onSpawn: (kill, pid) => {
           this.kills.add((killer = kill));
-          if (pid) this.runPids.add((runPid = pid));
+          if (pid) {
+            this.runPids.add((runPid = pid));
+            this.runGroups.add(pid);
+          }
         },
         // the pid is the plugin's only while the process lives (B4): a descendant holding stdout delays the end of the run
         onLeaderExit: (pid) => this.runPids.delete(pid),
       });
       this.kills.delete(killer);
       this.runPids.delete(runPid);
+      this.runGroups.delete(runPid);
       if (this.stopped) return;
       this.core.applyRun(this.id, r);
     } catch (e) {
@@ -270,7 +279,8 @@ class PluginInstance {
   // durationMs, error?}) when it ends. A job has no timeout and its own process group; its pid counts as an action pid.
   async runAction(action, argValue = null, { input = null, background = false, onJobExit = null } = {}) {
     if (this.stopped || !this.argv) return { ok: false, error: "stopped" };
-    let argv = action.input ? actionArgv(action.command, action.arg, null, { input: true }) : actionArgv(action.command, action.arg, argValue);
+    // an input action with inputPattern= (task 65): arg= is a row argument, in argv as usual; without it arg= is the text pattern
+    let argv = action.input && !action.input.pattern ? actionArgv(action.command, action.arg, null, { input: true }) : actionArgv(action.command, action.arg, argValue);
     if (argv[0] === basename(this.plugin.file)) argv = [...this.argv, ...argv.slice(1)];
     const env = await this.env("MenuAction");
     // stopped or the hub was paused while we waited for the keychain — don't launch
@@ -283,17 +293,22 @@ class PluginInstance {
         env,
         cwd: this.plugin.dir,
         stdin,
-        // the pid is the plugin's only while the leader lives (B4)
-        onLeaderExit: (pid) => this.actionPids.delete(pid),
+        // the pid is the plugin's only while the leader lives (B4); a job's group is killed right when the leader exits (B2)
+        onLeaderExit: (pid) => {
+          this.actionPids.delete(pid);
+          this.actionGroups.delete(pid);
+        },
         onExit: (x) => {
           this.actionPids.delete(jobPid);
+          this.actionGroups.delete(jobPid);
           const m = /(?:^|\n)reason=([a-z0-9][a-z0-9-]{0,47})\s*$/.exec(x.tail || "");
           const message = actionMessage(x.tail);
           onJobExit?.({ ok: x.code === 0, code: x.code, signal: x.signal, durationMs: x.durationMs, ...(x.error ? { error: x.error } : {}), ...(m ? { reason: m[1] } : {}), ...(message ? { message } : {}) });
         },
       });
       if (job.error) return { ok: false, error: job.error };
-      this.actionPids.add((jobPid = job.pid));
+      this.actionPids.set((jobPid = job.pid), action);
+      this.actionGroups.add(jobPid);
       return { ok: true, job };
     }
     let killer = null;
@@ -306,12 +321,16 @@ class PluginInstance {
       maxBytes: 256 * 1024,
       onSpawn: (kill, pid) => {
         this.kills.add((killer = kill));
-        if (pid) this.actionPids.add((actPid = pid));
+        if (pid) {
+          this.actionPids.set((actPid = pid), action);
+          this.actionGroups.add(pid);
+        }
       },
       onLeaderExit: (pid) => this.actionPids.delete(pid),
     });
     this.kills.delete(killer);
     this.actionPids.delete(actPid);
+    this.actionGroups.delete(actPid);
     const out = String(r.stdout || "");
     const m = /(?:^|\n)reason=([a-z0-9][a-z0-9-]{0,47})\s*$/.exec(out);
     const message = actionMessage(out);
@@ -470,13 +489,21 @@ export class PluginHost {
   // Whose process this is: an ongoing standard run or a live streamable process (not the plugin's descendants). A plugin action
   // (<agenthub.action>, started by a human) — only with { actions: true }: terminal routes (contract 3) and MCP calls
   // through hub connections let it through. → plugin (scanner object with granted) or null.
-  pluginByPid(pid, { actions = false } = {}) {
+  // group: true — pid is a process group id (the socket's group check, task 63): the group of an ongoing run, action, job or
+  // streamable process counts until that run ends and its group is killed, not only while its leader lives.
+  pluginByPid(pid, { actions = false, group = false } = {}) {
     if (!Number.isInteger(pid) || pid <= 0) return null;
     for (const inst of this.instances.values()) {
       if (inst.stopped) continue;
       if (inst.runPids.has(pid) || (inst.stream && inst.stream.pid === pid)) return inst.plugin;
       if (actions && inst.actionPids.has(pid)) return inst.plugin;
+      if (group && (inst.runGroups.has(pid) || (inst.stream && inst.stream.groupId === pid) || (actions && inst.actionGroups.has(pid)))) return inst.plugin;
     }
+    return null;
+  }
+  // The declared action an ongoing action or job process runs (pluginByPid with actions found it). → action or null.
+  actionByPid(pid) {
+    for (const inst of this.instances.values()) if (!inst.stopped && inst.actionPids.has(pid)) return inst.actionPids.get(pid) || null;
     return null;
   }
   // Something the core puts into every run's environment changed: the language (AGENTHUB_LANG) or the hub pause (AGENTHUB_PAUSED,

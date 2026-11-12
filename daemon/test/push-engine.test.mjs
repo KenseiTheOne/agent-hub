@@ -33,7 +33,7 @@ const OWN_RULES = {
     { key: "runner-crashed", label: "Раннер упал", quietException: true },
     { key: "tamper-marker", label: "Маркер подмены", quietException: true },
   ],
-  // an older plugin still declares macOnly (from when the hub had a second channel): accepted and ignored
+  // macOnly: the Mac banner only, never the extra channels (re-review 70); timing is unchanged
   gateway: [{ key: "gateway-silent", label: "Gateway молчит", macOnly: true }],
 };
 
@@ -268,7 +268,7 @@ test("session waiting: at the Mac → a banner right away; away → a banner onc
   assert.deepEqual([h6.mac.length, h6.engine.digest.length], [0, 1]);
 });
 
-test("macOnly from an older plugin is ignored (night, away — the digest); a third-party plugin: without its own text", async () => {
+test("macOnly narrows channels only (night, away — still the digest); a third-party plugin: without its own text", async () => {
   const h = harness({
     idleMin: 60,
     plugins: { evil: { pluginTitle: "Evil", itemTitle: "секрет: hunter2", trusted: false, rules: [{ key: "run-blocker", label: "Чужой ярлык", quietException: true }] } },
@@ -279,11 +279,12 @@ test("macOnly from an older plugin is ignored (night, away — the digest); a th
   assert.equal(h.mac.length, 2);
   assert.equal(h.mac[1].body, "Событие «run-blocker»", "a foreign plugin does not get the hub label and does not pass its own text or rules");
   assert.equal(h.mac[1].subtitle, "Evil");
-  // at night with the person away macOnly no longer bypasses the digest: it means nothing now
+  assert.equal(h.mac[0].macOnly, true, "the channel set keeps it off the extra channels");
+  // at night with the person away macOnly does not bypass the digest: it only narrows the channels
   const n = harness({ start: "2026-11-05T02:00", idleMin: 60 });
   await n.raise("gateway", "gateway-silent");
   assert.deepEqual([n.mac.length, n.engine.digest.length], [0, 1]);
-  assert.equal(n.engine.ruleFor("gateway-silent", true, OWN_RULES.gateway, "gateway").macOnly, undefined);
+  assert.equal(n.engine.ruleFor("gateway-silent", true, OWN_RULES.gateway, "gateway").macOnly, true);
   assert.equal(n.engine.ruleFor("x", false, null, "evil").macOnly, undefined);
 });
 
@@ -429,12 +430,12 @@ test("core keys are in the table rules; plugin (and built-in) events come from t
 
 // Migration pass review: official plugin rules live in their metadata, but the user's services.push.rules
 // has the last word ("<plugin>:<name>" or "<name>").
-test("a user override on top of a plugin rule: by \"<plugin>:<name>\" only that plugin, by \"<name>\" every plugin; macOnly is not a field", async () => {
+test("a user override on top of a plugin rule: by \"<plugin>:<name>\" only that plugin, by \"<name>\" every plugin; macOnly is a field", async () => {
   let h = harness({ idleMin: 0, cfg: { rules: { "gateway:gateway-silent": { label: "Мой ярлык", macOnly: false } } } });
   assert.equal(h.engine.ruleFor("gateway-silent", true, OWN_RULES.gateway, "other").label, "Gateway молчит", "another plugin is not affected");
   await h.raise("gateway", "gateway-silent");
   assert.match(h.mac[0].subtitle, /Мой ярлык/);
-  assert.equal(h.engine.ruleFor("gateway-silent", true, OWN_RULES.gateway, "gateway").macOnly, undefined, "macOnly from config.json is ignored");
+  assert.equal(h.engine.ruleFor("gateway-silent", true, OWN_RULES.gateway, "gateway").macOnly, false, "the human's config.json decides");
   h = harness({ idleMin: 0, cfg: { rules: { "gateway-silent": { label: "Общий ярлык" } } } });
   await h.raise("gateway", "gateway-silent");
   assert.match(h.mac[0].subtitle, /Общий ярлык/);
@@ -511,4 +512,25 @@ test("plugin push: the name and phrase do not repeat; the label without \"<plugi
   assert.equal(stripTitle("Hermes:", "Hermes"), "Hermes:", "an empty remainder keeps the label as is");
   assert.ok(saysSame("расписание остановилось", "Профиль demo-bot: расписание остановилось (отклик 4 мин назад)"));
   assert.ok(!saysSame("задача упала", "demo: утренний итог — упала"));
+});
+
+// Re-review 70: macOnly events go to the Mac banner and never to the extra channels — right away and in the morning digest.
+test("macOnly: the banner carries it; held overnight, the digest for extra channels leaves it out (security items stay separate)", async () => {
+  const n = harness({ start: "2026-11-05T02:00", idleMin: 60 });
+  await n.raise("gateway", "gateway-silent");
+  await n.raise("my-runner", "run-done");
+  assert.equal(n.engine.digest.length, 2);
+  n.set("2026-11-05T08:30");
+  await n.tick();
+  const d = n.mac.at(-1);
+  assert.equal(d.digest, true);
+  assert.match(d.body, /Gateway|gateway/i, "the Mac banner lists everything");
+  assert.equal(d.extra.length, 1, "extra channels get the shared items only");
+  assert.doesNotMatch(d.extra[0].body, /Gateway|gateway/i);
+  // only macOnly items held: the extra channels get nothing
+  const m = harness({ start: "2026-11-05T02:00", idleMin: 60 });
+  await m.raise("gateway", "gateway-silent");
+  m.set("2026-11-05T08:30");
+  await m.tick();
+  assert.deepEqual(m.mac.at(-1).extra, []);
 });

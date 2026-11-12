@@ -387,6 +387,9 @@ export class Core {
       awayAfterMs: resolved.idleThresholdMs,
       security,
       service: pushCfg?.enabled !== false,
+      // delivery channels (re-review 70): mac plus services.push.channels and channels services registered — id, type, label,
+      // security, events; never a URL or token (lib/push/channels.mjs list). Empty while the push service is off.
+      channels: (this.facts?.get?.("push.channels")?.list?.() || []).map((c) => ({ id: c.id, type: c.type, label: c.label, security: c.security === true, events: Array.isArray(c.events) ? [...c.events] : null })),
     };
   }
   // Migrating contract 1 settings (lib/push/prefs.mjs): a plugin declared an old kind (LEGACY_KINDS) that a human
@@ -586,6 +589,11 @@ export class Core {
       argsSchema: mod.argsSchema || {},
       verifyFacts: typeof mod.verifyFacts === "function" ? mod.verifyFacts : () => ({ ok: true }),
       describe: typeof mod.describe === "function" ? mod.describe : null,
+      // pluginOf(rawArgs, facts) → the plugin id the call concerns (the test-hub cli exception, task 75); checkOffer(args) → the
+      // part of verifyFacts that needs no facts, run when a plugin's frame offers the primitive (task 71): a refusal there is a
+      // warning and no button, not a button that can only fail
+      pluginOf: typeof mod.pluginOf === "function" ? mod.pluginOf : null,
+      checkOffer: typeof mod.checkOffer === "function" ? mod.checkOffer : null,
       run: mod.run,
     });
     return null;
@@ -755,7 +763,9 @@ export class Core {
         if (!pl) return null;
         const trusted = trustedPlugin(pl);
         // terminal — <agenthub.terminal> entries (contract 3): /terminal/* routes check the operation and string against them
-        return { id: pl.id, source: pl.source, tier: pl.granted?.tier || null, trusted, net: [...(pl.meta?.net || [])], terminal: [...(pl.meta?.terminal || [])] };
+        // action — {id, net} when the pid is an action or job process (opts.actions): connection routes hold it to net="none"
+        const act = opts.actions ? core.host?.actionByPid?.(pid) : null;
+        return { id: pl.id, source: pl.source, tier: pl.granted?.tier || null, trusted, net: [...(pl.meta?.net || [])], terminal: [...(pl.meta?.terminal || [])], ...(act ? { action: { id: act.id, net: act.net || null } } : {}) };
       },
       // Extensions add their own facts: provide("bridge.online", () => ...)
       provide(name, fn) {
@@ -1171,7 +1181,7 @@ export class Core {
     }
     const conns = pluginConnections(pl);
     for (const r of conns.rejected) this.journal.write({ type: "connection-rejected", plugin: pl.id, connection: r.id, why: r.why });
-    this.plugins.get(pl.id).connections = conns.list.map((c) => ({ id: c.id, title: c.title || null, note: c.note || null, url: c.url, host: c.host, hosts: c.hosts, scope: c.scope, tools: c.tools, intervalMs: c.intervalMs, budget: c.budget, tier: c.tier, ...(c.type === "http" ? { type: "http", http: c.http } : {}) }));
+    this.plugins.get(pl.id).connections = conns.list.map((c) => ({ id: c.id, title: c.title || null, note: c.note || null, url: c.url, host: c.host, hosts: c.hosts, scope: c.scope, tools: c.tools, ...(c.writes?.length ? { writes: c.writes } : {}), intervalMs: c.intervalMs, budget: c.budget, tier: c.tier, ...(c.type === "http" ? { type: "http", http: c.http } : {}) }));
     if (pl.meta.contract && pl.meta.contract > CONTRACT_VERSION) this.journal.write({ type: "plugin-contract-newer", plugin: pl.id, need: pl.meta.contract, have: CONTRACT_VERSION });
     // event subscriptions (G11): before inst.start() — the snapshot goes out when the stream process starts (pluginStarted)
     const subs = this.subscriptionsFor(pl);
@@ -1388,9 +1398,12 @@ export class Core {
   jobsCount(pluginId) {
     return this.jobsOf(pluginId).length + (this.jobsStarting.get(pluginId) || 0);
   }
-  // Metadata of the jobs (the jobs fact, /state.plugins[].jobs): no kill handles.
+  // Metadata of the jobs (the jobs fact, /state.plugins[].jobs): no kill handles. For one plugin (its /state entry and the
+  // {"type":"jobs"} message) only the jobs of its current instance: a job of a removed or updated instance is being killed
+  // (task 67) — the new instance never hears its jobExit, so it must not hear of it at all. The full list (no pluginId) keeps
+  // them while their processes live.
   jobList(pluginId = null) {
-    return [...this.jobs.values()].filter((j) => !pluginId || j.plugin === pluginId).map((j) => ({ id: j.id, plugin: j.plugin, actionId: j.actionId, title: j.title, startedAt: j.startedAt, pid: j.pid }));
+    return [...this.jobs.values()].filter((j) => !pluginId || (j.plugin === pluginId && !j.detached)).map((j) => ({ id: j.id, plugin: j.plugin, actionId: j.actionId, title: j.title, startedAt: j.startedAt, pid: j.pid }));
   }
   // Start a background action (invoke step 6). → the action result: {ok: true, job, pid} | {ok: false, error}
   // The slot is reserved before the first await (B5): two presses at once cannot both pass the limit while the keychain answers.
@@ -1401,7 +1414,7 @@ export class Core {
     const jobId = randomBytes(8).toString("hex");
     let r;
     try {
-      r = await inst.runAction(target.action, target.action.arg && !target.action.input ? target.argValue : null, {
+      r = await inst.runAction(target.action, inputDecls(target.action).row ? target.argValue : null, {
         input: target.input ?? null,
         background: true,
         onJobExit: (x) => this.jobExited(jobId, x),
@@ -1414,13 +1427,29 @@ export class Core {
     if (!r?.ok || !r.job) return { ok: false, error: r?.error || "spawn" };
     // the process start time: after a daemon crash the next daemon kills the group only if this very process still runs (B3)
     const startSec = this.processStartSec(r.job.pid);
-    const job = { id: jobId, plugin: pluginId, actionId: target.action.id, title: String(title).slice(0, 200), startedAt: new Date().toISOString(), pid: r.job.pid, startSec, kill: r.job.kill, inst, started: Date.now() };
+    const job = { id: jobId, plugin: pluginId, actionId: target.action.id, title: this.jobTitle(pluginId, title, target), startedAt: new Date().toISOString(), pid: r.job.pid, startSec, kill: r.job.kill, inst, started: Date.now() };
     this.jobs.set(jobId, job);
     this.persistJobs();
     this.syncJobs(pluginId);
     this.journal.write({ type: "job-start", plugin: pluginId, actionId: job.actionId, job: jobId, pid: job.pid });
     this.emit({ type: "job.started", plugin: pluginId, actionId: job.actionId, job: jobId, pid: job.pid });
     return { ok: true, job: jobId, pid: job.pid };
+  }
+  // A job's title (task 73): the action's title plus its row argument ("Start dev server web"); if a running job of the plugin
+  // already has that title, the start time is added ("Long (14:05:31)", "Long (14:05:31 #2)" within one second) — two running
+  // jobs are never shown the same.
+  jobTitle(pluginId, title, target) {
+    const arg = inputDecls(target.action).row && target.argValue != null ? ` ${target.argValue}` : "";
+    let out = `${title}${arg}`.slice(0, 200);
+    if (this.jobList(pluginId).some((j) => j.title === out)) {
+      const d = new Date();
+      const hms = [d.getHours(), d.getMinutes(), d.getSeconds()].map((n) => String(n).padStart(2, "0")).join(":");
+      const base = `${out.slice(0, 180)} (${hms}`;
+      out = `${base})`;
+      // started within the same second
+      for (let n = 2; this.jobList(pluginId).some((j) => j.title === out); n++) out = `${base} #${n})`;
+    }
+    return out;
   }
   // /state.plugins[].jobs follows the job table; the change goes out at once (not coalesced).
   syncJobs(pluginId) {
@@ -1469,7 +1498,7 @@ export class Core {
   sendJobState(id) {
     const pending = this.pendingJobExits.get(id) || [];
     this.pendingJobExits.delete(id);
-    const hasJobs = Boolean(this.pluginMeta.get(id)?.meta?.actions?.some((a) => a.background)) || this.jobsOf(id).length > 0;
+    const hasJobs = Boolean(this.pluginMeta.get(id)?.meta?.actions?.some((a) => a.background)) || this.jobList(id).length > 0;
     if (hasJobs) this.host.send(id, { type: "jobs", running: this.jobList(id).map(({ plugin, ...j }) => j) });
     for (const m of pending) this.host.send(id, m);
   }
@@ -1487,8 +1516,13 @@ export class Core {
     job.killTimer.unref?.();
   }
   // Stop every job of a plugin (removed, disabled, updated): SIGTERM, SIGKILL after JOB_KILL_GRACE_MS.
+  // The instance is gone (removed, disabled, updated, policy changed): its jobs are detached from the plugin id (task 67) and
+  // stopped; they stay in the table (the per-plugin limit, the idle verdict, jobs.json) until their processes end.
   killJobs(pluginId, why) {
-    for (const job of this.jobsOf(pluginId)) this.stopJob(job, why);
+    for (const job of this.jobsOf(pluginId)) {
+      job.detached = true;
+      this.stopJob(job, why);
+    }
   }
   // The start time (seconds) of a live process, or null when it cannot be learned (no peercred addon).
   processStartSec(pid) {
@@ -1657,14 +1691,16 @@ export class Core {
     // non-Claude agent sessions of this frame (G13): ids registered by this plugin; the rest of its entries are dropped below
     const externalSeen = new Set();
     let externalChanged = false;
-    const mapItem = (item) => {
+    // offers placed in this frame: [{ out, offer }] — the same offer on rows with different texts is split below (task 64)
+    const placed = [];
+    const mapItem = (item, parentTitle = null) => {
       const out = { title: item.title, level: item.level, params: item.params };
       if (item.separator) out.separator = true;
       if (item.status) out.status = item.status;
       if (item.event) out.event = item.event;
       // the event line's href= — the banner click target (G5, pluginEventInfo); not part of /state (non-enumerable)
       if (item.event && item.href) Object.defineProperty(out, "_href", { value: item.href, enumerable: false, writable: true, configurable: true });
-      const offer = this.makeOffer(pl, st, item);
+      const offer = this.makeOffer(pl, st, item, parentTitle);
       if (offer) {
         offers.add(offer.id);
         out.offer = {
@@ -1680,6 +1716,7 @@ export class Core {
           // G6: pressing starts a background job (listed in plugins[].jobs)
           ...(offer.action?.background ? { background: true } : {}),
         };
+        placed.push({ out, offer });
       }
       if (item.params.session && item.params.pid) {
         const pid = Number(item.params.pid);
@@ -1700,8 +1737,21 @@ export class Core {
       }
       return out;
     };
-    st.header = parsed.header.map(mapItem);
-    st.body = parsed.body.map(mapItem);
+    // each item knows its parent row's title (the nearest earlier item one level up): a child button that only repeats
+    // the action's title is confirmed with its parent row's text (task 64)
+    const mapList = (list) => {
+      const titles = [];
+      return list.map((item) => {
+        const lvl = Number.isInteger(item.level) && item.level > 0 ? item.level : 0;
+        titles.length = lvl;
+        const out = mapItem(item, lvl > 0 ? (titles[lvl - 1] ?? null) : null);
+        titles[lvl] = item.separator ? null : item.title;
+        return out;
+      });
+    };
+    st.header = mapList(parsed.header);
+    st.body = mapList(parsed.body);
+    this.splitSharedOffers(placed, offers);
     // activity= / needsOn=: an empty frame with an error (exit ≠ 0 with no output) is not a new state of the source: the last
     // known phrases stay (as with pluginFailed), and the verdict shows them as "failure — last: …" (lib/idle.mjs).
     // Otherwise a plugin that reported "run at 04:30" would silently drop out of the check and the card would turn green.
@@ -1810,13 +1860,42 @@ export class Core {
     if (st) st.events = [...next];
   }
 
+  // Task 64: an offer id is a hash of plugin, action and arguments, so the same button on two rows is one offer — and its
+  // confirmation would name whichever row came first. Where one id sits on rows with different texts, each row gets its own
+  // offer (id over the row text too); an offer on one row (or on rows with one text) keeps the id it always had, so banner
+  // buttons and an open confirmation window keep working across frames. offers — the frame's id set, updated in place.
+  splitSharedOffers(placed, offers) {
+    const byId = new Map();
+    for (const p of placed) {
+      if (!byId.has(p.offer.id)) byId.set(p.offer.id, []);
+      byId.get(p.offer.id).push(p);
+    }
+    for (const [id, list] of byId) {
+      if (new Set(list.map((p) => p.offer.row ?? "")).size < 2) {
+        // one row text: the registry holds that row (the last write may be another object with the same row)
+        this.offers.set(id, list[0].offer);
+        continue;
+      }
+      this.offers.delete(id);
+      offers.delete(id);
+      for (const p of list) {
+        const nid = sha(`${id}|row|${p.offer.row ?? ""}`).slice(0, 16);
+        const offer = { ...p.offer, id: nid };
+        this.offers.set(nid, offer);
+        offers.add(nid);
+        p.out.offer.id = nid;
+      }
+    }
+  }
+
   clearOffers(pluginId) {
     for (const oid of this.pluginOffers.get(pluginId) || []) this.offers.delete(oid);
     this.pluginOffers.delete(pluginId);
   }
 
   // Plugin offer (effect=, action=, href=) → an entry in the offer registry or null.
-  makeOffer(pl, st, item) {
+  // parentTitle — the title of the row the item hangs under (null at the top level), task 64.
+  makeOffer(pl, st, item, parentTitle = null) {
     let spec = null;
     if (item.action) {
       if (!st.actions.length) {
@@ -1832,12 +1911,21 @@ export class Core {
       let args;
       let input = null;
       if (action.input) {
-        // the value of an input action is typed by a human in the app (G1): the frame cannot put one in
-        if (raw !== undefined) {
+        // the value of an input action is typed by a human in the app (G1): the frame cannot put one in. With inputPattern=
+        // (task 65) the action's arg= is a row argument: the frame binds the button to its row like any parameterized action.
+        const d = inputDecls(action);
+        if (d.row) {
+          const v = checkActionArg(d.row, raw);
+          if (v.error) {
+            this.warn(pl.id, `action=${item.action}: arg ${v.error}`);
+            return null;
+          }
+          args = { [d.row.name]: v.value };
+        } else if (raw !== undefined) {
           this.warn(pl.id, msg("warn.action.inputArg", { action: item.action }));
           return null;
         }
-        input = { placeholder: pickLang(action.input.placeholder, action.i18n, "input", this.lang()), maxLength: action.input.maxLength, pattern: action.arg.pattern };
+        input = { placeholder: pickLang(action.input.placeholder, action.i18n, "input", this.lang()), maxLength: action.input.maxLength, pattern: d.text.pattern };
       } else if (action.arg) {
         const v = checkActionArg(action.arg, raw);
         if (v.error) {
@@ -1885,6 +1973,20 @@ export class Core {
         this.warn(pl.id, `${primitive}: ${v.error}`);
         return null;
       }
+      // task 71: what the primitive would refuse on every press anyway (open.url: a scheme other than http/https —
+      // message://, file:, mailto:) gets no button: a warning instead of a button that can only answer 409
+      if (prim.checkOffer) {
+        let c;
+        try {
+          c = prim.checkOffer(v.args);
+        } catch {
+          c = { ok: false, reason: "check-error" };
+        }
+        if (!c?.ok) {
+          this.warn(pl.id, msg("warn.effect.refused", { primitive, reason: String(c?.reason || "rejected").slice(0, 40) }));
+          return null;
+        }
+      }
       let label = primitive;
       try {
         label = prim.describe?.(v.args, this.facts, this.lang())?.text || primitive;
@@ -1892,10 +1994,13 @@ export class Core {
       spec = { kind: "effect", primitive, args: v.args, level: prim.level, label };
     }
     const id = sha(`${pl.id}|${spec.kind}|${spec.primitive || spec.action.id}|${JSON.stringify(spec.args || {})}`).slice(0, 16);
-    // G10: the row that carries the button — its title (sanitized, ≤ 120 graphemes) goes into the confirmation text. The same
-    // offer on several rows of one frame keeps the first row.
-    const prev = this.offers.get(id);
-    const row = prev && prev.row !== undefined ? prev.row : cleanPhrase(item.title || "") || null;
+    // G10: the row that carries the button — its title (sanitized, ≤ 120 graphemes) goes into the confirmation text. A child
+    // button whose text only repeats the action's title (or is empty) is confirmed with its parent row's text (task 64): "Approve"
+    // under "Request r7: wipe the cache" says what is approved. The same offer on rows with different texts is split into one
+    // offer per row after the frame is mapped (splitSharedOffers).
+    let row = cleanPhrase(item.title || "") || null;
+    const actionTitle = spec.kind === "action" ? pickLang(spec.action.title, spec.action.i18n, "title", this.lang()) : null;
+    if (parentTitle && (!row || row === spec.label || (actionTitle && row === cleanPhrase(String(actionTitle))))) row = cleanPhrase(parentTitle) || row;
     const offer = { id, pluginId: pl.id, ...spec, row };
     this.offers.set(id, offer);
     return offer;
@@ -1939,7 +2044,9 @@ export class Core {
     const needApp = target.appOnly || target.level !== "immediate";
     // G15: on a test hub with AGENTHUB_TEST_TIER=own, cli (a script, curl) may press actions of its test-tier plugins at any level
     // (a confirm level still goes through 428 and the token) — never on the live hub (config.testTierOf)
-    const testCli = cls === "cli" && target.kind === "action" && offer?.testTier === true && this.config.testTier === "own";
+    // Task 75: the same for an app-only primitive that acts on one plugin's thing and names it (pluginOf: job.cancel → the job's
+    // plugin) when that plugin is a test-tier one — stopping a test plugin's job is testable without the app
+    const testCli = cls === "cli" && this.config.testTier === "own" && ((target.kind === "action" && offer?.testTier === true) || (target.kind === "primitive" && this.testTierTargetOf(target.prim, target.rawArgs)));
     if (needApp && cls !== "app" && !testCli) return deny(403, peerInfo?.reason && peerInfo.reason !== "peer:no-claude-ancestor" ? peerInfo.reason : `peer:${cls}`, { peer: cls });
     if (target.kind === "effect" && offer && !this.plugins.has(offer.pluginId)) return deny(404, "not-found");
 
@@ -1962,6 +2069,13 @@ export class Core {
       const cur = this.currentAction(offer);
       if (!cur) return deny(409, "facts:action-changed");
       if (cur.action.input) {
+        // task 65: the row argument of an input action with inputPattern= — checked like any action argument
+        const d = inputDecls(cur.action);
+        if (d.row) {
+          const v = checkActionArg(d.row, target.args?.[d.row.name]);
+          if (v.error) return deny(409, "facts:bad-arg");
+          target.argValue = v.value;
+        } else if (target.args && Object.keys(target.args).length) return deny(409, "facts:bad-arg");
         // G1: the typed text — checked like an argument (control characters, a leading "-", the declared pattern) with the
         // action's maxLength. A confirm-level action may be asked without it: the 428 then carries the field (the app shows
         // it in the confirmation sheet) and the token accepts any valid text typed there.
@@ -1969,7 +2083,7 @@ export class Core {
           if (target.level === "immediate" || confirmToken) return deny(400, "input:required");
           target.inputOpen = true;
         } else {
-          const v = checkActionArg(cur.action.arg, input, { max: cur.action.input.maxLength });
+          const v = checkActionArg(d.text, input, { max: cur.action.input.maxLength });
           if (v.error) return deny(400, `input:${v.error}`);
           target.input = v.value;
         }
@@ -2050,7 +2164,7 @@ export class Core {
         // action and argument — already checked against the current metadata (step 4)
         try {
           if (target.action.background) result = await this.startJob(inst, target, title);
-          else result = await inst.runAction(target.action, target.action.arg && !target.action.input ? target.argValue : null, { input: target.input ?? null });
+          else result = await inst.runAction(target.action, inputDecls(target.action).row ? target.argValue : null, { input: target.input ?? null });
         } finally {
           this.runningActions.delete(runKey);
         }
@@ -2088,7 +2202,7 @@ export class Core {
       if (pst?.type === "streamable") {
         // arg (G18) — the checked argument value from the offer; an input action has none here: the typed text went to the
         // action's stdin, the plugin gets only its length
-        const arg = target.kind === "action" && target.action?.arg && !target.action.input ? (target.argValue ?? null) : null;
+        const arg = target.kind === "action" && inputDecls(target.action).row ? (target.argValue ?? null) : null;
         this.host.send(offer.pluginId, {
           type: "actionResult",
           id,
@@ -2103,6 +2217,18 @@ export class Core {
       } else this.host.refresh(offer.pluginId, "MenuAction");
     }
     return { status: 200, body: { ok: Boolean(safe.ok), result: safe } };
+  }
+
+  // Task 75: whether a direct primitive call concerns a test-tier plugin (the primitive names it: pluginOf(rawArgs, facts)).
+  testTierTargetOf(prim, rawArgs) {
+    if (typeof prim?.pluginOf !== "function") return false;
+    let pluginId = null;
+    try {
+      pluginId = prim.pluginOf(rawArgs ?? {}, this.facts);
+    } catch {
+      return false;
+    }
+    return typeof pluginId === "string" && testTierPlugin(this.pluginMeta.get(pluginId));
   }
 
   // The offer's action per the current plugin file. → { action, level, fp } | null (the plugin, the action or the right
@@ -2141,10 +2267,11 @@ export class Core {
       if (cost) parts.push(pl?.source === "builtin" ? String(cost).slice(0, 200) : t(lang, "cost.pluginSays", { text: String(cost).slice(0, 200) }));
       const st = this.plugins.get(target.offer.pluginId);
       const tier = st?.tier ? t(lang, `tier.${st.tier}`) : "?";
-      const arg = a.arg && !a.input ? String(target.args?.[a.arg.name] ?? "") : "";
+      const rowArg = inputDecls(a).row;
+      const arg = rowArg ? String(target.args?.[rowArg.name] ?? "") : "";
       const title = pickLang(a.title, a.i18n, "title", lang);
       const plugin = st?.title || target.offer.pluginId;
-      const p = { plugin, tier, command: shownCommand(a.command, a.arg, arg, { input: Boolean(a.input) }), arg, title: title ? String(title).slice(0, 80) : "" };
+      const p = { plugin, tier, command: shownCommand(a.command, a.arg, arg, { input: Boolean(a.input) && !a.input.pattern }), arg, title: title ? String(title).slice(0, 80) : "" };
       const text = [t(lang, title ? "action.text" : "action.textNoTitle", p)];
       // G1: what goes to the command's stdin — the typed text (sanitized for display, ≤ 120) or "typed in this window"
       if (a.input) text.push(target.input !== undefined ? t(lang, "action.input", { text: cleanPhrase(target.input) }) : t(lang, "action.inputOpen"));
@@ -2353,7 +2480,7 @@ export function communityPushRules(list) {
   const out = [];
   for (const r of Array.isArray(list) ? list : []) {
     if (!r || r.kind !== PLUGIN_KIND || typeof r.key !== "string") continue;
-    out.push({ key: r.key, label: r.label ?? null, kind: PLUGIN_KIND, ...(r.labels ? { labels: { ...r.labels } } : {}), ...(r.legacyKind ? { legacyKind: r.legacyKind } : {}), community: true });
+    out.push({ key: r.key, label: r.label ?? null, kind: PLUGIN_KIND, ...(r.labels ? { labels: { ...r.labels } } : {}), ...(r.legacyKind ? { legacyKind: r.legacyKind } : {}), ...(r.macOnly === true ? { macOnly: true } : {}), community: true });
   }
   return out;
 }
@@ -2366,10 +2493,19 @@ function actionView(pl, a) {
     level: actionLevel(pl, a),
     title: a.title,
     arg: a.arg ? { ...a.arg } : null,
-    ...(a.input ? { input: { placeholder: a.input.placeholder, maxLength: a.input.maxLength } } : {}),
+    ...(a.input ? { input: { placeholder: a.input.placeholder, maxLength: a.input.maxLength, ...(a.input.pattern ? { pattern: a.input.pattern } : {}) } } : {}),
     ...(a.background ? { background: true } : {}),
     ...(a.net ? { net: a.net } : {}),
   };
+}
+
+// An action's argument declarations (task 65). → { text, row }: text — what typed input is checked against (input actions only),
+// row — the argument the frame's arg= binds (argv). A plain action: row = arg=. An input action: with inputPattern= the text
+// pattern is that and row = arg= (may be null); without it arg= is the text pattern and there is no row argument (G1 as before).
+export function inputDecls(action) {
+  if (!action?.input) return { text: null, row: action?.arg || null };
+  if (action.input.pattern) return { text: { name: action.arg?.name || "input", pattern: action.input.pattern }, row: action.arg || null };
+  return { text: action.arg || null, row: null };
 }
 
 // The action declared a cost: cost= or cost-<lang>=.

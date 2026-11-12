@@ -118,8 +118,8 @@ export function parseSubscription(entry) {
 // plugin name in Settings → Notifications), "security" — a security exception that cannot be turned off.
 // Legacy contract 1 kinds ("runs", "night") are accepted as "plugin" (the linter warns) and remembered in
 // legacyKind: a legacy kind the user turned off also silences the plugin's own toggle (lib/push/prefs.mjs). The same
-// migration for a rule with a new kind — the was="runs|night" attribute. macOnly="true|false" is still parsed (older plugins
-// declare it) but has no effect: macOS banners are the hub's only channel (lib/push/rules.mjs ignores the field).
+// migration for a rule with a new kind — the was="runs|night" attribute. macOnly="true" — the event goes to the Mac banner
+// only, never to the extra channels (webhook, ntfy, channels of services; lib/push/channels.mjs).
 // → { key, label, hold?, quietException?, macOnly?, cooldownMs?, awayDelayMs?, kind?, legacyKind? } | error text
 export const PUSH_KINDS = ["sessions", "updates", "problems", "other", "security", "plugin"];
 export const LEGACY_PUSH_KINDS = ["runs", "night"];
@@ -182,7 +182,7 @@ export function parseIcon(attrs) {
 // id always shows whose it is: plugin foo cannot declare a connection of plugin foo-bar. The same name is used for the entry in
 // the keychain (agent-hub.oauth / <id>.client|token, lib/services/secrets.mjs — the same rule). type — mcp only, url — https on a host name (not an IP address), its host must be in the plugin's <agenthub.net>
 // (checked by the linter and the core), hosts — additional authorization server hosts (also from net), scope — what to request at
-// sign-in, tools — an allowlist of MCP tools (1–32), interval — no more than one identical call per that period (the core
+// sign-in, tools — an allowlist of MCP tools (1–32), writes — the tools of that list that write (never served from the cache), interval — no more than one identical call per that period (the core
 // enforces limits of 5 min … 24 h), budget — calls per rolling 24 hours (1…10000). Taken only from trusted
 // plugins (builtin, official, own; the registry linter does not admit it for third-party ones); in the consent window — as a permission of kind
 // connections. → { … } | error text
@@ -222,6 +222,10 @@ export function parseConnection(attrs, note) {
   if (scope !== null && !/^[\w:./-]+(?: [\w:./-]+){0,15}$/.test(scope)) return msg("meta.conn.scope", { id: id || "?" });
   const tools = String(attrs.tools || "").split(",").map((x) => x.trim()).filter(Boolean);
   if (!tools.length || tools.length > 32 || tools.some((x) => !/^[A-Za-z0-9_.-]{1,64}$/.test(x))) return msg("meta.conn.tools", { id: id || "?" });
+  // writes — the tools of the allowlist that change something on the service: never served from the interval cache, as if
+  // every call carried fresh: true (re-review 76)
+  const writes = [...new Set(String(attrs.writes || "").split(",").map((x) => x.trim()).filter(Boolean))];
+  if (writes.some((x) => !tools.includes(x))) return msg("meta.conn.writes", { id: id || "?" });
   let intervalMs = 15 * 60_000;
   if (attrs.interval !== undefined) {
     intervalMs = parseInterval(attrs.interval);
@@ -234,7 +238,7 @@ export function parseConnection(attrs, note) {
   }
   const title = attrs.title === undefined ? null : String(attrs.title).trim();
   if (title !== null && (!title || title.length > 64 || /[\p{Cc}\p{Cf}]/u.test(title))) return msg("meta.conn.title", { id: id || "?" });
-  return { id, type, url: url.href, host: url.hostname, hosts, scope, tools: [...new Set(tools)], intervalMs, budget, title, note: note ? note.slice(0, 300) : null };
+  return { id, type, url: url.href, host: url.hostname, hosts, scope, tools: [...new Set(tools)], ...(writes.length ? { writes } : {}), intervalMs, budget, title, note: note ? note.slice(0, 300) : null };
 }
 
 // type="http" (G7, contract 3 additive): OAuth 2.1 with a PRE-REGISTERED PUBLIC client (no secret, no dynamic registration) and
@@ -395,7 +399,8 @@ export function parseMetaText(text) {
     i18n: {},
   };
   const loc = (lang) => (meta.i18n[lang] ||= {});
-  const re = /<agenthub\.([A-Za-z][\w.]*)((?:\s+[^>]*)?)>([\s\S]*?)<\/agenthub\.\1>/g;
+  // attributes: a quoted value may hold ">" (arg="text:^[^<>]{1,500}$", re-review 72); outside quotes ">" ends the tag
+  const re = /<agenthub\.([A-Za-z][\w.]*)((?:\s+(?:"[^"]*"|'[^']*'|[^>"'])*)?)>([\s\S]*?)<\/agenthub\.\1>/g;
   let m;
   while ((m = re.exec(text))) {
     const tag = m[1];
@@ -464,9 +469,23 @@ export function parseMetaText(text) {
       }
       // Human input (G1): input="placeholder" — the app shows a text field, the typed value is checked against arg's pattern
       // and goes to the action process on stdin (never argv). Requires arg=; maxLength= 1…INPUT_MAX (default INPUT_DEFAULT_MAX).
+      // inputPattern="^…$" (re-review 65, contract 3 additive): the typed text is checked against it instead, and arg= (optional
+      // then) is an ordinary row argument — the frame's arg= binds the button to its row, the value goes to argv as usual.
       let input = null;
+      let inputPattern = null;
+      if (attrs.inputPattern !== undefined) {
+        inputPattern = parseActionArg(`input:${attrs.inputPattern}`)?.pattern ?? null;
+        if (!inputPattern) {
+          warnings.push(msg("meta.action.inputPattern", { id }));
+          continue;
+        }
+        if (attrs.input === undefined) {
+          warnings.push(msg("meta.action.inputPatternNoInput", { id }));
+          inputPattern = null;
+        }
+      }
       if (attrs.input !== undefined) {
-        if (!arg) {
+        if (!arg && !inputPattern) {
           warnings.push(msg("meta.action.inputArg", { id }));
           continue;
         }
@@ -478,7 +497,7 @@ export function parseMetaText(text) {
             continue;
           }
         }
-        input = { placeholder: String(attrs.input).replace(/[\p{Cc}\p{Cf}]/gu, " ").trim().slice(0, 80), maxLength };
+        input = { placeholder: String(attrs.input).replace(/[\p{Cc}\p{Cf}]/gu, " ").trim().slice(0, 80), maxLength, ...(inputPattern ? { pattern: inputPattern } : {}) };
       } else if (attrs.maxLength !== undefined) warnings.push(msg("meta.action.maxLengthNoInput", { id }));
       // net="none" (G2): this action does not use the network the plugin declares — the core lifts the confirm-cost floor
       // that <agenthub.net> puts on every action. A promise checked by the registry reviewer, not a sandbox. Other values — ignored.

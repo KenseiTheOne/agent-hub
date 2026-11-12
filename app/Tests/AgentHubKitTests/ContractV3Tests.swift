@@ -4,7 +4,7 @@ import Testing
 
 // Plugin contract 3 (2026-11-10) in the shell: a loud consent window line for writes to Claude Code and system
 // interception points (`risk` on a permission from the daemon) and tooltips with the full text for every truncated plugin text.
-@Suite(.serialized) struct ContractV3Tests {
+@Suite(.serialized, .hubLang(.ru)) struct ContractV3Tests {
     @Test func permissionRiskDecodesAndExplains() throws {
         let list = try JSONDecoder().decode([PluginPermission].self, from: Data(##"""
         [{"kind":"fsRead","what":"~/x","why":"r"},

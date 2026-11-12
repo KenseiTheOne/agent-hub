@@ -119,9 +119,13 @@ struct SegmentTrack: View {
         guard let offer = item.offer, chosenState.wrappedValue == nil else { return }
         chosenState.wrappedValue = item.title
         Task {
-            await store.perform(offer: offer, label: item.title)
+            // declined in the confirmation window («No»), refused or failed: the real selection comes back at once
+            guard await store.perform(offer: offer, label: item.title) else {
+                if chosenState.wrappedValue == item.title { chosenState.wrappedValue = nil }
+                return
+            }
             // the page with the new selection normally arrives within ~0.1 s and clears the choice (onChange above);
-            // if the action failed or the plugin kept the old option, the real selection shows again after a moment
+            // if the plugin kept the old option, the real selection shows again after a moment
             try? await Task.sleep(for: .seconds(1.5))
             if chosenState.wrappedValue == item.title { chosenState.wrappedValue = nil }
         }
@@ -473,7 +477,7 @@ struct TableRowView: View {
             // the row's color, else its mark's color (a legend square), else the plugin's
             ThinBar(percent: percent, color: swiftBarColor(row.item.color ?? row.item.iconColor) ?? accent, height: 5)
             if !text.isEmpty {
-                Text(text).font(.system(size: 12.5)).lineLimit(1).fixedSize()
+                Text(text).font(.system(size: 12.5, design: row.item.isMono ? .monospaced : .default)).lineLimit(1).fixedSize()
                     .foregroundStyle(.white.opacity(inGroup ? 0.62 : 0.72))
             }
         }
@@ -510,9 +514,11 @@ struct TableRowView: View {
                 // a row with its own offer: the title is a link
                 OfferLink(store: store, item: it, offer: offer, depth: 1)
             } else {
-                Text(it.title).lineLimit(1)
+                // `font=mono` (re-review 74): the row title and its cells
+                let font = Font.system(size: 13, design: it.isMono ? .monospaced : .default)
+                Text(it.title).font(font).lineLimit(1)
                     .foregroundStyle(swiftBarColor(it.color) ?? .white.opacity(inGroup ? 0.78 : 1))
-                    .reportsTruncation(it.title, font: .system(size: 13))
+                    .reportsTruncation(it.title, font: font)
                 if let s = it.session { SessionTag(session: s) }
                 if let badge = it.badge { BadgeView(text: badge, color: it.badgeColor) }
             }
@@ -523,7 +529,7 @@ struct TableRowView: View {
 
     private func cell(_ text: String, color: String?) -> some View {
         let c = swiftBarColor(color)
-        let font = Font.system(size: 13, weight: c == nil ? .regular : .semibold)
+        let font = Font.system(size: 13, weight: c == nil ? .regular : .semibold, design: row.item.isMono ? .monospaced : .default)
         return Text(text).font(font).lineLimit(1)
             .foregroundStyle(c ?? .white.opacity(inGroup ? 0.62 : 0.72))
             .reportsTruncation(text, font: font)
@@ -538,7 +544,7 @@ struct TableRowView: View {
                         style: CapsuleStyle(fill: .white.opacity(0.1), stroke: .white.opacity(0.18), height: 24, expand: false), inlineInput: false)
                 .fixedSize()
         } else {
-            Text(it.title).font(.system(size: 11.5)).lineLimit(1)
+            Text(it.title).font(.system(size: 11.5, design: it.isMono ? .monospaced : .default)).lineLimit(1)
                 .foregroundStyle(swiftBarColor(it.color) ?? .white.opacity(0.48))
                 .hoverHelp(PluginText.rowHelp(it), always: it.tooltip != nil)
         }

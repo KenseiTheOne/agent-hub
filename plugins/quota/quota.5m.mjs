@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 // Claude subscription quota: the week, the 5-hour window, the pace and a forecast to the reset.
 //
-// <agenthub.title>Квота</agenthub.title>
-// <agenthub.title lang="en">Quota</agenthub.title>
-// <agenthub.version>0.5.0</agenthub.version>
+// <agenthub.title>Claude Code Квота</agenthub.title>
+// <agenthub.title lang="en">Claude Code Quota</agenthub.title>
+// <agenthub.version>0.5.1</agenthub.version>
 // <agenthub.author.name>Kensei</agenthub.author.name>
 // <agenthub.author.github>KenseiTheOne</agenthub.author.github>
 // <agenthub.desc>Сколько осталось квоты Claude: неделя, 5-часовое окно и темп к сбросу</agenthub.desc>
@@ -64,6 +64,8 @@ const pad2 = (n) => String(n).padStart(2, "0");
 export function envLang() {
   return process.env.AGENTHUB_LANG === "en" ? "en" : "ru";
 }
+// The popover tile caption: "Claude Code Quota" does not fit the tile (~110 pt, one line)
+const TILE_LABEL = () => (envLang() === "en" ? "Quota" : "Квота");
 const WD = { ru: ["вс", "пн", "вт", "ср", "чт", "пт", "сб"], en: ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"] };
 const MON = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 export function fmtWhen(ms, nowMs, lang = "ru") {
@@ -252,7 +254,7 @@ export function render(u, nowMs, lang = envLang()) {
   const out = [];
   if (!u.ok) {
     const head = u.off ? L.headOff : L.headBroken;
-    out.push(`${head} | status=unknown tile="—" sfimage=gauge.with.dots.needle.0percent`);
+    out.push(`${head} | status=unknown tile="—" tileLabel="${TILE_LABEL()}" sfimage=gauge.with.dots.needle.0percent`);
     out.push("---");
     if (u.off) out.push(`${clean(L.offHint, 160)} | sfimage=info.circle color=gray`);
     else out.push(`${clean(L.problem[u.problem] || L.problem.unparsed, 140)} | status=unknown event=source-broken`);
@@ -300,7 +302,7 @@ export function render(u, nowMs, lang = envLang()) {
   // gauge= in the header is the ring on the plugin page (the week's share), gaugeLabel is the caption under the number
   const ring = week ? ` gauge=${Math.round(Math.min(100, week.percent))} gaugeLabel="${L.gaugeLabel}"` : "";
   // token-lost — as an event on the header itself: the reason is already in its text, no separate repeating row
-  out.push(`${clean(head, 200)} | status=${status} tile="${tile}"${ring}${tokenLost ? " event=token-lost" : ""} sfimage=gauge.with.dots.needle.67percent`);
+  out.push(`${clean(head, 200)} | status=${status} tile="${tile}" tileLabel="${TILE_LABEL()}"${ring}${tokenLost ? " event=token-lost" : ""} sfimage=gauge.with.dots.needle.67percent`);
   out.push("---");
   for (const e of events) out.push(`${clean(e.text, 140)} | status=wait event=${e.key} sfimage=exclamationmark.triangle`);
   // the 5-hour window first (its own "passed"), then the weekly cards; "… of the week passed" as one row below them

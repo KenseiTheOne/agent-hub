@@ -12,7 +12,7 @@ private func verdict(_ json: String) throws -> IdleVerdict {
 // the new daemon's order (2026-11-09): work, the computer is needed, then the "waiting for an answer" info as the last line
 private let busyJSON = #"{"verdict":"busy","items":[{"source":"sessions","kind":"busy","text":"2 сессии работают: demo-d9, alpha-05","target":"sessions"},{"source":"plugin:agents","kind":"busy","text":"Прогон «m81-gold» идёт, 12 мин","target":"plugin:agents"},{"source":"plugin:my-runner","kind":"busy","text":"Идёт исследование рынка (вручную) с 13:30 до ≈15:30","target":"plugin:my-runner"},{"source":"plugins","kind":"busy","text":"Обновляется плагин: Прогоны 0.5.1","target":"manager"},{"source":"plugin:hermes","kind":"busy","text":"Hermes: 1 задача в работе","target":"plugin:hermes"},{"source":"plugin:x","kind":"needs-on","text":"Прогон в 04:30 — нужен включённый Mac"},{"source":"sessions","kind":"waiting","text":"1 сессия ждёт ответа: alpha-1d — ответить можно и после включения","target":"sessions"}],"checked":["обновления"],"since":"2026-11-07T10:00:00.000Z"}"#
 
-@Suite struct IdleTests {
+@Suite(.hubLang(.ru)) struct IdleTests {
     @Test func decodesStateAndEvent() throws {
         let v = try verdict(busyJSON)
         #expect(v.verdict == .busy && v.items.count == 7 && v.items[0].kind == .busy && v.items[5].kind == .needsOn && v.items[5].target == nil)

@@ -179,7 +179,7 @@ runs.
   `hold`, `cooldown` and other kinds are ignored (a linter warning).
   **`net="none"`, `background="true"`, `input=` (hub 0.1.3+)** — each is a warning for the reviewer: `net="none"` lifts
   the network floor for one action, so **the reviewer checks the command reaches no host** (itself or through programs
-  it starts); `background="true"` runs without a timeout, so **the reviewer checks the job ends by itself and on SIGTERM
+  it starts; the hub's own connection proxy is refused to such an action with `403 net:none`); `background="true"` runs without a timeout, so **the reviewer checks the job ends by itself and on SIGTERM
   and spends no more than its title says**; `input=` hands the human's text to the command on stdin, so **the reviewer
   checks it is treated as data** — no `eval`, no shell, no splicing into commands or URLs without encoding. `net=none`,
   `background` and `input` are part of the action's permission key (adding one in an update asks for consent again).
@@ -439,7 +439,7 @@ writes `contract` as an object**
 
 Hubs from 0.1.3 on read the object: `version` is compared as before, and every `features` entry must be one this hub
 implements (`CONTRACT_FEATURES` in `daemon/lib/registry/perms.mjs`: `background`, `community-actions`,
-`http-connection`, `input`, `net-none`, `subscribe`, `watch-recursive`); an unknown feature is "Requires a newer hub"
+`http-connection`, `input`, `input-pattern`, `net-none`, `subscribe`, `watch-recursive`); an unknown feature is "Requires a newer hub"
 (`needsHub: {need: null, have: 3, features: [the unknown ones]}`). So every future optional addition gets a feature name
 instead of a contract bump, and older hubs refuse such entries with a clear text. Entries that use none of them keep the
 plain integer (or no field) and install on 0.1.2 as before.

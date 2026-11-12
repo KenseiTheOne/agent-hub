@@ -48,7 +48,7 @@ Session details show "Model: …" and "Effort: … (from the last turn | from th
 of difference counts as the same second) or against cmux's `pidStartSeconds`. A mismatch means the pid was reused.
 
 **Died mid-turn** (`status=wait`, `event=died:<sessionId>`, 30 min; the plugin declares the push rule itself —
-`<agenthub.push key="died" kind="plugin" was="runs">`, since 0.4.0, contract 2: its own "Sessions" toggle in
+`<agenthub.push key="died" kind="plugin" was="runs">`, since 0.4.0, contract 2: its own "Claude Code Sessions" toggle in
 "Settings → Notifications"; "Agent runs" that were turned off before 2026-11-09 carry over to it; "waiting for an
 answer" `waiting:` uses the core's shared "Sessions waiting for an answer" kind): the session was `busy` and
 disappeared with a dead pid; a `busy` session file with a fresh `statusUpdatedAt` and a dead pid; a cmux `running`

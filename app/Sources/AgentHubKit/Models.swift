@@ -1044,6 +1044,34 @@ public struct NotificationsInfo: Codable, Sendable, Hashable {
         enum CodingKeys: String, CodingKey { case key, plugin, pluginTitle, label }
     }
 
+    /// A delivery channel (re-review 70): `mac` (the banner, always) plus channels from `services.push.channels` in
+    /// config.json (webhook, ntfy) and the ones services register. Names and kinds only: the daemon never sends a URL.
+    public struct Channel: Codable, Sendable, Hashable, Identifiable {
+        public var id: String
+        /// mac | webhook | ntfy | service
+        public var type: String
+        public var label: String
+        /// Also gets security exceptions.
+        public var security: Bool
+        /// Only these kinds or `<plugin>:<key>` patterns; nil — everything.
+        public var events: [String]?
+
+        public init(id: String, type: String, label: String = "", security: Bool = false, events: [String]? = nil) {
+            self.id = id; self.type = type; self.label = label; self.security = security; self.events = events
+        }
+
+        public init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            id = (try? c.decode(String.self, forKey: .id)) ?? ""
+            type = (try? c.decode(String.self, forKey: .type)) ?? ""
+            label = (try? c.decode(String.self, forKey: .label)) ?? ""
+            security = (try? c.decode(Bool.self, forKey: .security)) ?? false
+            events = try? c.decodeIfPresent([String].self, forKey: .events)
+        }
+
+        enum CodingKeys: String, CodingKey { case id, type, label, security, events }
+    }
+
     public var enabled: Bool
     public var kinds: [String: Bool]
     /// Own toggles of installed plugins (empty for an older daemon).
@@ -1055,10 +1083,15 @@ public struct NotificationsInfo: Codable, Sendable, Hashable {
     /// Idle threshold after which the person counts as away from the Mac (`services.push.idleThresholdMs`): quiet hours then
     /// hold banners for the digest, a waiting session's banner waits for them; an older daemon gives nil.
     public var awayAfterMs: Int?
+    /// Where notifications go (`mac` first); empty for an older daemon or with the push service off.
+    public var channels: [Channel]
 
-    public init(enabled: Bool = true, kinds: [String: Bool] = [:], plugins: [PluginToggle] = [], quiet: Quiet = Quiet(), security: [SecurityItem] = [], service: Bool = true, awayAfterMs: Int? = nil) {
-        self.enabled = enabled; self.kinds = kinds; self.plugins = plugins; self.quiet = quiet; self.security = security; self.service = service; self.awayAfterMs = awayAfterMs
+    public init(enabled: Bool = true, kinds: [String: Bool] = [:], plugins: [PluginToggle] = [], quiet: Quiet = Quiet(), security: [SecurityItem] = [], service: Bool = true, awayAfterMs: Int? = nil, channels: [Channel] = []) {
+        self.enabled = enabled; self.kinds = kinds; self.plugins = plugins; self.quiet = quiet; self.security = security; self.service = service; self.awayAfterMs = awayAfterMs; self.channels = channels
     }
+
+    /// Channels that take notifications off this Mac (everything but the banner).
+    public var externalChannels: [Channel] { channels.filter { $0.type != "mac" && !$0.id.isEmpty } }
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -1072,6 +1105,10 @@ public struct NotificationsInfo: Codable, Sendable, Hashable {
         security = ((try? c.decode([SecurityItem].self, forKey: .security)) ?? []).filter { !$0.key.isEmpty }
         service = (try? c.decode(Bool.self, forKey: .service)) ?? true
         awayAfterMs = try? c.decodeIfPresent(Int.self, forKey: .awayAfterMs)
+        // a broken row does not break the rest
+        channels = ((try? c.decode([JSONValue].self, forKey: .channels)) ?? []).compactMap { v in
+            (try? JSONEncoder().encode(v)).flatMap { try? JSONDecoder().decode(Channel.self, from: $0) }
+        }.filter { !$0.id.isEmpty }
     }
 
     /// Whether a kind is on (missing from the response means on, as in the daemon's default).
@@ -1079,7 +1116,7 @@ public struct NotificationsInfo: Codable, Sendable, Hashable {
     /// Whether a plugin's own toggle is on (no row means on).
     public func pluginOn(_ id: String) -> Bool { plugins.first { $0.id == id }?.on ?? true }
 
-    enum CodingKeys: String, CodingKey { case enabled, kinds, plugins, quiet, security, service, awayAfterMs }
+    enum CodingKeys: String, CodingKey { case enabled, kinds, plugins, quiet, security, service, awayAfterMs, channels }
 }
 
 /// `idle` in `/state` and the `idle.verdict` event: whether the computer can be shut down, one daemon answer for the popover and the icon

@@ -5,8 +5,9 @@
 // plugins (the core effects ceiling — open.*, terminal.focus, cmux.focus, session.focus).
 //
 // Non-Claude agent sessions (G13, kind "external", registered by a trusted plugin's agentSession= line) are taken too: the
-// terminal layer finds their tab by the pid (tmux, iTerm2, Terminal.app; cmux knows only its Claude Code tabs — use
-// terminal.focus <surfaceId> there). The id is then any [A-Za-z0-9][A-Za-z0-9._-]{0,63}; a Claude session id is a UUID.
+// terminal layer finds their tab by the pid (tmux, iTerm2, Terminal.app; cmux knows only its Claude Code tabs, so such a
+// session there has no tab — no-terminal — and terminal.focus does not know its surface either). The id is then any
+// [A-Za-z0-9][A-Za-z0-9._-]{0,63}; a Claude session id is a UUID.
 //
 // Refusals (facts:<code>, 409): unknown-session — the session is not in the registry; no-terminal — no adapter knows its tab;
 // pid-mismatch — the terminal tab belongs to another process; focus-unsupported — the adapter cannot switch; the adapter's

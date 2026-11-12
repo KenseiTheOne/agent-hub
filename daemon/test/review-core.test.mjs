@@ -455,3 +455,14 @@ test("agenthub lang without the daemon — \"daemon unreachable\" and code 2, no
     cleanup(home);
   }
 });
+
+// Re-review 69: the *.key source pattern matches file paths, not SF Symbol names or other dotted identifiers.
+test("linter *.key: SF Symbol names and dotted identifiers pass; file paths are still caught", () => {
+  for (const t of ['echo "Keys | sfimage=person.badge.key"', "console.log(`Keys | sfimage=person.badge.key`)", 'const s = "lock.rectangle.key"'])
+    assert.deepEqual(sourceViolations(t), [], t);
+  for (const t of ['read("~/.ssh/id.key")', 'read("/etc/ssl/private/server.key")', 'const f = "server.key"', 'const f = ".key"', 'glob("*.key")', "cat 'C:\\\\certs\\\\a.b.key'", 'run("openssl x509 -in tls.key")', "const p = `${HOME}/certs/my.server.key`", 'const a = "--key=x.key"'])
+    assert.deepEqual(sourceViolations(t), ["*.key"], t);
+  const meta = { title: "t", version: "1.0.0", author: { github: "x" }, platforms: ["macos"], effects: [], actions: [] };
+  const lint = lintPlugin({ id: "x", meta, source: 'echo "Keys | sfimage=person.badge.key"\n' });
+  assert.ok(!lint.errors.some((e) => e.includes("*.key")), lint.errors.join("; "));
+});

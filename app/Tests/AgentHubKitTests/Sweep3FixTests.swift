@@ -13,7 +13,7 @@ private func info(_ json: String) throws -> HubUpdateInfo {
 private let base = #""installed":true,"running":"0.2.0","label":"0.2.0","current":{"label":"0.2.0","version":"0.2.0","tag":"v0.2.0"},"previous":{"label":"0.1.0"},"enabled":true,"setting":true,"config":true,"configured":true"#
 private func either(_ s: String?, _ ru: String, _ en: String) -> Bool { s == ru || s == en }
 
-@Suite struct Sweep3FixTests {
+@Suite(.hubLang(.ru)) struct Sweep3FixTests {
     @Test func failedRollbackStaysVisibleWhenNewerIsAvailable() throws {
         let now = ISO8601DateFormatter().string(from: Date())
         // hub on 0.2.0, 0.3.0 available, rollback to 0.1.0 failed: the rollback label is the old version

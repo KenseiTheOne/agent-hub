@@ -3,7 +3,7 @@ import Testing
 @testable import AgentHubKit
 
 // "Settings → Notifications" (2026-11-09): model from /state, editing via the daemon, the settings.changed event, ru/en texts.
-@Suite(.serialized) struct NotificationsTests {
+@Suite(.serialized, .hubLang(.ru)) struct NotificationsTests {
     @Test func stateDecodesNotifications() throws {
         // an older daemon still sends the removed channel flag ("telegram") — ignored
         let json = #"""

@@ -156,15 +156,15 @@ echo "Tail | action=tail arg=ABC-2"
     const ru = await h.core.invoke({ id: skip.id, peer: APP });
     assert.equal(ru.status, 428);
     // G10: the row carrying the button ends the text
-    assert.equal(ru.body.text, "«Прогоны» (встроенный плагин) просит: «Пропустить задачу» для ABC-1. Выполнится: act.5m.sh --action skip ABC-1 Кнопка в строке «Skip».");
+    assert.equal(ru.body.text, "«Прогоны» (встроенный плагин) просит: «Пропустить задачу» для ABC-1. Выполнится: act.5m.sh --action skip ABC-1. Кнопка в строке «Skip».");
     const ruTail = await h.core.invoke({ id: tail.id, peer: APP });
-    assert.match(ruTail.body.text, /просит выполнить: act\.5m\.sh --action tail ABC-2 Кнопка в строке «Tail»\.$/);
+    assert.match(ruTail.body.text, /просит выполнить: act\.5m\.sh --action tail ABC-2\. Кнопка в строке «Tail»\.$/);
     h.core.setLang("en", APP);
     await waitFor(() => h.core.pluginState("act")?.title === "Runs" && offers().length === 2);
     const skipEn = offers()[0];
     const en = await h.core.invoke({ id: skipEn.id, peer: APP });
     assert.equal(en.status, 428);
-    assert.equal(en.body.text, '"Runs" (built-in plugin) asks to: "Skip task" for ABC-1. Will run: act.5m.sh --action skip ABC-1 Button on the row "Skip".');
+    assert.equal(en.body.text, '"Runs" (built-in plugin) asks to: "Skip task" for ABC-1. Will run: act.5m.sh --action skip ABC-1. Button on the row "Skip".');
     assert.equal(en.body.row, "Skip");
     const done = await h.core.invoke({ id: skipEn.id, confirmToken: en.body.token, peer: APP });
     assert.equal(done.status, 200, JSON.stringify(done.body));

@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 // Claude Code sessions: who's working, who's waiting (for permission, a reply, a dialog), who died mid-turn.
 //
-// <agenthub.title>Сессии</agenthub.title>
-// <agenthub.title lang="en">Sessions</agenthub.title>
-// <agenthub.version>0.5.0</agenthub.version>
+// <agenthub.title>Claude Code Сессии</agenthub.title>
+// <agenthub.title lang="en">Claude Code Sessions</agenthub.title>
+// <agenthub.version>0.5.1</agenthub.version>
 // <agenthub.author.name>Kensei</agenthub.author.name>
 // <agenthub.author.github>KenseiTheOne</agenthub.author.github>
 // <agenthub.desc>Сессии Claude Code по вкладкам cmux: кто работает, кто ждёт вас, кто оборвался</agenthub.desc>
@@ -722,6 +722,8 @@ export function merge({ agents, hints, cmux, alive, mem, nowMs }) {
 export function envLang() {
   return process.env.AGENTHUB_LANG === "en" ? "en" : "ru";
 }
+// The popover tile caption: "Claude Code Sessions" does not fit the tile (~110 pt, one line)
+const TILE_LABEL = () => (envLang() === "en" ? "Sessions" : "Сессии");
 
 const pl = {
   ru: (n, one, few, many) => {
@@ -960,7 +962,7 @@ export function render({ sessions, died, problems, agentsOk, hintsCount = 0, bin
   else [head, tile] = [L.headNone, "0"];
   // The header itself names the corruption reason — the event is on it, and the body has only details the header lacks.
   const headBroken = broken && head === brokenText;
-  const out = [`${head} | status=${status} tile=${q(tile)}${headBroken ? " event=source-broken" : ""} sfimage=${waiting ? "bubble.left.and.exclamationmark.bubble.right" : "terminal"}`, "---"];
+  const out = [`${head} | status=${status} tile=${q(tile)} tileLabel=${q(TILE_LABEL())}${headBroken ? " event=source-broken" : ""} sfimage=${waiting ? "bubble.left.and.exclamationmark.bubble.right" : "terminal"}`, "---"];
   if (broken) {
     // "claude not found" in the details isn't a repeat of the header but where we looked and what to do; other codes — as is
     const rest = problems;

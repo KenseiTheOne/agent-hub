@@ -14,7 +14,7 @@ private func either(_ s: String?, _ ru: String, _ en: String) -> Bool { s == ru 
 private func has(_ s: String?, _ ru: String, _ en: String) -> Bool { (s ?? "").contains(ru) || (s ?? "").contains(en) }
 private let now = ISO8601DateFormatter().string(from: Date())
 
-@Suite struct Round2FixTests {
+@Suite(.hubLang(.ru)) struct Round2FixTests {
     @Test func releaseNotesDropTheVersion() throws {
         typealias N = HubUpdateInfo.Notes
         // subject per §9 ("Agent Hub 0.3.0") — no notes

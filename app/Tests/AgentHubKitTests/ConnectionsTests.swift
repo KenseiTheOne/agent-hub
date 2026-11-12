@@ -4,7 +4,7 @@ import Testing
 
 // OAuth connections (2026-11-09, the daemon's oauth service): the model from /state, the connections.changed event,
 // "Connect" and "Disconnect" via the daemon, ru/en texts. The daemon is the FakeDaemon double (ReviewFixTests.swift).
-@Suite(.serialized) struct ConnectionsTests {
+@Suite(.serialized, .hubLang(.ru)) struct ConnectionsTests {
     static let connected = #"{"id":"tix","title":"Tix","plugin":"tix","host":"mcp.example.com","state":"connected","since":"2026-11-09T09:00:00.000Z","error":null,"scope":"read","expiresAt":null,"refresh":false,"login":null,"intervalMs":900000,"dailyBudget":100,"calls24h":12,"lastOkAt":"2026-11-09T09:30:00.000Z","nextAt":"2026-11-09T09:45:00.000Z","why":null,"keychain":true,"future":1}"#
 
     @Test func stateDecodesConnections() throws {
@@ -176,7 +176,7 @@ import Testing
 }
 
 // Contract 2: the plugin declares the connection; the title, note and allowlist come from the daemon.
-@Suite(.serialized) struct DeclaredConnectionTests {
+@Suite(.serialized, .hubLang(.ru)) struct DeclaredConnectionTests {
     @Test func decodesDeclarationFields() throws {
         let c = try JSONDecoder().decode(ConnectionInfo.self, from: Data(#"{"id":"tix","title":"Tix","note":"тикеты, назначенные вам","plugin":"tix","host":"mcp.example.com","tools":["get_user","filter_tasks"],"state":"disconnected"}"#.utf8))
         #expect(c.note == "тикеты, назначенные вам" && c.tools == ["get_user", "filter_tasks"])

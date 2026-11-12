@@ -26,7 +26,7 @@ private func body(_ r: FakeDaemon.Request) -> [String: JSONValue] {
     (try? JSONDecoder().decode([String: JSONValue].self, from: Data(r.body.utf8))) ?? [:]
 }
 
-@Suite(.serialized) struct CoreGapsAppTests {
+@Suite(.serialized, .hubLang(.ru)) struct CoreGapsAppTests {
     // MARK: G1 — offers with input, the 428 field
 
     @Test func offerDecodesInputAndBackground() throws {
@@ -300,7 +300,7 @@ private func body(_ r: FakeDaemon.Request) -> [String: JSONValue] {
 
 // MARK: - non-Claude agent sessions, the subscribe permission
 
-@Suite(.serialized) struct ExternalSessionsAppTests {
+@Suite(.serialized, .hubLang(.ru)) struct ExternalSessionsAppTests {
     static let state = #"{"seq":1,"primitives":[{"name":"session.focus","level":"immediate"}],"sessions":[],"externalSessions":[{"sessionId":"cx-1","pid":48213,"startSec":1792600000,"kind":"external","agent":"codex","name":"Refactor auth","owner":"agents","updatedAt":0,"terminal":"iterm2","focusable":true,"terminalInfo":{"adapter":"iterm2","label":"iTerm2","capabilities":["focus","launch"],"focusable":true,"via":null}},{"sessionId":"cx-2","agent":null,"name":null,"owner":"agents","focusable":false},{"pid":1}]}"#
 
     @MainActor @Test func externalSessionsDecodeFocusAndFollowEvent() throws {
@@ -327,7 +327,7 @@ private func body(_ r: FakeDaemon.Request) -> [String: JSONValue] {
 
 // MARK: - hub extensions (G4), terminal adapter texts
 
-@Suite(.serialized) struct ExtensionsAppTests {
+@Suite(.serialized, .hubLang(.ru)) struct ExtensionsAppTests {
     static let info = #"{"dir":"~/Library/Application Support/AgentHub/Extensions","enabled":true,"testAutoApprove":false,"consent":"An extension is code that runs inside the daemon.","pending":1,"items":[{"path":"services/my-sync.mjs","file":"/x/Extensions/services/my-sync.mjs","kind":"service","name":"my-sync","sha256":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","size":812,"mtime":"2026-11-12T10:00:00.000Z","status":"pending","loaded":false,"restartRequired":false,"approvedSha256":null,"autoApproved":false,"error":null,"errorText":null},{"path":"routes/r.mjs","kind":"route","status":"approved","loaded":true,"restartRequired":true},{"kind":"route"}]}"#
 
     @MainActor @Test func extensionsDecodeApproveAndFollowEvents() async throws {
@@ -384,7 +384,7 @@ private func body(_ r: FakeDaemon.Request) -> [String: JSONValue] {
 
 // MARK: - several registries (G19), http connections (G7)
 
-@Suite(.serialized) struct RegistriesAppTests {
+@Suite(.serialized, .hubLang(.ru)) struct RegistriesAppTests {
     @Test func singleRegistryLooksAsBefore() throws {
         let c = try JSONDecoder().decode(RegistryCatalog.self, from: Data(#"{"configured":true,"generatedAt":"2026-11-12T10:00:00Z","plugins":[{"id":"a","version":"1.0.0","tier":"official","registry":"default","registryLabel":null,"tierLabel":"official plugin"}],"registries":[{"name":"default","trust":"official","configured":true,"generatedAt":"2026-11-12T10:00:00Z","plugins":1}]}"#.utf8))
         #expect(!c.multiRegistry && c.plugins[0].registryLabel == nil && c.plugins[0].registry == "default")

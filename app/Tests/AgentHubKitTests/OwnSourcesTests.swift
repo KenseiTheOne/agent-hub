@@ -23,7 +23,7 @@ final class ConsentRecorder: ConfirmPresenter {
     func consent(_ request: ConsentRequest) async -> Bool { consents.append(request); return agree }
 }
 
-@Suite(.serialized) struct OwnSourcesTests {
+@Suite(.serialized, .hubLang(.ru)) struct OwnSourcesTests {
     static let installed = #"""
     {"installed":[{"id":"my-runner","title":"Прогоны","version":"0.6.0","tier":"own","official":false,"source":"installed","updateAvailable":true,
       "permissions":[],"own":{"path":"/Users/k/src/my-runner/agenthub/my-runner","pathShort":"~/src/my-runner/agenthub/my-runner",

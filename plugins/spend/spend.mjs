@@ -2,9 +2,9 @@
 // Claude Code token spend journal: when and how many tokens were spent, by day, model and token type, and what that
 // would cost at API list prices.
 //
-// <agenthub.title>Расход</agenthub.title>
-// <agenthub.title lang="en">Spend</agenthub.title>
-// <agenthub.version>0.2.0</agenthub.version>
+// <agenthub.title>Claude Code Расход</agenthub.title>
+// <agenthub.title lang="en">Claude Code Spend</agenthub.title>
+// <agenthub.version>0.2.1</agenthub.version>
 // <agenthub.author.name>Kensei</agenthub.author.name>
 // <agenthub.author.github>KenseiTheOne</agenthub.author.github>
 // <agenthub.desc>Журнал расхода токенов Claude Code: сколько и когда потрачено, стоимость по ценам API за день, неделю и месяц</agenthub.desc>

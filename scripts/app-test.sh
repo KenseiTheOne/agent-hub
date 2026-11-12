@@ -4,6 +4,6 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 PLUGINS="$(dirname "$(xcrun --find swift)")/../lib/swift/host/plugins/testing"
-# No parallelism: the app language (L10n.shared.lang) is process-wide and suites switch it; parallel runs were
-# flaky (a Russian string came back in English). Sequential takes ~10 s instead of ~7.
-exec swift test --package-path "$ROOT/app" -Xswiftc -plugin-path -Xswiftc "$PLUGINS" --no-parallel "$@"
+# Parallel is safe: every test case has its own language (the .hubLang trait, a task-local L10n.$scope —
+# app/README.md "Test language"), so suites no longer switch a process-wide language under each other.
+exec swift test --package-path "$ROOT/app" -Xswiftc -plugin-path -Xswiftc "$PLUGINS" "$@"

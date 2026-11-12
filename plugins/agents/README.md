@@ -31,7 +31,7 @@ result, no session, quiet > 5 min; `wf-failed-<runId>` — result `killed`/`fail
 `wait` status label is shared: "Run needs attention"); `source-broken` — a broken `wf_*.json` (details are in the hub
 language: "not JSON", "no status").
 The plugin declares the push rules for `wf-failed` and `wf-orphaned` itself (`<agenthub.push … kind="plugin" was="runs">`,
-since 1.2.0, contract 2): in "Settings → Notifications" this is its own "Background agents" toggle; "Agent runs" that
+since 1.2.0, contract 2): in "Settings → Notifications" this is its own "Claude Code Background Agents" toggle; "Agent runs" that
 were turned off before 2026-11-09 carry over to it. Icon: `<agenthub.icon symbol="square.stack.3d.up" color="#BF5AF2">`.
 Finished runs stay visible for 12 h; their results (numbers, no text) are cached in `AGENTHUB_PLUGIN_CACHE_PATH/runs.json`.
 

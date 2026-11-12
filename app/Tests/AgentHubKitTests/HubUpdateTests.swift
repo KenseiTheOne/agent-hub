@@ -15,7 +15,7 @@ private let base = #""installed":true,"running":"0.2.0","label":"0.2.0","current
 private func either(_ s: String?, _ ru: String, _ en: String) -> Bool { s == ru || s == en }
 private func has(_ s: String?, _ ru: String, _ en: String) -> Bool { (s ?? "").contains(ru) || (s ?? "").contains(en) }
 
-@Suite struct HubUpdateTests {
+@Suite(.hubLang(.ru)) struct HubUpdateTests {
     @Test func decodesStateAndEvents() throws {
         let i = try info("{\(base),\"available\":{\"version\":\"0.3.0\",\"tag\":\"v0.3.0\"},\"install\":{\"phase\":\"idle\"},\"blocked\":null}")
         #expect(i.installed && i.available?.version == "0.3.0" && i.previous?.label == "0.1.0" && i.install.phase == "idle")

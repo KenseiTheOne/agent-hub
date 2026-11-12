@@ -501,3 +501,57 @@ test("http connection: parallel calls never overrun the daily budget (reserved b
     cleanup(bin);
   }
 });
+
+// Re-review 66: net="none" on an action covers the hub's own proxy too — refused before the connection state is looked at.
+test(`http connection: an action with net="none" gets 403 net:none on /connections/:id/http; another action passes the caller check`, async () => {
+  const plugins = tempHome("ah-hplug-");
+  writePlugin(
+    plugins,
+    "apix.1h.mjs",
+    `#!/usr/bin/env node
+// <agenthub.title>Api X</agenthub.title>
+// <agenthub.net>auth.example.com — sign-in</agenthub.net>
+// <agenthub.net>api.example.com — data</agenthub.net>
+// <agenthub.connection type="http" client_id="pub-client" authorize="https://auth.example.com/oauth/authorize" token="https://auth.example.com/oauth/token" hosts="api.example.com" methods="GET,POST" title="Api X">data</agenthub.connection>
+// <agenthub.action id="quiet" level="immediate" net="none" title="Quiet">apix.1h.mjs --action quiet</agenthub.action>
+// <agenthub.action id="post" level="confirm" title="Post">apix.1h.mjs --action post</agenthub.action>
+import { request } from "node:http";
+import { writeFileSync } from "node:fs";
+const ai = process.argv.indexOf("--action");
+if (ai < 0) { console.log("idle | status=ok"); process.exit(0); }
+const data = JSON.stringify({ method: "POST", path: "/v1/items", body: "{}" });
+const r = request({ socketPath: process.env.AGENTHUB_HUB_SOCKET, path: "/connections/apix/http", method: "POST", headers: { Host: "hub", "content-type": "application/json", "content-length": Buffer.byteLength(data) } }, (res) => {
+  let s = ""; res.on("data", (c) => (s += c)); res.on("end", () => {
+    writeFileSync(process.env.AGENTHUB_PLUGIN_DATA_PATH + "/" + process.argv[ai + 1] + ".json", JSON.stringify({ status: res.statusCode, body: JSON.parse(s || "null") }));
+  });
+});
+r.end(data);
+`,
+  );
+  const bin = tempHome("ah-hsec-");
+  const sec = fakeSecurity(bin);
+  const h = await startHub({
+    pluginsDir: plugins,
+    services: "oauth,secrets",
+    sys: appSelfSys(),
+    overrides: { requirements: { app: 'identifier "com.kensei.agenthub"' }, services: { secrets: { securityPath: sec.p } } },
+  });
+  try {
+    await waitFor(async () => (await req(h.sock, "GET", "/connections")).body?.connections?.some((c) => c.id === "apix"));
+    const inst = h.core.host.get("apix");
+    const run = async (id) => {
+      const ar = await inst.runAction(inst.plugin.meta.actions.find((x) => x.id === id));
+      assert.equal(ar.ok, true, JSON.stringify(ar));
+      return JSON.parse(readFileSync(join(h.config.paths.pluginData, "apix", `${id}.json`), "utf8"));
+    };
+    const q = await run("quiet");
+    assert.deepEqual([q.status, q.body.error], [403, "net:none"]);
+    assert.ok(h.core.journal.tail(200).some((e) => e.type === "http-denied" && e.error === "net:none" && e.action === "quiet"));
+    const p = await run("post");
+    assert.deepEqual([p.status, p.body.error], [409, "oauth:not-connected"]);
+  } finally {
+    await h.stop();
+    cleanup(bin);
+    cleanup(plugins);
+  }
+});

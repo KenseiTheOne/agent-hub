@@ -547,7 +547,7 @@ test("official from the signed index: tier official, actions with an argument �
     assert.equal(c.status, 428);
     assert.equal(c.body.level, "confirm");
     // G10: the row carrying the button is quoted at the end
-    assert.match(c.body.text, /^«Off» \(официальный плагин\) просит: «Пропустить задачу» для T-1;echo\. Выполнится: off\.5m\.sh --action skip T-1;echo Кнопка в строке «Пропустить»\.$/);
+    assert.match(c.body.text, /^«Off» \(официальный плагин\) просит: «Пропустить задачу» для T-1;echo\. Выполнится: off\.5m\.sh --action skip T-1;echo\. Кнопка в строке «Пропустить»\.$/);
     const done = await h.call("POST", `/actions/${skip.id}`, { confirmToken: c.body.token });
     assert.equal(done.status, 200, JSON.stringify(done.body));
     assert.deepEqual([done.body.ok, done.body.result.code, done.body.result.reason], [false, 3, "demo-refused"]);

@@ -94,14 +94,16 @@ export const DEFAULT_RULES = Object.freeze([
   { name: "plugin-own-updated", label: L("plugin-own-updated"), cooldownMs: 0, kind: "updates" },
 ]);
 
-// macOnly (a plugin tag and services.push.rules field from when the hub had a second channel) is not a field any more:
-// macOS banners are the only channel, so it is accepted and ignored.
+// macOnly — the event goes to the Mac banner only, never to the extra channels (webhook, ntfy, channels of services;
+// lib/push/channels.mjs accepts): a plugin keeps sensitive text (a mail subject) on this Mac. From the plugin's
+// <agenthub.push macOnly="true"> or services.push.rules (re-review 70).
 const FIELDS = {
   label: "string",
   hold: "string",
   awayDelayMs: "number",
   quietException: "boolean",
   cooldownMs: "number",
+  macOnly: "boolean",
 };
 
 function cleanRule(name, raw) {

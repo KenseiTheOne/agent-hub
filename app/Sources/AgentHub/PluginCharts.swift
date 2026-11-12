@@ -114,7 +114,7 @@ struct BarChartView: View {
             let content = VStack(alignment: .leading, spacing: 12) {
                 header(control)
                 BarChartPlot(chart: chart, highlight: swiftBarColor(node.item.color) ?? accent, title: node.item.title)
-                if chart.legend && chart.isStacked { legend(chart) }
+                if (chart.legend && chart.isStacked) || chart.averageVisible { legend(chart) }
                 if !rest.isEmpty {
                     Rectangle().fill(Color.white.opacity(0.08)).frame(height: 0.5)
                     PluginChildRuns(store: store, nodes: rest)
@@ -151,13 +151,25 @@ struct BarChartView: View {
         }
     }
 
+    /// Under the plot: the series swatches (a stacked chart with `legend=`) and the average's caption next to a dashed
+    /// sample of its line. The caption is not drawn on the plot (2026-11-12): there it covered the bars' value captions.
     private func legend(_ chart: PluginBarChart) -> some View {
         HStack(spacing: 14) {
-            ForEach(Array(chart.series.enumerated()), id: \.offset) { i, name in
+            if chart.legend && chart.isStacked {
+                ForEach(Array(chart.series.enumerated()), id: \.offset) { i, name in
+                    HStack(spacing: 6) {
+                        RoundedRectangle(cornerRadius: 2).fill(ChartPalette.color(i < chart.colors.count ? chart.colors[i] : nil, i, ChartPalette.series))
+                            .frame(width: 8, height: 8)
+                        Text(name).font(.system(size: 11.5)).foregroundStyle(.white.opacity(0.7)).lineLimit(1)
+                    }
+                }
+            }
+            if chart.averageVisible {
                 HStack(spacing: 6) {
-                    RoundedRectangle(cornerRadius: 2).fill(ChartPalette.color(i < chart.colors.count ? chart.colors[i] : nil, i, ChartPalette.series))
-                        .frame(width: 8, height: 8)
-                    Text(name).font(.system(size: 11.5)).foregroundStyle(.white.opacity(0.7)).lineLimit(1)
+                    Path { p in p.move(to: CGPoint(x: 0, y: 0.5)); p.addLine(to: CGPoint(x: 16, y: 0.5)) }
+                        .stroke(Color.white.opacity(0.45), style: StrokeStyle(lineWidth: 1, dash: [4, 3]))
+                        .frame(width: 16, height: 1)
+                    Text(chart.avgLabel ?? tr("среднее", "average")).font(.system(size: 11.5)).foregroundStyle(.white.opacity(0.6)).lineLimit(1)
                 }
             }
         }
@@ -265,17 +277,13 @@ struct BarChartPlot: View {
         if let avg = chart.avg, chart.averageVisible { drawAverage(ctx, size, avg) }
     }
 
+    /// The dashed average line; its caption is under the plot (`legend`).
     private func drawAverage(_ ctx: GraphicsContext, _ size: CGSize, _ avg: Double) {
         let y = size.height - plotHeight * CGFloat(avg / chart.scaleMax)
         var rule = Path()
         rule.move(to: CGPoint(x: 0, y: y))
         rule.addLine(to: CGPoint(x: size.width, y: y))
         ctx.stroke(rule, with: .color(.white.opacity(0.3)), style: StrokeStyle(lineWidth: 1, dash: [4, 3]))
-        let text = ctx.resolve(Text(chart.avgLabel ?? tr("ср.", "avg")).font(.system(size: 11)).foregroundStyle(.white.opacity(0.6)))
-        let ts = text.measure(in: CGSize(width: size.width, height: 40))
-        let box = CGRect(x: size.width - ts.width - 10, y: y + 3 - ts.height - 2, width: ts.width + 10, height: ts.height + 2)
-        ctx.fill(RoundedRectangle(cornerRadius: 4).path(in: box), with: .color(hexColor(0x1F1F26, 0.85)))
-        ctx.draw(text, at: CGPoint(x: box.midX, y: box.midY), anchor: .center)
     }
 
     private func drawLabels(_ ctx: GraphicsContext, _ size: CGSize, _ l: BarLayout) {

@@ -198,7 +198,7 @@ export function indexPermissions(meta) {
 // for that entry (contractUnknown: not offered as an update, install refused with registry:hub-too-old). So an index entry
 // that uses any of these features carries the object form {"version": 3, "features": [...]} — an older hub says "Needs a newer
 // hub", this hub checks every feature against CONTRACT_FEATURES. Entries without them keep the plain integer (or no field).
-export const CONTRACT_FEATURES = Object.freeze(["background", "community-actions", "http-connection", "input", "net-none", "subscribe", "watch-recursive"]);
+export const CONTRACT_FEATURES = Object.freeze(["background", "community-actions", "http-connection", "input", "input-pattern", "net-none", "subscribe", "watch-recursive"]);
 
 // The features of CONTRACT_FEATURES a plugin uses (sorted). official — the tier the registry assigns (community actions need a
 // newer hub, official ones don't).
@@ -207,6 +207,8 @@ export function contractFeatures(meta, { official = false } = {}) {
   for (const a of meta?.actions || []) {
     if (a.background) f.add("background");
     if (a.input) f.add("input");
+    // inputPattern= (re-review 65): the typed text is checked by its own pattern and arg= stays a row argument
+    if (a.input?.pattern) f.add("input-pattern");
     if (a.net === "none") f.add("net-none");
   }
   if (!official && (meta?.actions || []).length) f.add("community-actions");
@@ -541,7 +543,9 @@ const SOURCE_PATTERNS = [
   [/\.claude(?:[\\/]+\.)*[\\/]+projects/i, "~/.claude/projects"],
   [/workstream\.jsonl/i, "workstream.jsonl"],
   [/auth\.json/i, "auth.json"],
-  [/["'`][^"'`\n]*\.key["'`]/, "*.key"],
+  // a file path ending a string literal: the last word has a path character (/ \ ~ *) or is a single-dot name (server.key,
+  // .key); a dotted identifier is not a path — an SF Symbol name "sfimage=person.badge.key" passes (re-review 69)
+  [/["'`](?:[^"'`\n]*[\s=])?(?:[^\s"'`=]*[\\/~*][^\s"'`=]*|[^\s"'`=.\\/~*]*)\.key["'`]/, "*.key"],
   [/["'`](?:[^"'`\n]*[\\/])?\.env(?:\.[\w-]+)?["'`]/, ".env"],
 ];
 
@@ -595,9 +599,13 @@ export function lintPlugin({ id, meta, source = "", official = false, local = fa
   // cmux.focus is an alias of terminal.focus until the next contract
   if (perms.effects.includes("cmux.focus")) warnings.push(L(lang, `effects «cmux.focus»: устарело — пишите terminal.focus (то же, для любого терминала) или session.focus <sessionId>`, `effects "cmux.focus": deprecated — write terminal.focus (the same, for any terminal) or session.focus <sessionId>`));
   if (!official) {
-    // community actions (G3): the core runs them only from the app and never below confirm — immediate is raised
+    // community actions (G3): the core runs them only from the app and never below confirm — immediate is raised; with the
+    // plugin's network (no net="none" on the action) or a cost= — to confirm-cost, as core.actionLevel does
     for (const a of meta.actions || []) {
-      if (a.level === "immediate") warnings.push(L(lang, `<agenthub.action id="${a.id}">: у плагина сообщества ядро поднимет immediate до confirm — окно подтверждения будет всегда`, `<agenthub.action id="${a.id}">: for a community plugin the core raises immediate to confirm — there is always a confirmation window`));
+      if (a.level !== "immediate") continue;
+      const priced = ((perms.net || []).length && a.net !== "none") || a.cost || Object.values(a.i18n || {}).some((x) => x?.cost);
+      if (priced) warnings.push(L(lang, `<agenthub.action id="${a.id}">: у плагина сообщества ядро поднимет immediate до confirm-cost (сеть плагина без net="none" или cost=) — окно подтверждения с ценой будет всегда`, `<agenthub.action id="${a.id}">: for a community plugin the core raises immediate to confirm-cost (the plugin's network without net="none", or cost=) — there is always a confirmation window with the cost`));
+      else warnings.push(L(lang, `<agenthub.action id="${a.id}">: у плагина сообщества ядро поднимет immediate до confirm — окно подтверждения будет всегда`, `<agenthub.action id="${a.id}">: for a community plugin the core raises immediate to confirm — there is always a confirmation window`));
     }
     if ((meta.actions || []).length) warnings.push(L(lang, `<agenthub.action>: действия плагина сообщества — только из приложения, с окном подтверждения; ревьюер проверяет, что команда делает ровно то, что сказано в title`, `<agenthub.action>: community plugin actions run only from the app, with a confirmation window; the reviewer checks the command does exactly what its title says`));
   } else {

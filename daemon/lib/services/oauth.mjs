@@ -32,7 +32,8 @@
 // and on x-ratelimit-*; between allowed calls the plugin gets the previous result from service memory with nextAt and
 // a reason (why). The call counter and backoff survive a restart: <home>/Cache/oauth-<id>.json (timestamps only,
 // no tokens or content). An action process (a human pressed the plugin's button) may call too (pluginByPid with actions).
-// A write or an explicit refresh: `fresh: true` in the request — no interval cache, no merging with an identical call in
+// A write or an explicit refresh: `fresh: true` in the request, a tool the declaration lists in writes=, or any call from an
+// action process (the route sets fresh for it: a human pressed a button) — no interval cache, no merging with an identical call in
 // flight, the reply waits for the service (up to 20 s); the daily budget and backoff still apply (gated — 429 mcp:wait,
 // the call is not made); a tool error does not start a backoff (it is usually the input, not the service). The result
 // is not kept in memory, and a successful fresh call marks this plugin's cached results of the connection stale: the next
@@ -88,6 +89,7 @@ export function defFromDeclared(pluginId, pluginTitle, c) {
     hosts: [...new Set([c.host, ...(c.hosts || [])].filter(Boolean).map((h) => String(h).toLowerCase()))],
     scope: c.scope || null,
     tools: [...(c.tools || [])],
+    writes: [...(c.writes || [])],
     intervalMs: c.intervalMs,
     dailyBudget: c.budget,
     type: c.type === "http" ? "http" : "mcp",
@@ -373,6 +375,7 @@ class Connector {
       ...(this.orphan ? { orphan: true } : {}),
       host: this.def.hosts[0] || this.hosts[0] || null,
       tools: [...this.def.tools],
+      ...(this.def.writes?.length ? { writes: [...this.def.writes] } : {}),
       // mcp | http (G7); for http — the API hosts the token goes to, allowed methods and path prefixes
       type: this.kind,
       ...(this.kind === "http" ? { apiHosts: [...this.def.http.hosts], methods: [...this.def.http.methods], paths: [...(this.def.http.paths || [])] } : {}),
@@ -758,7 +761,8 @@ class Connector {
     if (typeof argsObj !== "object" || Array.isArray(argsObj)) return { status: 400, body: { error: "args:args:type" } };
     const key = `${plugin.id}|${tool}|${stable(argsObj)}`;
     if (Buffer.byteLength(key) > MAX_ARGS_BYTES) return { status: 413, body: { error: "too-large" } };
-    return this.serve(plugin, key, { fresh, field: "result", what: { tool }, exec: (f, release) => this.doCall(tool, argsObj, key, { fresh: f, release }) });
+    // a declared write tool (writes=, re-review 76) is never served from the cache
+    return this.serve(plugin, key, { fresh: fresh || this.def.writes?.includes(tool) === true, field: "result", what: { tool }, exec: (f, release) => this.doCall(tool, argsObj, key, { fresh: f, release }) });
   }
   // An HTTP request on behalf of a plugin (type http, G7). body — {method, host?, path, query?, headers?, body?, fresh?}.
   // GET/HEAD — reads (interval cache unless fresh); other methods — writes (always fresh). → { status, body }

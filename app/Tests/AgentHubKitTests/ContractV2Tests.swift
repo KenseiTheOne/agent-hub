@@ -4,7 +4,7 @@ import Testing
 
 // Plugin contract 2 (2026-11-09): the shell builds the UI from what the plugin declared — icon, "hub too old",
 // connections, own notification switches, action refusal text. It contains no names of specific plugins.
-@Suite(.serialized) struct ContractV2Tests {
+@Suite(.serialized, .hubLang(.ru)) struct ContractV2Tests {
     @Test func pluginIconDecodesOnlyValidDeclarations() throws {
         let ok = try JSONDecoder().decode(PluginIcon.self, from: Data(##"{"symbol":"gauge.with.dots.needle.50percent","color":"#0a84ff"}"##.utf8))
         #expect(ok.symbol == "gauge.with.dots.needle.50percent" && ok.color == "#0A84FF" && ok.rgb == 0x0A84FF)
@@ -80,7 +80,7 @@ import Testing
     }
 }
 
-@Suite(.serialized) struct ConnectionPermissionTests {
+@Suite(.serialized, .hubLang(.ru)) struct ConnectionPermissionTests {
     @Test func connectionPermissionReadsAsHumanLine() {
         L10n.shared.lang = .ru
         let p = PluginPermission(kind: "connections", what: "tix: https://mcp.example.com/mcp scope=read tools=a,b", why: nil)

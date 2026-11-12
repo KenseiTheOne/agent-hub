@@ -4,7 +4,7 @@ import Testing
 
 // The terminal layer in the shell (AH-33): sessions[].terminalInfo and /state.terminals decode, buttons follow what the session's
 // terminal supports, the cmux bridge gates only cmux sessions, Settings → Terminal texts, the terminal.focus primitive.
-@Suite(.serialized) struct TerminalLayerTests {
+@Suite(.serialized, .hubLang(.ru)) struct TerminalLayerTests {
     static let json = #"""
     {"primitives":[{"name":"session.focus","level":"immediate"},{"name":"terminal.focus","level":"immediate"},
                    {"name":"cmux.focus","level":"immediate","aliasOf":"terminal.focus","deprecated":true},

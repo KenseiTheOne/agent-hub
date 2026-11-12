@@ -12,6 +12,7 @@
 // Routing:
 //   - security exceptions (kind "security") and bannerAlways events (a re-pinned app build, tampering signals) go only to
 //     channels marked `security: true` (mac — always): a phone notification about a re-pin is opt-in;
+//   - a macOnly notification (the rule's macOnly: <agenthub.push macOnly="true"> or services.push.rules) goes to mac only;
 //   - `events: [...]` narrows a channel: a notification kind (sessions, updates, problems, other, plugin, security; hub — any
 //     event of the hub itself; digest — the morning digest) or a key pattern `<plugin>:<key>` with `*` at the end (`mail:*`, `@hub:hub-update*`). No list — everything.
 //
@@ -31,6 +32,7 @@ const EVENT_PATTERN_RE = /^[@\w.:/*-]{1,128}$/;
 
 // Does the notification go to this channel? msg.kind — the engine's kind of the rule; msg.bannerAlways — the security banner.
 export function accepts(channel, msg) {
+  if (msg?.macOnly === true) return false;
   const security = msg?.kind === "security" || msg?.bannerAlways === true;
   if (security && channel.security !== true) return false;
   const events = channel.events;
@@ -214,7 +216,8 @@ export function createChannelSet({ mac, configured = [], journal = () => {}, fet
         if (extra.get(c.channel.id) === c.channel) extra.delete(c.channel.id);
       };
     },
-    // For /state and tests: [{id, type, label, security, events}] — never the URL.
+    // For /state.notifications.channels (the app's Settings → Notifications) and tests: [{id, type, label, security, events}]
+    // — never the URL or anything else the channel was configured with.
     list() {
       return [{ id: "mac", type: "mac", label: "macOS", security: true, events: null }, ...[...extra.values()].map((c) => ({ id: c.id, type: c.type, label: c.label, security: c.security, events: c.events }))];
     },

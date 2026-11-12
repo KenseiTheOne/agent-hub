@@ -27,7 +27,9 @@ the client pid **or one of its ancestors** (any depth by ppid, not above the dae
 standard run, a streamable process, an action or a background job (the `pluginByPid` fact with `{actions: true}`) — or
 **the process group** of the client (or of one of those ancestors) is one: every plugin process is spawned detached and
 leads its own group, which its descendants inherit even when they are reparented to launchd. So a `curl` started by a
-shell plugin, `agenthub` from a plugin's action, or a double-forked helper is recognized as that plugin.
+shell plugin, `agenthub` from a plugin's action, or a double-forked helper is recognized as that plugin. A group counts
+until its run, action, job or streamable process has ended and the group was killed — not only while the group's first
+process lives: a background `( sleep 1; curl … ) &` that outlives the run's leader is still the plugin's (re-review 63).
 
 - **Untrusted plugin** (`community`, `local`): only `GET /health` and `GET /peer`; every other route — `403
   peer:untrusted-plugin` (`{error, peer, plugin}`), journaled as `denied {route, peer, pid, plugin, tier, error}` at
@@ -176,7 +178,9 @@ Snapshot:
                     "quiet":{"enabled":true,"start":"23:00","end":"08:00","from":"config"},
                     "security":[{"key":"app-pin-changed","plugin":"@hub","label":"Agent Hub re-pinned"},
                                 {"key":"tamper","plugin":"builder","pluginTitle":"Builder","label":"Tampering marker"}],
-                    "service":true,"awayAfterMs":600000},
+                    "service":true,"awayAfterMs":600000,
+                    "channels":[{"id":"mac","type":"mac","label":"macOS","security":true,"events":null},
+                                {"id":"ntfy-1","type":"ntfy","label":"Phone","security":false,"events":["mail:*"]}]},
   "connections": [{"id":"tix","title":"Tix","note":"tickets assigned to you","plugin":"tix","host":"mcp.example.com",
                    "tools":["get_user","filter_tasks"],"state":"connected","scope":"read",
                    "intervalMs":900000,"dailyBudget":100,"calls24h":12,"nextAt":"2026-11-09T12:15:00.000Z","why":null,"error":null}],
@@ -335,10 +339,16 @@ login as a link to the profile); the same field in `GET /registry/catalog` comes
 to `POST /actions/:id`; for a parameterized action the argument (from `arg=` in the output) is already part of the
 offer and the `label`; `input: {placeholder, maxLength, pattern}` — the action takes text a human types (render a field;
 `pattern` is the plugin's JavaScript pattern, for a hint only — the core checks it); `background: true` — pressing starts
-a job (`jobs[]`);
-`actions[]`: `{id, level, title, arg, input?: {placeholder, maxLength}, background?: true, net?: "none"}` — `level` is the
+a job (`jobs[]`). A line whose `href=`/`effect=` the primitive would refuse on every press (`open.url`: not http/https,
+credentials in the URL — `message://`, `mailto:`) has no `offer`: the core journals a `warning` for the plugin instead
+(re-review 71);
+`actions[]`: `{id, level, title, arg, input?: {placeholder, maxLength, pattern?}, background?: true, net?: "none"}` (`input.pattern` — the
+action's `inputPattern=`: `arg` is then the row argument) — `level` is the
 effective level after the core's floors; `jobs[]` — running background jobs of the plugin `{id, actionId, title,
-startedAt, pid}`: stop one with `POST /actions/job.cancel {"args":{"job":"<id>"}}` (app only);
+startedAt, pid}` (`title` — the action's title plus its `arg=` value; a second running job with the same title gets its
+start time, "Long (14:05:31)"; only jobs of the plugin's current instance — after an update the jobs being stopped are
+not listed): stop one with `POST /actions/job.cancel {"args":{"job":"<id>"}}` (app only; cli too on a test hub for a
+test-tier plugin);
 `tier` — the plugin tier: `builtin` (the app's directory), `local` (`Plugins/local`; `own` on a test hub with
 `AGENTHUB_TEST_TIER=own`, then `testTier: true`), `own` (installed from your own folder after a human confirmed it in the
 app), and for installed registry ones `official` or `community` — by the verified signed catalog **at check time** (the id is named `official`, the archive sha256 is the
@@ -418,8 +428,9 @@ cli gets `403 peer:cli`, not `400 args:…` (UI pass 2026-11-05).
   the network floor is lifted for it; a `cost=` still counts). A community plugin's action — at least `confirm`. The one
   exception to "app only": a test hub started with `AGENTHUB_TEST_TIER=own` (and `AGENTHUB_HOME` other than the live
   directory) lets cli press actions of its test-tier plugins (`plugins[].testTier`) at any level; the 428 token is not
-  bound to the requester's pid there.
-- **Input actions** (`offer.input`, contract 3 additive): app only, any tier. The text is checked like an argument —
+  bound to the requester's pid there. The same hub lets cli call `job.cancel` for a job of a test-tier plugin (a job of
+  any other plugin stays app only: `403 peer:cli`).
+- **Input actions** (`offer.input`, contract 3 additive): app only, any tier (cli on a test hub as above). The text is checked like an argument —
   `400 input:required|too-long|control|option-like|pattern` (empty, over `maxLength` characters, control or format
   characters including line breaks, a leading `-`, not matching the declared pattern). It goes to the action process on
   **stdin** — the text, one `\n`, end of input — never into argv; the journal records `inputLength`, never the text; a
@@ -428,6 +439,11 @@ cli gets `403 peer:cli`, not `400 args:…` (UI pass 2026-11-05).
   `"input": {placeholder, maxLength, pattern}` and the text says it is typed in the window — the app shows the field in the
   confirmation sheet and repeats the request with `input` and `confirmToken` (such a token accepts any valid text); a
   request with `input` gets a 428 whose text quotes it, and its token accepts only that text (`403 confirm:invalid`).
+  An input action declared with `inputPattern=` (contract 3 additive, re-review 65) is also bound to a row: the offer
+  carries the row's `arg=` value (checked against the action's `arg=` pattern, `409 facts:bad-arg` when it no longer
+  matches), it goes to argv as for any parameterized action, `offer.label`, the 428 text and `actionResult.arg` name it,
+  and the typed text is checked against `inputPattern` (that is `input.pattern` then); the text still goes only to stdin.
+  The request body is the same: `input` (+ `confirmToken`), never `args` — the row value comes from the offer.
 - **Background actions** (`offer.background`): the request returns as soon as the job has started —
   `200 {"ok":true,"result":{"ok":true,"job":"<16 hex>","pid":…}}`; `409 facts:jobs-limit` — the plugin already has
   `plugins.maxJobsPerPlugin` (4) jobs (jobs still starting count too). The job is listed in `plugins[].jobs` and in the idle verdict, journaled
@@ -439,13 +455,16 @@ cli gets `403 peer:cli`, not `400 args:…` (UI pass 2026-11-05).
   lives 120 s, and is bound to the action with its arguments, to the plugin action fingerprint (command, level, argument
   pattern, plugin version and tier) and to the requester's pid: a token issued for one version's text gives
   `403 confirm:invalid` after the plugin is updated. Extra 428 fields (additive): `row` — the sanitized title of the
-  row that carries the button (≤ 120 graphemes, control characters replaced), also quoted at the end of `text`;
+  row that carries the button (≤ 120 graphemes, control characters replaced), also quoted at the end of `text`; a child
+  row whose text only repeats the action's title gives its parent row's title instead. The same offer (same action and
+  arguments) on rows with different titles is split into one offer per row (`id` over the row text too), so `row` is
+  always the row that was pressed; an offer on a single row keeps its usual id (re-review 64);
   `input` (above); `background: true` — the action starts a job.
 - Success: `200 {"ok":true|false,"result":{…scalars only…}}`. After the action a standard plugin is restarted, a
   streamable one gets `{"type":"actionResult","id","actionId","primitive","arg","ok","code","inputLength"?,"job"?}` on
   stdin (`arg` — the checked argument value from the offer or `null`).
 - A plugin action: the core writes the confirmation text in the hub language (`lib/i18n.mjs`) —
-  `«<название>» (<уровень>) просит: «<title>» для <значение>. Выполнится: <команда>` / `"<title>" (<tier>) asks to: …`,
+  `«<название>» (<уровень>) просит: «<title>» для <значение>. Выполнится: <команда>.` / `"<plugin>" (<tier>) asks to: "<title>" for <value>. Will run: <command>.`,
   where the command is shown as it will run: the value replaces the word `{name}`, or without it goes at the end
   (`my-tool.30s.mjs --action skip ABC-1`); the price comes from the core (`confirm-cost`: "The command may access the
   network: <hosts>") plus the author's words marked "According to the plugin: …". `title`/`cost` are taken in the hub
@@ -540,8 +559,12 @@ and `timezone` (the zone in which the daemon computes quiet hours: `services.pus
 `awayAfterMs` (the idle threshold after which the human counts as away from the Mac, `services.push.idleThresholdMs`:
 quiet hours then hold banners for the digest), `security` — the list of what cannot be turned off (hub events and trusted
 plugins' rules with `kind="security"`: `key`, `plugin`, `pluginTitle?`, `label` in the hub language), `service` (the push
-service is not turned off in config.json). macOS banners are the only channel (a daemon before 2026-11-11 also sent a
-flag for a second channel; the app ignores unknown keys). A turned-off kind does not arrive at all — no `push.notify`, no osascript, no
+service is not turned off in config.json), `channels` (hub 0.1.3+: where notifications go — `mac`, the banner, always
+first, then the channels of `services.push.channels` in config.json and the ones hub services registered: `id`,
+`type` (`mac|webhook|ntfy|service`), `label`, `security` (also gets security exceptions), `events` (its filter, `null` —
+everything); **never a URL, topic or token**; empty while the push service is off). An event whose rule has `macOnly`
+(`<agenthub.push macOnly="true">` or `services.push.rules`) goes to `mac` only. The app lists the channels other than
+`mac` in Settings → Notifications. A turned-off kind does not arrive at all — no `push.notify`, no osascript, no
 digest; it stays in the plugin's `/state` and in the journal (`push-muted`).
 
 ### Connections — `GET /connections` (app, cli), `POST /connections/:id/connect|cancel|disconnect` (app only), `POST /connections/:id/mcp`, `POST /connections/:id/http` (a plugin process)
@@ -634,6 +657,8 @@ recognizes the plugin by the peer pid on the socket (the `pluginByPid` fact with
 run, a streamable process or an action a human started — not a descendant); the plugin must be **trusted** (builtin/official/own), **the one that declared the
 connection**, and have the service host in `<agenthub.net>`; the tool must be on the declaration's allowlist
 (`tools=`). Refusals: `403 mcp:not-a-plugin|mcp:untrusted|mcp:not-owner|mcp:net-not-declared|mcp:tool-not-allowed`,
+`403 net:none` (hub 0.1.3+: the caller is the process of an action, or a background job, declared with `net="none"` —
+it promised no network, and the hub's proxy is network; journal `mcp-denied` with `action`),
 `400 args:tool:required|args:args:type|args:fresh:type`, `413 too-large` (arguments > 8 KB),
 `409 oauth:not-connected|oauth:expired|oauth:unavailable` (with `connection`). A `200` response:
 `{ok, result: <the tools/call result: content, structuredContent?> | null, fetchedAt, nextAt, why, intervalMs,
@@ -645,7 +670,10 @@ memory until a successful call), a `why: tool-error` backoff. The protocol is St
 the server forgot the session (`404`) — one retry with a new one.
 
 **Writes: `fresh: true`.** A call that changes something on the service (or a refresh a human asked for) passes
-`fresh: true` (a boolean; anything else — `400 args:fresh:type`). It skips the interval cache and is not merged with an
+`fresh: true` (a boolean; anything else — `400 args:fresh:type`). Since hub 0.1.3 two more calls count as fresh without
+the flag, so a write is never answered from the cache: a tool the declaration lists in `writes=` (a subset of
+`tools=`; `GET /connections` and `/state` show it as `writes`), and any call from an action process or background job
+(a human pressed the button). It skips the interval cache and is not merged with an
 identical call in flight; the reply waits for the service (the call's own 20 s deadline, not `callWaitMs`). The daily
 budget and every backoff still apply: if the connection is gated, the call is **not made** —
 `429 {error: "mcp:wait", why, nextAt, intervalMs, calls24h, dailyBudget}` (no previous result is passed off as the
@@ -716,7 +744,8 @@ values ≤ 1024 without control characters); `body` — a string or JSON
 (`Content-Type: application/json` by default), ≤ 64 KB, not for `GET`/`HEAD`. The request goes to `https://<host><path>`
 with `Authorization: Bearer <token>`, no redirects followed, 15 s timeout. Refusals: `403 http:not-a-plugin|untrusted|
 not-owner|net-not-declared|method-not-allowed|host-not-allowed|path-not-allowed|header-not-allowed` (+`header`)|
-query-not-allowed` (+`key`),
+query-not-allowed` (+`key`), `403 net:none` (an action declared `net="none"`, as for `/mcp`; journal `http-denied`;
+a read from any other action process is served fresh, past the cache),
 `400 http:not-http|args:body:type|args:path:invalid|args:query:type|args:query:too-many|args:headers:type|
 args:headers:too-many|args:headers:value|args:body:not-allowed|args:fresh:type`, `413 too-large`,
 `409 oauth:not-connected|expired|unavailable|orphan`; `/mcp` on an `http` connection — `400 mcp:not-mcp`.

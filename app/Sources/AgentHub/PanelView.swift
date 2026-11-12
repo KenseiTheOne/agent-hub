@@ -609,6 +609,21 @@ struct NotificationsSettings: View {
             .disabled(!canEdit).help(lockHelp)
         Text(NotificationsText.channels(n))
             .font(.system(size: 11.5)).foregroundStyle(.white.opacity(0.55)).fixedSize(horizontal: false, vertical: true)
+        // channels that take notifications off this Mac (re-review 70): names and kinds from the daemon, never addresses
+        if !n.externalChannels.isEmpty {
+            VStack(alignment: .leading, spacing: 3) {
+                Text(NotificationsText.externalHeader).font(.system(size: 12, weight: .semibold)).foregroundStyle(.white.opacity(0.8))
+                ForEach(n.externalChannels) { c in
+                    HStack(alignment: .firstTextBaseline, spacing: 6) {
+                        Image(systemName: "arrow.up.forward.app").font(.system(size: 10)).foregroundStyle(.white.opacity(0.6))
+                        Text(NotificationsText.channelRow(c)).font(.system(size: 12)).fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+                Text(NotificationsText.externalExplain)
+                    .font(.system(size: 11.5)).foregroundStyle(.white.opacity(0.55)).fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(.leading, 12)
+        }
         if !n.service {
             Text(tr("Служба уведомлений выключена в config.json (services.push.enabled) — не приходит ничего, даже исключения безопасности.",
                     "The notification service is off in config.json (services.push.enabled) — nothing arrives, not even security exceptions."))
@@ -1526,8 +1541,9 @@ struct OfferButton: View {
             } label: {
                 HStack(spacing: 5) {
                     if let sym = item.sfImage, NSImage(systemSymbolName: sym, accessibilityDescription: nil) != nil { Image(systemName: sym) }
-                    // "…": asks first or asks for text
+                    // "…": asks first or asks for text; `font=mono` keeps the style's size and weight (re-review 74)
                     Text(item.title + (offer.level == .immediate && offer.input == nil ? "" : "…"))
+                        .fontDesign(item.isMono ? .monospaced : nil)
                     if store.busyAction == offer.id { ProgressView().controlSize(.mini) }
                 }
             }
@@ -1556,7 +1572,7 @@ struct OfferLink: View {
     private var block: ActionBlock? { store.gate(offer: offer) }
 
     var body: some View {
-        let font = Font.system(size: depth == 0 ? 13 : 12)
+        let font = Font.system(size: depth == 0 ? 13 : 12, design: item.isMono ? .monospaced : .default)
         HStack(spacing: 7) {
             if let sym = item.sfImage, NSImage(systemSymbolName: sym, accessibilityDescription: nil) != nil {
                 Image(systemName: sym).font(.system(size: 12))
