@@ -45,8 +45,9 @@ struct LaunchSessionView: View {
             HStack {
                 Text(tr("Remote Control — ответить можно с телефона", "Remote Control — reply from your phone")).font(.system(size: 12.5))
                 Spacer()
-                Toggle("", isOn: .constant(true)).toggleStyle(.switch).tint(.green).labelsHidden().disabled(true)
-                    .help(tr("Хаб всегда запускает сессии с Remote Control", "The hub always launches sessions with Remote Control"))
+                Toggle("", isOn: draftBinding.remoteControl).toggleStyle(.switch).tint(.green).labelsHidden()
+                    .help(tr("Выключено — сессия запустится без Remote Control: ответить с телефона не получится",
+                             "Off — the session starts without Remote Control: you can't reply from your phone"))
             }
             Text(TerminalText.launchNote(store.state?.terminals == nil ? "cmux" : store.launchTerminal?.label))
                 .font(.system(size: 11.5)).foregroundStyle(.white.opacity(0.5)).fixedSize(horizontal: false, vertical: true)

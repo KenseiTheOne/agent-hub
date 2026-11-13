@@ -294,6 +294,8 @@ export class BridgeChannel {
 
 function removePrompt(ctx, file, why) {
   if (!file) return;
+  // the "no Remote Control" marker next to the prompt (session.launch remote:false) goes with it
+  rmSync(file.replace(/\.prompt$/, ".local"), { force: true });
   try {
     statSync(file);
   } catch {
@@ -314,6 +316,14 @@ function sweepLaunchDir(ctx) {
     return;
   }
   for (const n of names) {
+    if (n.endsWith(".local")) {
+      // a marker whose prompt is already gone: launch.sh never ran for it
+      const p = join(dir, n);
+      try {
+        if (Date.now() - statSync(p).mtimeMs > 10 * 60_000) rmSync(p, { force: true });
+      } catch {}
+      continue;
+    }
     if (!n.endsWith(".prompt")) continue;
     const p = join(dir, n);
     try {

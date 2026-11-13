@@ -7,6 +7,9 @@
 // line: it is written to <AgentHub>/launch/<uuid>.prompt (0600), the new tab runs bridge/launch.sh, and launch.sh reads the file,
 // deletes it and runs
 //   claude --session-id <uuid> --remote-control -n <name> -- <prompt>
+// `remote: false` (the form's Remote Control switch off) drops --remote-control: the core writes an empty 0600 marker
+// <uuid>.local next to the prompt file and launch.sh, seeing it, deletes it and runs claude without the flag (no adapter or
+// command-line change: the tab's command stays the same, the choice travels like the prompt — through a file only we own).
 // (no --allow-dangerously-skip-permissions or other bypasses). After the terminal replies, the actions service waits for the
 // session to appear (cmux: its entry in ~/.cmuxterm/claude-hook-sessions.json; other terminals: the core session registry;
 // event bridge.launch.registered / bridge.launch.timeout) and deletes the prompt file if launch.sh never read it.
@@ -31,6 +34,7 @@ export const argsSchema = {
   cwd: { type: "string", required: true, maxLength: 1024 },
   name: { type: "string", required: true, maxLength: 64 },
   prompt: { type: "string", maxLength: 16_000, default: "" },
+  remote: { type: "boolean", default: true },
 };
 
 function inside(p, dir) {
@@ -85,7 +89,7 @@ export function describe(args, facts, lang = "ru") {
     terminal = l ? l.adapter.label || l.adapter.id : null;
   } catch {}
   return {
-    text: t(lang, "prim.session.launch", { name: args.name, cwd: args.cwd, n, terminal }),
+    text: t(lang, "prim.session.launch", { name: args.name, cwd: args.cwd, n, terminal, remote: args.remote !== false }),
     cost: t(lang, "prim.session.launch.cost"),
   };
 }
@@ -99,6 +103,8 @@ export async function run(args, ctx) {
   chmodSync(r.cfg.launchDir, 0o700);
   const promptFile = join(r.cfg.launchDir, `${sessionId}.prompt`);
   writeFileSync(promptFile, args.prompt || "", { mode: 0o600, flag: "wx" });
+  const localFile = join(r.cfg.launchDir, `${sessionId}.local`);
+  if (args.remote === false) writeFileSync(localFile, "", { mode: 0o600, flag: "wx" });
   let res;
   try {
     res = await r.adapter.launch({ cwd: r.cwd, name: args.name, sessionId, promptFile }, ctx.facts);
@@ -107,6 +113,7 @@ export async function run(args, ctx) {
   }
   if (!res?.ok) {
     rmSync(promptFile, { force: true });
+    rmSync(localFile, { force: true });
     return { ok: false, error: res?.error ?? null, code: res?.code ?? null, sessionId, terminal: r.adapter.id };
   }
   const adapter = r.adapter;
@@ -118,5 +125,5 @@ export async function run(args, ctx) {
     return s ? { pid: s.pid ?? null, surfaceId: null, workspaceId: null } : null;
   };
   r.ch.trackLaunch({ sessionId, promptFile, workspaceId, registered, terminal: adapter.id });
-  return { ok: true, sessionId, workspaceId, terminal: adapter.id };
+  return { ok: true, sessionId, workspaceId, terminal: adapter.id, remote: args.remote !== false };
 }

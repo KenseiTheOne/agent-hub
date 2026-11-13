@@ -477,6 +477,39 @@ test("session.launch: the prompt is in a 0600 file, not in the journal and not i
   }
 });
 
+// 13.11: the form's Remote Control switch. remote:false → an empty 0600 <uuid>.local marker next to the prompt (launch.sh
+// drops --remote-control), the confirmation says "Remote Control off"; the default writes no marker; cleanup removes it.
+test("session.launch: remote:false writes the .local marker and says so in the confirmation; the default writes none", async () => {
+  const h = await makeHub();
+  try {
+    const cwd = h.project;
+    let markerSeen = null;
+    const ops = h.fakeBridge((op) => {
+      const lf = op.promptFile.replace(/\.prompt$/, ".local");
+      markerSeen = existsSync(lf) ? statSync(lf).mode & 0o777 : null;
+      return { ok: true, code: 0, workspaceId: WS };
+    });
+    let r = await confirmed(h.core, "session.launch", { cwd, name: "Без RC", prompt: "", remote: false });
+    assert.match(r.first.body.text, /Remote Control (выключен|off)/);
+    assert.equal(r.final.body.ok, true);
+    assert.equal(r.final.body.result.remote, false);
+    assert.equal(markerSeen, 0o600);
+    const sid = r.final.body.result.sessionId;
+    // registered without launch.sh reading anything: the prompt and the marker are both cleaned up
+    const events = [];
+    h.core.on("bridge.launch.registered", (e) => events.push(e));
+    cmuxSessions(h, [{ sessionId: sid, pid: 3331, surfaceId: SURF, workspaceId: WS, agentLifecycle: "running" }]);
+    await waitFor(() => events.length === 1);
+    assert.ok(!existsSync(join(h.home, "launch", `${sid}.local`)));
+    r = await confirmed(h.core, "session.launch", { cwd, name: "С RC", prompt: "" });
+    assert.match(r.first.body.text, /Remote Control (включён|on)/);
+    assert.equal(markerSeen, null);
+    assert.equal(ops.length, 2);
+  } finally {
+    await h.stop();
+  }
+});
+
 test("session.launch: the bridge answered with an error — the prompt file is deleted; the bridge did not take the operation — refused on timeout", async () => {
   const h = await makeHub();
   try {

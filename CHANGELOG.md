@@ -270,6 +270,11 @@ that an older hub ignores, so plugins keep declaring `<agenthub.contract>3</agen
 
 ### App
 
+- **Session buttons are labelled.** "Interrupt" (orange, a raised hand) and "End" (red) are capsules with text instead of a
+  bare hand icon and a small red dot; the button column has one width in every row, so effort badges stay aligned.
+- **Remote Control switch in "New session".** It used to be a disabled switch that always read "on"; now it works: off
+  launches the session without `--remote-control` (`session.launch` argument `remote`, a 0600 `<uuid>.local` marker next
+  to the prompt file that `launch.sh` reads and deletes). On by default, as before.
 - **Typed input.** An immediate action with `input` draws a text field and a send button in place of its capsule on the
   plugin page; at a confirm level (and wherever there is no room for a field — table rows, the popover, banner
   buttons) the field is in the confirmation (the 428 `input` flow: the token is reused when the core refuses the text

@@ -180,6 +180,8 @@ public struct LaunchDraft: Sendable, Hashable {
     public var folder: String = ""
     public var name: String = ""
     public var prompt: String = ""
+    /// Remote Control for the new session (`claude --remote-control`): on by default; off — the core launches without it.
+    public var remoteControl = true
 
     public init() {}
 
@@ -207,7 +209,10 @@ public struct LaunchDraft: Sendable, Hashable {
 
     /// Arguments for `POST /actions/session.launch`.
     public var args: [String: JSONValue] {
-        ["cwd": .string(expandedFolder), "name": .string(name.trimmingCharacters(in: .whitespaces)), "prompt": .string(prompt)]
+        var a: [String: JSONValue] = ["cwd": .string(expandedFolder), "name": .string(name.trimmingCharacters(in: .whitespaces)), "prompt": .string(prompt)]
+        // sent only when off: a daemon without the `remote` argument keeps accepting the default launch
+        if !remoteControl { a["remote"] = .bool(false) }
+        return a
     }
 }
 

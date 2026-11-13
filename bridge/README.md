@@ -61,7 +61,8 @@ Stop it with Ctrl-C (the bridge tells the daemon `bye`). A second bridge started
 `launch.sh <uuid> <name> <prompt file>` is the first command of a new tab. It checks the uuid, the file name
 (`<uuid>.prompt`), the owner and mode 0600; reads the prompt and **deletes the file right away**; then
 `exec claude --session-id <uuid> --remote-control -n <name> -- <prompt>` (without a prompt — without the last
-argument). `claude` comes from the tab's PATH — that is the cmux shim with its hooks, so the session appears in
+argument). A `<uuid>.local` marker next to the prompt file — a regular file of ours, not a link — means the form's
+Remote Control switch was off: `launch.sh` deletes it and runs without `--remote-control`. `claude` comes from the tab's PATH — that is the cmux shim with its hooks, so the session appears in
 `~/.cmuxterm/claude-hook-sessions.json`. No `--allow-dangerously-skip-permissions`.
 
 ## Protocol (HTTP on `hub.sock`, `bridge` class only)

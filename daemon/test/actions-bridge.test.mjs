@@ -4,7 +4,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawn, execFile } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { REPO_DIR } from "../lib/config.mjs";
 import { loadNative } from "../lib/native.mjs";
@@ -143,6 +143,33 @@ test("launch.sh: reads and deletes the 0600 prompt, runs claude --session-id --r
     writeFileSync(join(dir, "other.prompt"), "x", { mode: 0o600 });
     assert.equal((await sh(LAUNCH, [sid, "N", join(dir, "other.prompt")], env)).code, 2);
     assert.equal((await sh(LAUNCH, ["../../x", "N", pf], env)).code, 2);
+  } finally {
+    cleanup(dir);
+  }
+});
+
+// 13.11: the form's Remote Control switch off → session.launch writes <uuid>.local; launch.sh drops --remote-control.
+test("launch.sh: a <uuid>.local marker (ours, not a link) drops --remote-control and is deleted; a foreign one is ignored", { skip: CMUX }, async () => {
+  const dir = tempHome("ah-lr-");
+  try {
+    const { bin } = fakeTools(dir);
+    const log = join(dir, "claude.log");
+    const env = { PATH: `${bin}:/usr/bin:/bin`, FAKE_CLAUDE_LOG: log, HOME: dir };
+    const sid = "0f0f0f0f-2222-4222-8222-222222222222";
+    const pf = join(dir, `${sid}.prompt`);
+    const lf = join(dir, `${sid}.local`);
+    writeFileSync(pf, "hi", { mode: 0o600 });
+    writeFileSync(lf, "", { mode: 0o600 });
+    assert.equal((await sh(LAUNCH, [sid, "N", pf], env)).code, 0);
+    assert.deepEqual(readFileSync(log, "utf8").split("\n--\n").slice(0, -1), ["--session-id", sid, "-n", "N", "--", "hi"]);
+    assert.ok(!existsSync(lf), "marker deleted");
+    // a symlink in its place is not a marker: Remote Control stays on
+    writeFileSync(pf, "", { mode: 0o600 });
+    writeFileSync(join(dir, "target"), "");
+    symlinkSync(join(dir, "target"), lf);
+    writeFileSync(log, "");
+    assert.equal((await sh(LAUNCH, [sid, "N", pf], env)).code, 0);
+    assert.deepEqual(readFileSync(log, "utf8").split("\n--\n").slice(0, -1), ["--session-id", sid, "--remote-control", "-n", "N"]);
   } finally {
     cleanup(dir);
   }

@@ -30,3 +30,14 @@ import Testing
         #expect(L10n.shared.setting == .ru && !L10n.shared.settingKnown)
     }
 }
+
+// 13.11: the "New session" Remote Control switch — `remote: false` only when it is off (an older daemon keeps working).
+@Suite(.hubLang(.ru)) struct LaunchRemoteSwitchTests {
+    @Test func remoteArgumentOnlyWhenOff() {
+        var d = LaunchDraft()
+        d.folder = "/tmp/x"; d.name = "n"
+        #expect(d.args["remote"] == nil)
+        d.remoteControl = false
+        #expect(d.args["remote"] == .bool(false))
+    }
+}

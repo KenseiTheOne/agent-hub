@@ -1909,21 +1909,26 @@ struct SessionRow: View {
             }
             if session.status == "busy", has("session.interrupt"), terminal != nil {
                 let b = block("session.interrupt", "send-esc")
-                Button { if store.isDemo(session) { demo() } else { Task { await store.perform(id: "session.interrupt", args: ["sessionId": .string(session.sessionId)], label: tr("Прервать ход", "Interrupt")) } } } label: { Image(systemName: "hand.raised.circle") }
-                    .buttonStyle(.plain).foregroundStyle(.white.opacity(b == nil ? 0.7 : 0.3)).disabled(store.busyAction != nil || b != nil)
+                // a labelled capsule (13.11: the bare hand icon was too small to notice or understand)
+                Button { if store.isDemo(session) { demo() } else { Task { await store.perform(id: "session.interrupt", args: ["sessionId": .string(session.sessionId)], label: tr("Прервать ход", "Interrupt")) } } } label: {
+                    Label(tr("Прервать", "Interrupt"), systemImage: "hand.raised.fill")
+                }
+                .buttonStyle(CapsuleStyle(fill: hexColor(0xFF9F0A, 0.2), stroke: hexColor(0xFF9F0A, 0.45), text: hexColor(0xFFC56B), height: 26, expand: false))
+                .disabled(store.busyAction != nil || b != nil)
                     .help(b.map { BridgeText.help($0, primitive: "session.interrupt", store) }
                           ?? tr("Прервать ход (как Esc во вкладке) — с подтверждением", "Interrupt the turn (like Esc in the tab) — asks first"))
             }
             if has("session.stop") {
                 Button { if store.isDemo(session) { demo() } else { Task { await store.perform(id: "session.stop", args: ["sessionId": .string(session.sessionId)], label: tr("Завершить сессию", "End session")) } } } label: {
-                    Image(systemName: "stop.fill").font(.system(size: 8)).foregroundStyle(hexColor(0xFF8A80))
-                        .frame(width: 26, height: 26).background(Circle().fill(hexColor(0xFF453A, 0.18)))
+                    Label(tr("Завершить", "End"), systemImage: "stop.fill")
                 }
-                .buttonStyle(.plain).disabled(store.busyAction != nil || block("session.stop") != nil)
+                .buttonStyle(CapsuleStyle(fill: hexColor(0xFF453A, 0.18), stroke: hexColor(0xFF453A, 0.4), text: hexColor(0xFF8A80), height: 26, expand: false))
+                .disabled(store.busyAction != nil || block("session.stop") != nil)
                 .help(block("session.stop")?.help ?? tr("Завершить сессию — продолжить позже можно через claude --resume", "End the session — resume later with claude --resume"))
             }
             }
-            .frame(width: 150, alignment: .trailing)
+            // one fixed width for every row, wide enough for Go to tab + Interrupt + End: effort capsules stay in a column
+            .frame(width: 340, alignment: .trailing)
         }
         .padding(.horizontal, 14).padding(.vertical, 8)
         .help(details)

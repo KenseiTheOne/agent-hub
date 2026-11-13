@@ -1085,7 +1085,7 @@ still `{}`). The journal gets `hook_event_name`, `session_id`, `claudePid`, `han
 | `terminal.focus` | immediate (for cli and third-party plugins too) | `surfaceId`, `workspaceId?` | below |
 | `cmux.focus` | **deprecated** alias of `terminal.focus` until the next contract — new plugins use `session.focus` | `surfaceId`, `workspaceId?` | below |
 | `session.interrupt`, `session.stop` | confirmation, app only | `sessionId` | below, [`bridge/README.md`](../bridge/README.md) |
-| `session.launch` | priced confirmation, app only, only from the form | `cwd`, `name`, `prompt` | below, [`bridge/README.md`](../bridge/README.md) |
+| `session.launch` | priced confirmation, app only, only from the form | `cwd`, `name`, `prompt`, `remote` (default `true`) | below, [`bridge/README.md`](../bridge/README.md) |
 | `session.respond` | immediate, app only (the card itself is the consent) | `requestId`, `decision`, `answers?` | [`hook.md`](hook.md) |
 | `job.cancel` | immediate, app only | `job` (16 hex, from `plugins[].jobs[].id`) | stop a plugin's background job: SIGTERM to its process group, SIGKILL 2 s later; `409 facts:no-job`. While the hub is paused there is nothing to cancel: the pause stops all jobs |
 
@@ -1119,6 +1119,10 @@ Refusals besides the folder and name checks — `facts:no-launch-terminal` (no t
 `facts:launch-unsupported`, `facts:bridge-offline` (cmux). The confirmation text names the terminal ("new iTerm2 tab").
 The launch is tracked until the session appears (cmux — its session file, other terminals — the core registry):
 events `bridge.launch.registered` / `bridge.launch.timeout` (names kept for compatibility) now carry `terminal`.
+`remote: false` (the form's Remote Control switch off) launches without `--remote-control`: the core writes an empty 0600
+`launch/<uuid>.local` marker next to the prompt file, `launch.sh` deletes it and drops the flag; the confirmation says
+"Remote Control off", the result carries `remote`. An older daemon doesn't know the argument — the app sends it only
+when the switch is off.
 
 `open.file` opens only document types (text, Markdown, JSON/YAML, PDF, office files, images, audio, video — `OPEN_EXT`
 in `open.file.mjs`) and regular folders (without an extension). A file with the x bit — `409 facts:executable`, other
