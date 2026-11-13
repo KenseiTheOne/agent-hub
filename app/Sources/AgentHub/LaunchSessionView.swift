@@ -3,8 +3,9 @@ import AppKit
 import SwiftUI
 
 /// The "New Claude session" window (stage 5, `session.launch`) over "Sessions", following the prototype. The folder, name and prompt
-/// are entered only by a human. The core writes the confirmation text with the cost (NSAlert) and checks the folder; the launch terminal
-/// (`/state.terminals.launch`) opens a new tab, the prompt goes through a 0600 file and never reaches the log or the command line.
+/// are entered only by a human, so "Launch" runs right away (no confirmation window); the form says the session uses quota.
+/// The core checks the folder; the launch terminal (`/state.terminals.launch`) opens a new tab, the prompt goes through a 0600
+/// file and never reaches the log or the command line.
 struct LaunchSessionView: View {
     let store: HubStore
     let close: () -> Void
@@ -51,6 +52,9 @@ struct LaunchSessionView: View {
             }
             Text(TerminalText.launchNote(store.state?.terminals == nil ? "cmux" : store.launchTerminal?.label))
                 .font(.system(size: 11.5)).foregroundStyle(.white.opacity(0.5)).fixedSize(horizontal: false, vertical: true)
+            // the cost the confirmation window used to show: "Launch" now runs right away
+            Label(tr("Сессия тратит квоту Claude", "The session uses Claude quota"), systemImage: "gauge.with.dots.needle.50percent")
+                .font(.system(size: 11.5)).foregroundStyle(.white.opacity(0.5))
             if !available {
                 Text(tr("Запуск недоступен: хаб не умеет запускать сессии", "Launching is unavailable: the hub can't launch sessions")).font(.system(size: 11.5)).foregroundStyle(.orange)
             } else if block == .noLaunchTerminal {

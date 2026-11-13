@@ -3,7 +3,7 @@
 // (an adapter id) or "auto" — the terminal most live sessions run in, otherwise the first installed (launchAdapter).
 //
 // The folder, name and prompt are entered by a human in the app form; plugin suggestions are not accepted
-// (ctx.plugin ≠ null → refusal). The prompt never goes to the journal, the confirmation text or the terminal's command
+// (ctx.plugin ≠ null → refusal). The prompt never goes to the journal or the terminal's command
 // line: it is written to <AgentHub>/launch/<uuid>.prompt (0600), the new tab runs bridge/launch.sh, and launch.sh reads the file,
 // deletes it and runs
 //   claude --session-id <uuid> --remote-control -n <name> -- <prompt>
@@ -13,12 +13,13 @@
 // (no --allow-dangerously-skip-permissions or other bypasses). After the terminal replies, the actions service waits for the
 // session to appear (cmux: its entry in ~/.cmuxterm/claude-hook-sessions.json; other terminals: the core session registry;
 // event bridge.launch.registered / bridge.launch.timeout) and deletes the prompt file if launch.sh never read it.
-// Level "confirm with cost", from app only (the core enforces this for session.*), from the Mac only.
+// Level "immediate", from app only (the core enforces this for session.*), from the Mac only: the folder, name and prompt
+// are typed by a human in the form, so pressing "Launch" there is the consent — a second window would ask the same thing
+// again. The form itself says the session uses quota.
 //
 // Refusals (facts:<code>): actions-off, no-launch-dir, bad-name, bad-cwd, forbidden-cwd, no-launch-terminal (no terminal can
 // open a tab), launch-unsupported, the adapter's code when it is unavailable (bridge-offline), offer-not-allowed.
 
-import { t } from "../i18n.mjs";
 import { mkdirSync, realpathSync, rmSync, writeFileSync, chmodSync } from "node:fs";
 import { isAbsolute, join, sep } from "node:path";
 import { randomUUID } from "node:crypto";
@@ -26,7 +27,7 @@ import { SESSION_NAME_RE, bridgeOf, cfgOf, isDir } from "./_actions-support.mjs"
 import { availability, launchFor, supports } from "../terminals/index.mjs";
 
 export const name = "session.launch";
-export const level = "confirm-cost";
+export const level = "immediate";
 export const remoteAllowed = false;
 export const appOnly = true;
 
@@ -74,24 +75,11 @@ function check(args, facts) {
 }
 
 // The core's third argument: { peer, plugin, config }. Only a human enters the prompt; a plugin suggestion
-// is rejected before the confirmation dialog.
+// is rejected before anything runs.
 export function verifyFacts(args, facts, { plugin = null } = {}) {
   if (plugin) return { ok: false, reason: "offer-not-allowed" };
   const r = check(args, facts);
   return r.ok ? { ok: true } : { ok: false, reason: r.reason };
-}
-
-export function describe(args, facts, lang = "ru") {
-  const n = (args.prompt || "").length;
-  let terminal = null;
-  try {
-    const l = launchFor(facts);
-    terminal = l ? l.adapter.label || l.adapter.id : null;
-  } catch {}
-  return {
-    text: t(lang, "prim.session.launch", { name: args.name, cwd: args.cwd, n, terminal, remote: args.remote !== false }),
-    cost: t(lang, "prim.session.launch.cost"),
-  };
 }
 
 export async function run(args, ctx) {

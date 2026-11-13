@@ -214,9 +214,7 @@ test("end-to-end: a real bridge on the socket (class bridge), cmux.focus from cu
     h.core.on("bridge.launch.registered", (e) => registered.push(e));
     const prompt = "сделай 'это'\nи то";
     const args = { cwd: project, name: "Тест запуска", prompt };
-    const t = await h.core.invoke({ id: "session.launch", args, peer: app });
-    assert.equal(t.status, 428);
-    const r = await h.core.invoke({ id: "session.launch", args, confirmToken: t.body.token, peer: app });
+    const r = await h.core.invoke({ id: "session.launch", args, peer: app });
     assert.equal(r.status, 200);
     assert.equal(r.body.ok, true, JSON.stringify(r.body));
     assert.equal(r.body.result.workspaceId, WS);

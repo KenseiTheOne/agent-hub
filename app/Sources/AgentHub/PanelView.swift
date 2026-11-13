@@ -1916,7 +1916,7 @@ struct SessionRow: View {
                 .buttonStyle(CapsuleStyle(fill: hexColor(0xFF9F0A, 0.2), stroke: hexColor(0xFF9F0A, 0.45), text: hexColor(0xFFC56B), height: 26, expand: false))
                 .disabled(store.busyAction != nil || b != nil)
                     .help(b.map { BridgeText.help($0, primitive: "session.interrupt", store) }
-                          ?? tr("Прервать ход (как Esc во вкладке) — с подтверждением", "Interrupt the turn (like Esc in the tab) — asks first"))
+                          ?? tr("Прервать ход (как Esc во вкладке)", "Interrupt the turn (like Esc in the tab)"))
             }
             if has("session.stop") {
                 Button { if store.isDemo(session) { demo() } else { Task { await store.perform(id: "session.stop", args: ["sessionId": .string(session.sessionId)], label: tr("Завершить сессию", "End session")) } } } label: {

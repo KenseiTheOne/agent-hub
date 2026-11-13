@@ -148,9 +148,9 @@ test("stage 5 primitives are registered with levels, app-only and remoteAllowed"
       "terminal.focus": ["immediate", false, false],
       "cmux.focus": ["immediate", false, false],
       "session.focus": ["immediate", false, false],
-      "session.interrupt": ["confirm", true, true],
+      "session.interrupt": ["immediate", true, true],
       "session.stop": ["confirm", true, true],
-      "session.launch": ["confirm-cost", true, false],
+      "session.launch": ["immediate", true, false],
     };
     for (const [n, [level, appOnly, remote]] of Object.entries(want)) {
       assert.ok(prims[n], n);
@@ -343,19 +343,17 @@ test("session.interrupt: app only, only with agentLifecycle=running, Esc to the 
     r = await h.core.invoke({ id: "session.interrupt", args: { sessionId: SID }, peer: APP });
     assert.equal(r.body.error, "facts:pid-mismatch");
     cmuxSessions(h, [{ sessionId: SID, pid: 2220, surfaceId: SURF, workspaceId: WS, agentLifecycle: "running" }]);
-    const { first, final } = await confirmed(h.core, "session.interrupt", { sessionId: SID });
-    assert.equal(first.status, 428);
-    assert.match(first.body.text, /Прервать текущий ход сессии «Работа» \(как Esc во вкладке\)/);
+    // immediate (13.11): Esc is pressed on the first request, no confirmation window
+    const final = await h.core.invoke({ id: "session.interrupt", args: { sessionId: SID }, peer: APP });
     assert.equal(final.status, 200);
     assert.equal(final.body.ok, true);
     assert.deepEqual(
       ops.map((o) => [o.op, o.key, o.surfaceId, o.workspaceId]),
       [["send-key", "escape", SURF, WS]],
     );
-    // the turn ended between confirmation and the press — Esc is not sent
-    const again = await h.core.invoke({ id: "session.interrupt", args: { sessionId: SID }, peer: APP });
+    // the turn has ended — Esc is not sent
     cmuxSessions(h, [{ sessionId: SID, pid: 2220, surfaceId: SURF, workspaceId: WS, agentLifecycle: "idle" }]);
-    const late = await h.core.invoke({ id: "session.interrupt", args: { sessionId: SID }, confirmToken: again.body.token, peer: APP });
+    const late = await h.core.invoke({ id: "session.interrupt", args: { sessionId: SID }, peer: APP });
     assert.equal(late.body.error, "facts:not-running");
     assert.equal(ops.length, 1);
   } finally {
@@ -425,7 +423,7 @@ test("session.stop: pid reused (different start time) — the signal is not sent
   }
 });
 
-test("session.launch: the prompt is in a 0600 file, not in the journal and not in the confirmation text; waiting for the cmux record", async () => {
+test("session.launch: runs without a confirmation; the prompt is in a 0600 file, not in the journal; waiting for the cmux record", async () => {
   const h = await makeHub();
   try {
     const cwd = h.project;
@@ -451,9 +449,7 @@ test("session.launch: the prompt is in a 0600 file, not in the journal and not i
     r = await h.core.invoke({ id: "session.launch", args: { cwd, name: "Новая", prompt: PROMPT }, peer: CLI });
     assert.equal(r.body.error, "peer:cli");
     const { first, final } = await confirmed(h.core, "session.launch", { cwd, name: "Новая", prompt: PROMPT });
-    assert.equal(first.body.level, "confirm-cost");
-    assert.ok(!first.body.text.includes("секретный"));
-    assert.match(first.body.text, /Remote Control/);
+    assert.equal(first.status, 200, "immediate: no 428 confirmation");
     assert.equal(final.body.ok, true);
     const sid = final.body.result.sessionId;
     assert.match(sid, /^[0-9a-f-]{36}$/);
@@ -478,8 +474,8 @@ test("session.launch: the prompt is in a 0600 file, not in the journal and not i
 });
 
 // 13.11: the form's Remote Control switch. remote:false → an empty 0600 <uuid>.local marker next to the prompt (launch.sh
-// drops --remote-control), the confirmation says "Remote Control off"; the default writes no marker; cleanup removes it.
-test("session.launch: remote:false writes the .local marker and says so in the confirmation; the default writes none", async () => {
+// drops --remote-control); the default writes no marker; cleanup removes it.
+test("session.launch: remote:false writes the .local marker; the default writes none", async () => {
   const h = await makeHub();
   try {
     const cwd = h.project;
@@ -490,7 +486,6 @@ test("session.launch: remote:false writes the .local marker and says so in the c
       return { ok: true, code: 0, workspaceId: WS };
     });
     let r = await confirmed(h.core, "session.launch", { cwd, name: "Без RC", prompt: "", remote: false });
-    assert.match(r.first.body.text, /Remote Control (выключен|off)/);
     assert.equal(r.final.body.ok, true);
     assert.equal(r.final.body.result.remote, false);
     assert.equal(markerSeen, 0o600);
@@ -502,7 +497,6 @@ test("session.launch: remote:false writes the .local marker and says so in the c
     await waitFor(() => events.length === 1);
     assert.ok(!existsSync(join(h.home, "launch", `${sid}.local`)));
     r = await confirmed(h.core, "session.launch", { cwd, name: "С RC", prompt: "" });
-    assert.match(r.first.body.text, /Remote Control (включён|on)/);
     assert.equal(markerSeen, null);
     assert.equal(ops.length, 2);
   } finally {

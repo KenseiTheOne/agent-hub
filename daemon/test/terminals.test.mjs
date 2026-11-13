@@ -386,7 +386,7 @@ test("session.interrupt: Esc where the terminal supports it — tmux by the regi
     assert.equal(r.body.error, "facts:not-running", "tmux knows no turns: the registry says idle");
     await h.register(S_TMUX, 2220, "busy");
     const { first, final } = await confirmed(h.core, "session.interrupt", { sessionId: S_TMUX });
-    assert.equal(first.status, 428);
+    assert.equal(first.status, 200); // immediate: no confirmation
     assert.equal(final.status, 200, JSON.stringify(final.body));
     assert.equal(final.body.ok, true);
     assert.deepEqual(h.term.panes["%7"].keys, ["Escape"]);
@@ -404,8 +404,7 @@ test("session.launch: the chosen terminal opens the tab (Terminal.app via osascr
     mkdirSync(project);
     const args = { cwd: project, name: "Launch test", prompt: "secret prompt text" };
     const { first, final } = await confirmed(h.core, "session.launch", args);
-    assert.equal(first.status, 428);
-    assert.match(first.body.text, /new Terminal tab|новая вкладка Terminal/);
+    assert.equal(first.status, 200); // immediate: no confirmation
     assert.equal(final.status, 200, JSON.stringify(final.body));
     assert.equal(final.body.result.terminal, "terminal-app");
     const call = h.term.calls.find((c) => c[0] === iterm2.OSASCRIPT);

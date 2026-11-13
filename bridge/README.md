@@ -90,9 +90,9 @@ gone stale while the confirmation was open (the turn ended, a scheduled run star
 |---|---|---|---|---|
 | `session.focus sessionId` | immediate (for cli and third-party plugins too) | no | the core terminal layer finds the session tab; the cmux adapter uses bridge `surface.focus` | `unknown-session`, `no-terminal`, `pid-mismatch`, `focus-unsupported`, `bridge-offline` |
 | `cmux.focus surfaceId [workspaceId]` | immediate (for cli and third-party plugins too); kept for compatibility — new plugins use `session.focus` | no | bridge: switch to the tab | `bridge-offline`, `unknown-surface`, `workspace-mismatch` |
-| `session.interrupt sessionId` | confirmation | yes | bridge: Esc in the session tab | `unknown-session`, `bridge-offline`, `no-cmux-session`, `pid-mismatch`, `not-running`, `no-surface` |
+| `session.interrupt sessionId` | immediate (app only) | yes | bridge: Esc in the session tab | `unknown-session`, `bridge-offline`, `no-cmux-session`, `pid-mismatch`, `not-running`, `no-surface` |
 | `session.stop sessionId` | confirmation | yes | `kill -TERM <pid>` | `unknown-session`, `no-start`, `session-file-mismatch`, `non-interactive`, `proc-start-mismatch`; at run time — `pid-reused`, `signature:*` (ok:false) |
-| `session.launch cwd name [prompt]` | priced | no | bridge: new tab + `launch.sh` | `bad-name`, `bad-cwd`, `forbidden-cwd`, `bridge-offline`; for a plugin offer — `offer-not-allowed` (the core passes the plugin id to `verifyFacts`, refusal comes before the confirmation window) |
+| `session.launch cwd name [prompt]` | immediate (app only, from the form) | no | bridge: new tab + `launch.sh` | `bad-name`, `bad-cwd`, `forbidden-cwd`, `bridge-offline`; for a plugin offer — `offer-not-allowed` (the core passes the plugin id to `verifyFacts`, refusal comes before anything runs) |
 
 The shared reason `actions-off` means the `actions` service is not running (fail closed, not open).
 

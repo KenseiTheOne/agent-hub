@@ -4,7 +4,16 @@ Releases are git tags `vX.Y.Z` (also published as GitHub releases); the current 
 The plugin contract has its own version history in
 [`docs/extension-points.md`](docs/extension-points.md#contract-versions).
 
-## Unreleased
+## 0.1.4 — 2026-11-13
+
+### Actions
+
+- **"New session" and "Interrupt turn" run without a confirmation window.** `session.launch` and `session.interrupt`
+  are now level `immediate`; both stay app-only, so cli, scripts and plugins are still refused (`403 peer:cli`,
+  `offer-not-allowed`). The launch form is typed by a human and is the consent itself — the window only asked the same
+  question again; the form now says the session uses Claude quota. Interrupt is the same as Esc in the tab, and the
+  "turn is running" check still happens right before the key press. "End session" (`session.stop`), every community
+  plugin action and every action that uses the network or quota keep their confirmation.
 
 ### Daemon
 

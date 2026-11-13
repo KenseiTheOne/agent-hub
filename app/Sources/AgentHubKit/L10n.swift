@@ -488,7 +488,7 @@ extension PluginPermission {
             case "open.*": return tr("открывать ссылки и файлы", "open links and files")
             case "terminal.focus", "cmux.focus": return tr("переводить во вкладку терминала", "switch to a terminal tab")
             case "session.focus": return tr("переводить во вкладку сессии", "switch to a session's tab")
-            case "session.interrupt": return tr("прерывать ход сессии (с подтверждением)", "interrupt a session's turn (asks first)")
+            case "session.interrupt": return tr("прерывать ход сессии", "interrupt a session's turn")
             case "session.stop": return tr("завершать сессию (с подтверждением)", "end a session (asks first)")
             default: return why ?? what
             }
