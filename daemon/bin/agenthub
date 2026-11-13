@@ -60,7 +60,7 @@ import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, realpathS
 import { dirname, resolve } from "node:path";
 import { execFileSync } from "node:child_process";
 import { defaultHome, loadConfig, pathsFor, readJsonFile, REPO_DIR } from "../lib/config.mjs";
-import { hasLaunchd, installPlan, localAppRequirement, plistXml, stateDirs, LABEL } from "../lib/launchd.mjs";
+import { bootstrapJob, hasLaunchd, installPlan, localAppRequirement, plistXml, stateDirs, LABEL } from "../lib/launchd.mjs";
 import { cdhashRequirement, pinFingerprint, requirementSha, writeAppPinPath, writeAppRequirement } from "../lib/app-pin.mjs";
 import { readBundleCode } from "../lib/app-sign.mjs";
 import { parsePublicKey } from "../lib/registry/minisign.mjs";
@@ -355,7 +355,11 @@ async function install() {
   try {
     execFileSync(plan.bootout[0], plan.bootout.slice(1), { stdio: "ignore" });
   } catch {}
-  execFileSync(plan.bootstrap[0], plan.bootstrap.slice(1), { stdio: "inherit" });
+  const b = await bootstrapJob(plan);
+  if (!b.ok) {
+    console.error(msg("cli.hub.ld.bootstrapFailed", { cmd: plan.bootstrap.join(" "), why: b.why, print: plan.print.join(" ") }));
+    process.exit(1);
+  }
   const waitMs = parseInt(process.env.AGENTHUB_INSTALL_WAIT_MS || "", 10) || 15_000;
   if (await waitHealthy(dirs.socket, waitMs)) {
     console.log(msg("cli.install.running", { label: LABEL, socket: dirs.socket }));

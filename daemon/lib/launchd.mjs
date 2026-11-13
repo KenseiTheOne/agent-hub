@@ -163,6 +163,26 @@ export function installPlan({ uid = myUid(), home = homedir(), launchctl = proce
   };
 }
 
+// `launchctl bootstrap` right after `bootout`: bootout returns before launchd has finished removing the job, and a
+// bootstrap in that window fails ("Bootstrap failed: 5: Input/output error") — the hub is then left with no daemon at
+// all (13.11, hub migrate). So bootstrap is retried for a few seconds; each failure's stderr is kept for the final
+// message. run(argv) → { status, stderr } (spawnSync by default; tests pass a double). → { ok, attempts, why }.
+export async function bootstrapJob(plan, { tries = 10, delayMs = 750, run = runQuiet, sleep = (ms) => new Promise((r) => setTimeout(r, ms)) } = {}) {
+  let why = null;
+  for (let i = 1; i <= tries; i++) {
+    const r = run(plan.bootstrap);
+    if (r.status === 0) return { ok: true, attempts: i, why: null };
+    why = (r.stderr || "").trim() || `exit ${r.status}`;
+    if (i < tries) await sleep(delayMs);
+  }
+  return { ok: false, attempts: tries, why };
+}
+
+function runQuiet(argv) {
+  const r = spawnSync(argv[0], argv.slice(1), { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+  return { status: r.status ?? 1, stderr: r.stderr || (r.error ? String(r.error.message) : "") };
+}
+
 // An optional mode (bundle.sh --cert): a requirement by the "AgentHub Local Signing" certificate (its own on every machine).
 // By default — the cdhash of the pinned build (lib/app-pin.mjs, agenthub pin-app).
 export function localAppRequirement(sha1) {

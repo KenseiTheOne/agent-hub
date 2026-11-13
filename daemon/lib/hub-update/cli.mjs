@@ -41,7 +41,7 @@ import { msg } from "../i18n.mjs";
 import { Journal } from "../journal.mjs";
 import { pinFingerprint, requirementSha } from "../app-pin.mjs";
 import { builtinCopyDir, builtinStatus } from "../builtin-copy.mjs";
-import { daemonLocation, hasLaunchd, installPlan, LABEL, launchdNode, plistXml } from "../launchd.mjs";
+import { bootstrapJob, daemonLocation, hasLaunchd, installPlan, LABEL, launchdNode, plistXml } from "../launchd.mjs";
 import { appControl, samePath } from "../platform.mjs";
 import { compareVersions, isLabel, parseVersionFile } from "../version.mjs";
 import { parseFileName, readPluginMeta } from "../meta.mjs";
@@ -533,10 +533,9 @@ async function reinstallLaunchd(home, { isLiveHome, repoTemplate = false, oldApp
   }
   const killed = await stopApps(oldApps, isLiveHome);
   if (killed) console.log(msg("cli.hub.ld.appsClosed", { n: killed }));
-  try {
-    execFileSync(plan.bootstrap[0], plan.bootstrap.slice(1), { stdio: "inherit" });
-  } catch (e) {
-    console.error(msg("cli.hub.ld.bootstrapFailed", { cmd: plan.bootstrap.join(" "), why: e.status ?? e.message, print: plan.print.join(" ") }));
+  const b = await bootstrapJob(plan);
+  if (!b.ok) {
+    console.error(msg("cli.hub.ld.bootstrapFailed", { cmd: plan.bootstrap.join(" "), why: b.why, print: plan.print.join(" ") }));
     return 1;
   }
   const until = Date.now() + (parseInt(process.env.AGENTHUB_INSTALL_WAIT_MS || "", 10) || 15_000);

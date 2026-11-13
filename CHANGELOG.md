@@ -4,7 +4,7 @@ Releases are git tags `vX.Y.Z` (also published as GitHub releases); the current 
 The plugin contract has its own version history in
 [`docs/extension-points.md`](docs/extension-points.md#contract-versions).
 
-## Unreleased
+## 0.1.3 — 2026-11-13
 
 Everything below stays within plugin contract **3**: each addition is an optional attribute, parameter, field or route
 that an older hub ignores, so plugins keep declaring `<agenthub.contract>3</agenthub.contract>`.
@@ -188,6 +188,10 @@ that an older hub ignores, so plugins keep declaring `<agenthub.contract>3</agen
 
 ### Daemon
 
+- **launchd bootstrap is retried.** `agenthub hub migrate --apply`, the hub update and `agenthub install --apply`
+  boot the old daemon out and bootstrap the new one; a bootstrap in the moment launchd is still removing the job fails
+  ("Bootstrap failed: 5: Input/output error") and left the hub with no daemon. Now it is retried for ~7 s
+  (`bootstrapJob` in `daemon/lib/launchd.mjs`) and the last error is printed when it gives up.
 - **Frame rate.** `plugin` SSE events are coalesced per plugin to at most one per 250 ms (`plugins.emitMinIntervalMs`),
   the latest state always delivered; the first change after a quiet period and the first frame after an action or a
   job's end go out at once.
