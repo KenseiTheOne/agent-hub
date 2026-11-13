@@ -4,6 +4,15 @@ Releases are git tags `vX.Y.Z` (also published as GitHub releases); the current 
 The plugin contract has its own version history in
 [`docs/extension-points.md`](docs/extension-points.md#contract-versions).
 
+## Unreleased
+
+### Daemon
+
+- **A dev build is not "older" than its own release.** After `hub migrate` the hub runs `X.Y.Z-dev.<sha>`, which semver
+  puts before `X.Y.Z`, so the hub offered the older `vX.Y.Z` tag as an update (code from before the build). For update
+  checks such a build now compares as `X.Y.Z` (`updateBaseOf` in `daemon/lib/version.mjs`): the same tag is not
+  offered, the next one is.
+
 ## 0.1.3 — 2026-11-13
 
 Everything below stays within plugin contract **3**: each addition is an optional attribute, parameter, field or route

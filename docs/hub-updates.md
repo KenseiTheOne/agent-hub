@@ -61,7 +61,9 @@ newer); with `--allow-dirty` — `X.Y.Z-dev.<commit7>.dirty`.
 `git ls-remote --tags <origin>` (the user's environment, `GIT_TERMINAL_PROMPT=0`, a 30 s timeout) → tags of the form
 `vMAJOR.MINOR.PATCH` (with `-pre` only when `services.hubUpdate.prerelease = true`); for an annotated tag the commit is
 taken from the `^{}` line. The new version is the highest by semver (numbers compare as numbers, a pre-release is lower
-than the release, `+…` build labels are ignored), strictly greater than the current one. `origin` is
+than the release, `+…` build labels are ignored), strictly greater than the current one. A build from a working folder
+or a branch (`X.Y.Z-dev.<sha7>[.dirty]`, `hub migrate`) compares as `X.Y.Z`: VERSION is raised by the release commit
+itself (§9), so such a build is at or after `vX.Y.Z` — that tag is not offered, the next one is (`updateBaseOf`). `origin` is
 `services.hubUpdate.remote` in config.json, otherwise `build.json.origin` of the current version (the migration writes
 the working folder's `git remote get-url origin` there). Not configured — no network; a check every 15 min looks
 whether it has been configured. Tags with a major version above the current one + `services.hubUpdate.maxMajorJump` (1)

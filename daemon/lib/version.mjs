@@ -71,3 +71,13 @@ export const LABEL_RE = /^\d{1,6}\.\d{1,6}\.\d{1,6}(?:-[0-9A-Za-z.-]{1,64})?$/;
 export function isLabel(s) {
   return typeof s === "string" && LABEL_RE.test(s) && !s.includes("..");
 }
+
+// The version a build counts as when looking for updates. A build from a working folder or a branch is labelled
+// `X.Y.Z-dev.<sha7>[.dirty]` (hub migrate, the branch channel); semver reads `-dev…` as "before X.Y.Z", so the hub
+// offered the older `vX.Y.Z` tag as an update (13.11: 0.1.2-dev.52e4996 → v0.1.2, code from before the build). VERSION
+// is raised by the release commit itself (scripts/set-version.sh, docs/hub-updates.md §9), so such a build is at or after
+// X.Y.Z: it compares as X.Y.Z — the same tag is not newer, the next one is. Other labels are returned as they are.
+export function updateBaseOf(label) {
+  const m = /^(\d+\.\d+\.\d+)-dev\.[0-9a-f]{7}(?:\.dirty)?$/.exec(String(label ?? ""));
+  return m ? m[1] : label;
+}

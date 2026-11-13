@@ -25,7 +25,7 @@ import { DAEMON_DIR, INSTALL } from "../config.mjs";
 import { msg } from "../i18n.mjs";
 import { appBundleProblem, appControl, detachedSpawnOptions, killProcessTree } from "../platform.mjs";
 import { launchdNode } from "../launchd.mjs";
-import { VERSION, isLabel } from "../version.mjs";
+import { VERSION, isLabel, updateBaseOf } from "../version.mjs";
 import { BUILD_DEFAULTS, buildEnv, liveCodeOf, testCodeOf } from "../hub-update/build.mjs";
 import { HubUpdateChecker } from "../hub-update/checker.mjs";
 import { ensureDir, hubPaths, readBuild } from "../hub-update/layout.mjs";
@@ -88,7 +88,8 @@ export async function start(ctx) {
     onChange: () => updater?.changed(),
     remote,
     brew,
-    current: () => self || VERSION,
+    // a dev build (X.Y.Z-dev.<sha>) compares as X.Y.Z: the vX.Y.Z tag is not an update for it (version.mjs updateBaseOf)
+    current: () => updateBaseOf(self || VERSION),
     setting: () => ctx.settings.get("checkHubUpdates"),
     configAllows: () => cfg.checkUpdates !== false,
     timing: cfg.updateCheck,
