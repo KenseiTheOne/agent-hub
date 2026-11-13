@@ -32,8 +32,9 @@
 // and on x-ratelimit-*; between allowed calls the plugin gets the previous result from service memory with nextAt and
 // a reason (why). The call counter and backoff survive a restart: <home>/Cache/oauth-<id>.json (timestamps only,
 // no tokens or content). An action process (a human pressed the plugin's button) may call too (pluginByPid with actions).
-// A write or an explicit refresh: `fresh: true` in the request, a tool the declaration lists in writes=, or any call from an
-// action process (the route sets fresh for it: a human pressed a button) — no interval cache, no merging with an identical call in
+// A write or an explicit refresh: `fresh: true` in the request, a tool the declaration lists in writes=, or any call from a
+// foreground action process (the route sets fresh for it: a human pressed a button; a background job follows the interval
+// cache like a run unless it asks for fresh, task 84) — no interval cache, no merging with an identical call in
 // flight, the reply waits for the service (up to 20 s); the daily budget and backoff still apply (gated — 429 mcp:wait,
 // the call is not made); a tool error does not start a backoff (it is usually the input, not the service). The result
 // is not kept in memory, and a successful fresh call marks this plugin's cached results of the connection stale: the next

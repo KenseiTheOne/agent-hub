@@ -4,7 +4,7 @@
 //
 // <agenthub.title>Claude Code Расход</agenthub.title>
 // <agenthub.title lang="en">Claude Code Spend</agenthub.title>
-// <agenthub.version>0.2.1</agenthub.version>
+// <agenthub.version>0.2.2</agenthub.version>
 // <agenthub.author.name>Kensei</agenthub.author.name>
 // <agenthub.author.github>KenseiTheOne</agenthub.author.github>
 // <agenthub.desc>Журнал расхода токенов Claude Code: сколько и когда потрачено, стоимость по ценам API за день, неделю и месяц</agenthub.desc>
@@ -1031,7 +1031,7 @@ function main() {
     try {
       text = render(idx, { settings: settingsPath ? readSettings(settingsPath) : DEFAULT_SETTINGS, paused });
     } catch (e) {
-      text = [line(T[envLang()].broken, { status: "unknown", event: "source-broken" }), "---", line(clean(e?.message || e, 140), { color: "gray" })].join("\n");
+      text = brokenFrame(e);
     }
     const t = Date.now();
     if (force || text !== lastText || t - lastAt > 60_000) {
@@ -1098,6 +1098,11 @@ function main() {
     idx.save();
     process.exit(0);
   });
+}
+
+// The frame for a failed render: the same short tile caption as a normal frame, so the popover tile keeps its name.
+export function brokenFrame(err, lang = envLang()) {
+  return [line(T[lang].broken, { status: "unknown", tileLabel: T[lang].tileLabel, event: "source-broken" }), "---", line(clean(err?.message || err, 140), { color: "gray" })].join("\n");
 }
 
 function isMain() {

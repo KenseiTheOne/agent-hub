@@ -174,9 +174,10 @@ runs.
   (`check.sh`: "! <agenthub.action>: community plugin actions…"): **the reviewer checks every command does exactly what
   its `title` says**, nothing irreversible hides behind a vague title, and the row that carries the button names the
   thing acted on (the core quotes that row in the confirmation window). Community `<agenthub.push>` rules count only with
-  `kind="plugin"` and only their label: the banner shows the reviewed label and the row text — **the reviewer reads every
-  label and checks the rows with `event=` carry no foreign or secret text** (foreign text escaped, see below). `quiet`, `away`,
-  `hold`, `cooldown` and other kinds are ignored (a linter warning).
+  `kind="plugin"`, and only their label and `macOnly="true"` (it only narrows delivery to the Mac banner): the banner
+  shows the reviewed label and the row text — **the reviewer reads every label and checks the rows with `event=` carry
+  no foreign or secret text** (foreign text escaped, see below). `quiet`, `away`, `hold`, `cooldown` and other kinds are
+  ignored (a linter warning).
   **`net="none"`, `background="true"`, `input=` (hub 0.1.3+)** — each is a warning for the reviewer: `net="none"` lifts
   the network floor for one action, so **the reviewer checks the command reaches no host** (itself or through programs
   it starts; the hub's own connection proxy is refused to such an action with `403 net:none`); `background="true"` runs without a timeout, so **the reviewer checks the job ends by itself and on SIGTERM

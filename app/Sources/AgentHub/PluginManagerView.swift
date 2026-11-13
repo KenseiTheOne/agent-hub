@@ -123,7 +123,7 @@ struct PluginManagerView: View {
             Notice(color: .red, icon: "pause.circle", title: tr("Хаб на паузе — установка и обновление плагинов выключены", "Hub paused — installing and updating plugins is off"))
         }
         if let c = catalog, !c.configured {
-            NotConnected(catalog: c, recheck: { Task { await store.loadRegistry() } })
+            NotConnected(catalog: c, builtin: (store.state?.plugins ?? []).filter { $0.tier == .builtin }.map(\.title), recheck: { Task { await store.loadRegistry() } })
         } else if let code = store.fetchError ?? catalog?.error {
             Notice(color: .red, icon: "xmark.octagon", title: Explain.text(code: code, status: 0, label: tr("Каталог", "Catalog")), detail: tr("Код: \(code)", "Code: \(code)"),
                    actionTitle: isApp ? tr("Повторить", "Retry") : nil, onAction: retryFetch)
@@ -540,6 +540,8 @@ struct PluginManagerView: View {
 /// a restart — "Check again" re-reads the state.
 struct NotConnected: View {
     let catalog: RegistryCatalog
+    /// Titles of the built-in plugins from the state: the note names them without the shell knowing any plugin.
+    var builtin: [String] = []
     var recheck: () -> Void = {}
     private let openStore = State(initialValue: true)
     private var open: Bool { get { openStore.wrappedValue } nonmutating set { openStore.wrappedValue = newValue } }
@@ -560,8 +562,7 @@ struct NotConnected: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             Label(title, systemImage: "shippingbox").font(.system(size: 13, weight: .semibold))
-            Text(tr("Из каталога ставятся официальные плагины. Встроенные (Сессии, Фоновые агенты, Квота) и свои из папки работают и без него.",
-                    "Official plugins come from the catalog. Built-in ones (Sessions, Background agents, Quota) and your own from a folder work without it."))
+            Text(RegistryText.worksWithout(builtin: builtin))
                 .font(.system(size: 12)).foregroundStyle(.white.opacity(0.7))
             Text(missingText).font(.system(size: 12)).foregroundStyle(.orange)
             DisclosureGroup(isExpanded: Binding(get: { open }, set: { open = $0 })) {

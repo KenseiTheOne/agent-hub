@@ -443,6 +443,17 @@ public struct RegistryCatalog: Decodable, Sendable, Hashable {
 }
 
 public enum RegistryText {
+    /// "The catalog isn't connected" note: what works without it. The built-in names come from the state (the plugins'
+    /// own titles), so the shell never names a plugin; no state yet — no list.
+    public static func worksWithout(builtin titles: [String]) -> String {
+        let list = titles.map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }.joined(separator: ", ")
+        if list.isEmpty {
+            return tr("Из каталога ставятся официальные плагины. Встроенные и свои из папки работают и без него.",
+                      "Official plugins come from the catalog. Built-in ones and your own from a folder work without it.")
+        }
+        return tr("Из каталога ставятся официальные плагины. Встроенные (\(list)) и свои из папки работают и без него.",
+                  "Official plugins come from the catalog. Built-in ones (\(list)) and your own from a folder work without it.")
+    }
     public static func from(_ registry: String) -> String { tr("из реестра «\(registry)»", "from the \"\(registry)\" registry") }
     public static var cappedHelp: String {
         tr("Этому реестру доверено не больше, чем плагинам сообщества: каждая команда — с подтверждением.",

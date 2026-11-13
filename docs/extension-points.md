@@ -101,7 +101,7 @@ The same for primitives, routes and services. The object is frozen.
 | `jobs()`, `job(id)` | background jobs of plugins: `[{id, plugin, actionId, title, startedAt, pid}]`, one or `null` |
 | `provide(name, fn)` | an extension adds its own fact (`"bridge.online"`, `"bridge.surfaces"`, `"hook.pending"` — waiting cards `[{requestId, sessionId, kind, tool, subagent}]`, `"plugins.busy"` — plugin installations in progress, `"idle.state"` — the "can I shut down" verdict, `"secrets.store"` — the keychain store for connections (the secrets service), `"secrets.api"` — plugin secrets entered in the app (the secrets service), `"oauth.connections"` — connection state without tokens, `"oauth.api"` — the oauth service for its routes, `"push.channels"` — the push service's channel registry (`register(channel) → unregister`, `list()`; below, "Push channel"), `"terminal.adapters"` — the core's terminal adapter list (built-in + approved extensions), `"extensions.api"` — the extension manager for its routes…). Each name once per daemon |
 | `get(name, ...args)` | the fact value (`undefined` if there is none) |
-| `pluginByPid(pid, {actions}?)` | whose process this is: a running standard run or a streamable plugin process; with `{actions: true}` also an action process or a background job (never a descendant) → `{id, source, tier, trusted, net, terminal}` or `null`. For routes that serve plugins themselves: the peer pid on the socket comes from the kernel (`peer.pid`), not from the request (`POST /connections/:id/mcp|http` and `/terminal/*` pass `{actions: true}`). The server itself also walks every ancestor of a peer (and checks the process group of each) with it to bind `peer.plugin` ([`api.md`](api.md#peer-classes)) |
+| `pluginByPid(pid, {actions, group}?)` | whose process this is: a running standard run or a streamable plugin process; with `{actions: true}` also an action process or a background job (never a descendant) → `{id, source, tier, trusted, net, terminal}` or `null`. With `{actions: true}` an action or job process also carries `action: {id, net, job?}` (`job: true` — a background job's process, not a foreground action's). `{group: true}` — pid is a process group id: the group of a running run, action, job or streamable process, only while the group still has a member. A process of an instance that is being stopped, removed or updated is still returned, with `trusted: false`, until it is gone; a streamable process stopping for a restart keeps its plugin's trust. For routes that serve plugins themselves: the peer pid on the socket comes from the kernel (`peer.pid`), not from the request (`POST /connections/:id/mcp|http` and `/terminal/*` pass `{actions: true}`). The server itself also walks every ancestor of a peer (and checks the process group of each) with it to bind `peer.plugin` ([`api.md`](api.md#peer-classes)) |
 
 ### `sessions` — the Claude Code session registry
 
@@ -208,7 +208,9 @@ export const routes = [
 - A process of an untrusted plugin (community, local — the plugin process, its action or a descendant of either; found by
   pid, ancestors and process group, `peer.plugin`) gets `403 peer:untrusted-plugin` on every route unless the route sets
   `untrustedPlugin: true` ([`api.md`](api.md#peer-classes), "Plugin processes"). Don't set it on anything that reads
-  sessions or changes state.
+  sessions or changes state. A connection whose process was already gone when it was classified (`peer.reason`
+  `peer:no-process` / `peer:no-pid`) gets the same narrow set: `403 {"error":"peer:no-process"|"peer:no-pid"}` unless
+  the route sets `untrustedPlugin: true`.
 - `body` is the parsed JSON (or `undefined`); not JSON → 400. Returning `undefined` → 204.
 - `peer`: `{class, pid, path, startSec, reason?, claudePid?, plugin?}` — `plugin: {id, trusted, tier, source, pid}`
   when the client is a plugin process or its descendant (`pid` there is the plugin process).
@@ -706,7 +708,7 @@ sha256 as in `plugins.lock` and the files on disk are exactly that archive; a lo
 `trusted` = `builtin`, `official` or `own` (`trustedPlugin` in `core.mjs`; a test-tier local plugin counts as `own`): only
 these get `<agenthub.action>` at the declared level (for `own` — as for official: without network and without a price,
 including `immediate`; `community` gets actions too, never below `confirm`), their own push rules in full (`community` —
-`kind="plugin"` labels only), service variables (`AGENTHUB_USAGE_FILE`, `AGENTHUB_HUB_SOCKET`, `AGENTHUB_CLAUDE_SESSIONS_FILE`, `$VARIABLE` in
+`kind="plugin"` rules with their label and `macOnly="true"` only), service variables (`AGENTHUB_USAGE_FILE`, `AGENTHUB_HUB_SOCKET`, `AGENTHUB_CLAUDE_SESSIONS_FILE`, `$VARIABLE` in
 `<agenthub.watch>` and `<agenthub.fsRead>`), writing to the session registry and MCP calls through the hub.
 
 **Plugin actions.** For `builtin`, `official`, `own` and (hub 0.1.3+) `community` — never below `confirm` for community;
@@ -723,14 +725,21 @@ command is split into argv **without a shell** (quotes, `\`, `~/`); the first wo
 environment is the same as the plugin's, the timeout is 30 s. The confirmation text ends with the sanitized title of the
 row that carries the button ("Button on the row "…"", ≤ 120 graphemes).
 
-**Input actions:** `input="placeholder"` (`input-<lang>=`, `maxLength=` 1…4000, default 256), always with `arg=` — the
-value is typed by a human in the app (`offer.input`), not printed by the plugin (an `arg=` on the line is refused). The
-core checks it with the same rules as an argument (pattern, control and format characters, a leading `-`) and the
-action's `maxLength`, and writes it to the action's **stdin** (the text, `\n`, EOF); argv is the static command (a
-`{name}` word is dropped). App only for every tier; the journal and `actionResult` carry only `inputLength`.
+**Input actions:** `input="placeholder"` (`input-<lang>=`, `maxLength=` 1…4000, default 256) — the text is typed by a
+human in the app (`offer.input`), not printed by the plugin. The core checks it with the same rules as an argument
+(pattern, control and format characters, a leading `-`) and the action's `maxLength`, and writes it to the action's
+**stdin** (the text, `\n`, EOF). App only for every tier; the journal and `actionResult` carry only `inputLength`. Two
+forms:
+- without `inputPattern=`: `arg=` is required and is the text's pattern; the line can't carry `arg=` (refused) and
+  argv is the static command (a `{name}` word is dropped);
+- with `inputPattern="^…$"` (hub 0.1.3+, contract feature `input-pattern`): the text is checked against `inputPattern`,
+  and `arg=` (optional then) is an ordinary row argument — the line carries `action=<id> arg=<value>`, the core checks
+  the value against the `arg=` pattern (`409 facts:bad-arg` when it no longer matches) and puts it in argv as for any
+  parameterized action; the offer, the 428 text and `actionResult.arg` name it. The text still goes only to stdin.
 
 **Background actions:** `background="true"` — the command is a job: its own process group, no timeout, stdout keeps
-only an 8 KB tail (for `reason=`/`message=`), at most `plugins.maxJobsPerPlugin` (4) per plugin. `/state.plugins[].jobs`,
+only an 8 KB tail (for `reason=`/`message=`), at most `plugins.maxJobsPerPlugin` (4) per plugin (jobs of a removed or updated instance that are still being killed
+don't count). `/state.plugins[].jobs`,
 the idle verdict and `facts.runningActions()` list it; `job-start`/`job-exit` in the journal; `job.started`/`job.exited`
 on the bus. The end goes to the plugin: `{"type":"jobExit","job","actionId","ok","code","signal","durationMs",
 "cancelled"?,"reason"?,"message"?}` to a streamable process, an extra run with `AGENTHUB_REFRESH_REASON=JobExit` to a
@@ -739,7 +748,9 @@ stopping; **not** by a restart of the streamable process (language, pause flag, 
 comes while that process restarts is delivered to the new one, and each start of a plugin with background actions begins
 with `{"type":"jobs","running":[…]}`. The job ends when its first process exits (the rest of its group is killed; a
 `setsid` descendant holding stdout can't keep it alive); running jobs are kept in `<home>/jobs.json` so the next daemon
-kills those a crashed daemon left behind ([`writing-plugins.md`](writing-plugins.md) 5.2).
+kills those a crashed daemon left behind ([`writing-plugins.md`](writing-plugins.md) 5.2). A job's calls to
+`/connections/:id/mcp|http` follow the interval cache unless it passes `fresh: true`; only a foreground action is always
+fresh.
 
 **A parameterized action:** `arg="taskId:^[A-Za-z0-9_-]{1,64}$"` (name `[A-Za-z][A-Za-z0-9_]{0,31}`, a pattern with
 `^` and `$`, up to 200 characters; otherwise the action is dropped with a warning). In the output —
@@ -808,7 +819,7 @@ unescaped. Parameters:
 | `segment=true`, `select=true`, `selected=true` | hub 0.1.1: the line's children are the options of a segmented control (one track, the `selected=true` child highlighted) or a popup button (the current child with a chevron, a menu of all children with their `note=` dimmed); the other children carry offers; `note=` on the line — gray text beside the control. A segment that does not fit the width is drawn as a popup button |
 | `toggle=on\|off` | hub 0.1.1: a switch in that state; a click runs the line's own offer (the plugin flips the state in its next frame) |
 | `table=true`, `columns="A¦B"`, `cells="b¦c"`, `cellColors="¦#RRGGBB"`, `icon=true`, `group=true`, `header=true` | hub 0.1.1: the line's children are ~34 pt table rows — the title is the first column, `cells=` the others, `cellColors=` a color per cell (empty — default), `sfimage`/`iconColor` (or `status`) a state dot; a row's children with an offer are buttons on its right (`icon=true` — icon only, the title as tooltip and accessibility label), without an offer — gray notes; a `group=true` child is a collapsible subheading whose children are rows; a direct child with an offer and `header=true` is a button by the table title. `¦` (U+00A6) separates entries, empty entries keep their place |
-| `chart=bars`, `values="v1,v2"`, `labels="a¦b"`, `valueLabels="…"`, `avg=`, `avgLabel=`, `highlight=last\|<index>`, `tint=none`, `tips="…"`, `height=`, `unit=`, `stack="a,b"`, `series="a1,a2;b1,b2"`, `colors="#hex,#hex"`, `legend=true` | hub 0.1.3: a bar chart card — one bar per value (or stacked layers per series, a visible layer at least 2 pt), `labels` under the bars, `valueLabels` above them, a dashed average line with its caption (bars above it tinted orange unless `tint=none`), the `highlight` bar in the plugin color or `color=`, a hover tooltip per bar (`tips`: `¦` between entries, the two characters `\n` — a line break inside one). A `segment=true`/`select=true` child sits in the card's title row; other children are drawn under the chart. `note=` — gray text right of the title |
+| `chart=bars`, `values="v1,v2"`, `labels="a¦b"`, `valueLabels="…"`, `avg=`, `avgLabel=`, `highlight=last\|<index>`, `tint=none`, `tips="…"`, `height=`, `unit=`, `stack="a,b"`, `series="a1,a2;b1,b2"`, `colors="#hex,#hex"`, `legend=true` | hub 0.1.3: a bar chart card — one bar per value (or stacked layers per series, a visible layer at least 2 pt), `labels` under the bars, `valueLabels` above them, a dashed average line (its caption under the chart beside a dashed sample of the line, `avgLabel=` or «среднее» / "average"; bars above it tinted orange unless `tint=none`), the `highlight` bar in the plugin color or `color=`, a hover tooltip per bar (`tips`: `¦` between entries, the two characters `\n` — a line break inside one). A `segment=true`/`select=true` child sits in the card's title row; other children are drawn under the chart. `note=` — gray text right of the title |
 | `chart=share` with children carrying `value=` (`note=`, `color=`) | hub 0.1.3: one rounded bar of the children's shares and a legend: dot · title · percent · `note=` on the right. No positive value — a plain line |
 | `bar=<0…100>`, `barColumn=<n>` | hub 0.1.3: a thin progress bar on a body line (title, `note=` right, the bar under them; `color=` tints the bar) or a table row (`barColumn=` on the table or the row, 1-based with the title column as 1: the bar in that column with the cell text beside it; without it — a hairline under the title) |
 | `max=<number>` (on `chart=bars`) | hub 0.1.3: a fixed scale top — bars above it are clipped, an `avg=` above it is not drawn. Without it the scale autoscales to the tallest bar or `avg=`, whichever is higher. Non-positive or broken — ignored |
@@ -902,7 +913,7 @@ children as lines, a `bar=` line as its title, the header as before. Numbers are
 thousands separator); lists are comma-separated, text lists `¦`-separated.
 
 **Other additions within contract 3 (hub 0.1.3).** All optional, ignored by an older hub: title escapes (`\|`);
-action attributes `input=`, `net="none"`, `background="true"`; community actions and `kind="plugin"` push rules;
+action attributes `input=`, `inputPattern=`, `net="none"`, `background="true"`; community actions and `kind="plugin"` push rules;
 `<agenthub.subscribe>`; `<agenthub.connection type="http">`; `<agenthub.watch recursive="true">`; `agentSession=` lines;
 `until=`, `font=mono`, `max=`, `sparkMax=`; `lang` in any BCP-47 tag and `AGENTHUB_LOCALE`; `actionResult.arg`,
 `{"type":"jobExit"}`, `{"type":"stopping"}`; `event.raised.title`; banner buttons and click target (`push.notify`
@@ -910,6 +921,22 @@ action attributes `input=`, `net="none"`, `background="true"`; community actions
 `<agenthub.push>` now keeps the event off the extra channels (older hubs ignore it); a `>` inside a quoted attribute
 value. A plugin that relies on one of them keeps `<agenthub.contract>3</agenthub.contract>` and should read
 on an older hub as the fallback each item describes.
+
+**Contract 3 is frozen (2026-11-12).** Contract 3 changed three times in two days; from now on it stays as it is until
+contract 4:
+- Nothing in it changes meaning or goes away: every tag, attribute, line parameter, environment variable, stdin message,
+  route, refusal code and effect documented for contract 3 keeps working as documented — deprecated names included
+  (`cmux.focus`, the `runs`/`night` push kinds).
+- A new item may join contract 3 only if it is optional and an older contract 3 hub ignores it with a usable fallback —
+  the "within contract 3" paragraphs above list them. One that an older hub would run *wrongly* (not just ignore) also
+  gets a registry feature in `CONTRACT_FEATURES` (`daemon/lib/registry/perms.mjs`), so an index entry that uses it reads
+  "requires a newer hub" there. Each feature is named in this paragraph: `background`, `community-actions`,
+  `http-connection`, `input`, `input-pattern`, `net-none`, `subscribe`, `watch-recursive`.
+- Anything else — a removal, a changed meaning, a new requirement an older hub can't ignore — waits for contract 4.
+  Collected so far: drop the `cmux.focus` alias of `terminal.focus`; drop the `runs`/`night` push kind synonyms.
+
+`daemon/test/contract-freeze.test.mjs` holds the version at 3 and checks that every `CONTRACT_FEATURES` entry is named
+here.
 
 **Contract 3 and version 2 hubs.** A version 2 hub sees `<agenthub.contract>3` and refuses with "requires a newer hub" —
 so a plugin that cannot live without session metadata or the pause flag only needs to declare 3. A plugin that declared

@@ -3,7 +3,7 @@
 //
 // <agenthub.title>Claude Code Квота</agenthub.title>
 // <agenthub.title lang="en">Claude Code Quota</agenthub.title>
-// <agenthub.version>0.5.1</agenthub.version>
+// <agenthub.version>0.5.2</agenthub.version>
 // <agenthub.author.name>Kensei</agenthub.author.name>
 // <agenthub.author.github>KenseiTheOne</agenthub.author.github>
 // <agenthub.desc>Сколько осталось квоты Claude: неделя, 5-часовое окно и темп к сбросу</agenthub.desc>
@@ -23,12 +23,12 @@
 // <agenthub.watch lang="en">$AGENTHUB_USAGE_FILE — the usage service wrote fresh quota: show it right away</agenthub.watch>
 // <agenthub.contract>2</agenthub.contract>
 // <agenthub.icon symbol="gauge.with.dots.needle.50percent" color="#0A84FF"></agenthub.icon>
-// <agenthub.push key="week-80" cooldown="7d" kind="problems">Квота: неделя ≥ 80%</agenthub.push>
-// <agenthub.push key="week-80" lang="en">Quota: week ≥ 80%</agenthub.push>
+// <agenthub.push key="week-80" cooldown="7d" kind="problems">Неделя ≥ 80%</agenthub.push>
+// <agenthub.push key="week-80" lang="en">Week ≥ 80%</agenthub.push>
 // <agenthub.push key="pace-85" cooldown="7d" kind="problems">При таком темпе 85% наступит раньше сброса</agenthub.push>
 // <agenthub.push key="pace-85" lang="en">At this pace you'll hit 85% before reset</agenthub.push>
-// <agenthub.push key="token-lost" kind="problems">Квота не обновляется: нужен вход в Claude</agenthub.push>
-// <agenthub.push key="token-lost" lang="en">Quota isn't updating: sign in to Claude</agenthub.push>
+// <agenthub.push key="token-lost" kind="problems">Не обновляется: нужен вход в Claude</agenthub.push>
+// <agenthub.push key="token-lost" lang="en">Not updating: sign in to Claude</agenthub.push>
 //
 // Doesn't touch the network: every 3 min the core's usage service (daemon/lib/services/usage.mjs) fetches the quota and puts the rows into
 // <home>/Cache/usage.json; the path is in AGENTHUB_USAGE_FILE (the core gives it only to built-in and official plugins).

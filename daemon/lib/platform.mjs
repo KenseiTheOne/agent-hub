@@ -149,6 +149,20 @@ export function treeSpawnOptions({ platform = PLATFORM } = {}) {
 }
 
 // Kill a process and all its descendants.
+// Whether a process group still has a member we may signal (task 82): process.kill(-pgid, 0). ESRCH — the group is empty;
+// EPERM — its members belong to another user, so it is not ours either. A group is only ever looked up for processes the
+// daemon spawned detached (each leads its own group). Where groups can't be probed (Windows) the answer is true.
+export function groupAlive(pgid, { platform = PLATFORM } = {}) {
+  if (!Number.isInteger(pgid) || pgid <= 1) return false;
+  if (isWindows(platform)) return true;
+  try {
+    process.kill(-pgid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export function killTree(child, signal = "SIGKILL", { platform = PLATFORM } = {}) {
   if (!child?.pid) return;
   if (isWindows(platform)) {

@@ -411,8 +411,8 @@ struct TableGroupView: View {
                 HStack(spacing: 6) {
                     Image(systemName: "chevron.right").font(.system(size: 9, weight: .semibold))
                         .rotationEffect(.degrees(open ? 90 : 0))
-                    Text(group.item.title).font(.system(size: 11.5, weight: .semibold)).lineLimit(1)
-                        .reportsTruncation(group.item.title, font: .system(size: 11.5, weight: .semibold))
+                    Text(group.item.title).font(group.item.titleFont(11.5, .semibold)).lineLimit(1)
+                        .reportsTruncation(group.item.title, font: group.item.titleFont(11.5, .semibold))
                     if let n = group.item.note {
                         Text(n).font(.system(size: 11.5)).lineLimit(1).foregroundStyle(.white.opacity(0.4))
                     }

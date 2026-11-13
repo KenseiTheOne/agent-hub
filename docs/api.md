@@ -30,6 +30,11 @@ leads its own group, which its descendants inherit even when they are reparented
 shell plugin, `agenthub` from a plugin's action, or a double-forked helper is recognized as that plugin. A group counts
 until its run, action, job or streamable process has ended and the group was killed — not only while the group's first
 process lives: a background `( sleep 1; curl … ) &` that outlives the run's leader is still the plugin's (re-review 63).
+A group counts only while it still has a member: once it is empty its id is forgotten, even if a descendant that left
+it still holds stdout (review 3). A plugin that is being stopped stays attributed until its processes are gone: a
+streamable process told `{"type":"stopping"}` for a restart keeps the plugin's trust; on an update, removal or policy
+change the old instance's processes (its stopping stream, its background jobs being killed) count as an untrusted
+plugin's until they exit (review 3).
 
 - **Untrusted plugin** (`community`, `local`): only `GET /health` and `GET /peer`; every other route — `403
   peer:untrusted-plugin` (`{error, peer, plugin}`), journaled as `denied {route, peer, pid, plugin, tier, error}` at
@@ -40,9 +45,15 @@ process lives: a background `( sleep 1; curl … ) &` that outlives the run's le
 - **Trusted plugin** (`builtin`, `official`, `own`): the class it already had (`cli`), nothing changes. Routes that
   serve plugins (`/connections/:id/mcp`, `/connections/:id/http`, `/terminal/*`) still identify the plugin themselves.
 - Extension routes may opt in with `untrustedPlugin: true` (none do today).
-- **Limit:** a process that leaves both the tree and the plugin's process group (`setsid`/`setpgid`, then a double fork
-  to launchd) or a connection without peercred (`peer:no-peercred`) is a plain `cli` again — the rule closes the easy path, not an attacker with the same
-  UID (see "Limit" below). `GET /peer` shows `plugin: {id, trusted}` (or `null`) for debugging.
+- **Gone process:** a connection whose process could not be found when it was classified (`peer:no-process`,
+  `peer:no-pid`) gets only the routes an untrusted plugin gets (`GET /health`, `GET /peer`); every other route answers
+  `403 {"error":"peer:no-process"|"peer:no-pid","peer":"cli"}`, journaled as `denied` — it could be a plugin process that
+  exited right after connecting (review 3).
+- **Limit:** the attribution follows the parent chain and the process group, nothing else. A descendant that leaves the
+  plugin's process group (`setsid`/`setpgid` — one call, no double fork needed) is a plain `cli` as soon as the plugin
+  process above it has exited and it was reparented to launchd; a connection without peercred (`peer:no-peercred`) is
+  `cli` too. The rule keeps honest plugins' helpers in their lane; it does not sandbox code running under the same UID
+  (see "Limit" below). `GET /peer` shows `plugin: {id, trusted}` (or `null`) for debugging.
 
 Requirements are strings in `config.json` (`requirements.app`, `requirements.claudeCode`), not in code:
 
@@ -137,7 +148,7 @@ Snapshot:
                  "input":{"placeholder":"Note text","maxLength":200}},                 // input=: the human types the value
                 {"id":"sync","level":"immediate","title":"Sync","arg":null,"background":true,"net":"none"}],
     "jobs": [{"id":"9f2c4e1a7b3d5c60","actionId":"sync","title":"Sync","startedAt":"…","pid":4242}],   // running background jobs
-    "pushRules": [{"key":"build-blocked","label":"…","hold":"evening","kind":"plugin"}],   // <agenthub.push>: trusted plugins; community — kind="plugin" only, label only ("community": true)
+    "pushRules": [{"key":"build-blocked","label":"…","hold":"evening","kind":"plugin"}],   // <agenthub.push>: trusted plugins; community — kind="plugin" only, label and macOnly only ("community": true)
     "testTier": true,                     // only on a test hub with AGENTHUB_TEST_TIER=own: a Plugins/local plugin running as own
     "icon": {"symbol":"gauge.with.dots.needle.50percent","color":"#0A84FF"},   // <agenthub.icon>; null — not declared
     "contract": 2,                        // <agenthub.contract>; 1 — not declared
@@ -446,7 +457,7 @@ cli gets `403 peer:cli`, not `400 args:…` (UI pass 2026-11-05).
   The request body is the same: `input` (+ `confirmToken`), never `args` — the row value comes from the offer.
 - **Background actions** (`offer.background`): the request returns as soon as the job has started —
   `200 {"ok":true,"result":{"ok":true,"job":"<16 hex>","pid":…}}`; `409 facts:jobs-limit` — the plugin already has
-  `plugins.maxJobsPerPlugin` (4) jobs (jobs still starting count too). The job is listed in `plugins[].jobs` and in the idle verdict, journaled
+  `plugins.maxJobsPerPlugin` (4) jobs (jobs still starting count too; jobs of a removed or updated instance that are being killed do not). The job is listed in `plugins[].jobs` and in the idle verdict, journaled
   (`job-start`, `job-exit`), has no timeout, and is stopped by `job.cancel`, the hub pause, removing/disabling/updating
   the plugin and the daemon stopping — not by a restart of the plugin's streamable process.
 - The core decides on confirmation: the first request without a token →
@@ -457,8 +468,11 @@ cli gets `403 peer:cli`, not `400 args:…` (UI pass 2026-11-05).
   `403 confirm:invalid` after the plugin is updated. Extra 428 fields (additive): `row` — the sanitized title of the
   row that carries the button (≤ 120 graphemes, control characters replaced), also quoted at the end of `text`; a child
   row whose text only repeats the action's title gives its parent row's title instead. The same offer (same action and
-  arguments) on rows with different titles is split into one offer per row (`id` over the row text too), so `row` is
-  always the row that was pressed; an offer on a single row keeps its usual id (re-review 64);
+  arguments) on rows with different titles is split into one offer per title, so `row` is always the row that was
+  pressed. The first title in frame order (header lines, then body) keeps the usual id; each further title gets an id
+  derived from the base id and its position (not from the text), so ids stay stable when a row text changes every frame
+  (a time in it) and when a later copy appears or disappears. When a copy appears before it, the id moves to that
+  copy — the same action and arguments, so an open confirmation still runs (re-review 64, review 3);
   `input` (above); `background: true` — the action starts a job.
 - Success: `200 {"ok":true|false,"result":{…scalars only…}}`. After the action a standard plugin is restarted, a
   streamable one gets `{"type":"actionResult","id","actionId","primitive","arg","ok","code","inputLength"?,"job"?}` on
@@ -672,8 +686,10 @@ the server forgot the session (`404`) — one retry with a new one.
 **Writes: `fresh: true`.** A call that changes something on the service (or a refresh a human asked for) passes
 `fresh: true` (a boolean; anything else — `400 args:fresh:type`). Since hub 0.1.3 two more calls count as fresh without
 the flag, so a write is never answered from the cache: a tool the declaration lists in `writes=` (a subset of
-`tools=`; `GET /connections` and `/state` show it as `writes`), and any call from an action process or background job
-(a human pressed the button). It skips the interval cache and is not merged with an
+`tools=`; `GET /connections` and `/state` show it as `writes`), and any call from a foreground action process
+(a human pressed the button) — even one with an explicit `"fresh": false`, on `/mcp` and `/http` alike. A background
+job follows the interval cache like a run and passes `fresh: true` itself when it needs a current answer: forcing every
+poll fresh would spend the daily budget and mark the plugin's cached results stale each time (review 3). It skips the interval cache and is not merged with an
 identical call in flight; the reply waits for the service (the call's own 20 s deadline, not `callWaitMs`). The daily
 budget and every backoff still apply: if the connection is gated, the call is **not made** —
 `429 {error: "mcp:wait", why, nextAt, intervalMs, calls24h, dailyBudget}` (no previous result is passed off as the
@@ -745,7 +761,8 @@ values ≤ 1024 without control characters); `body` — a string or JSON
 with `Authorization: Bearer <token>`, no redirects followed, 15 s timeout. Refusals: `403 http:not-a-plugin|untrusted|
 not-owner|net-not-declared|method-not-allowed|host-not-allowed|path-not-allowed|header-not-allowed` (+`header`)|
 query-not-allowed` (+`key`), `403 net:none` (an action declared `net="none"`, as for `/mcp`; journal `http-denied`;
-a read from any other action process is served fresh, past the cache),
+a read from any other foreground action process is served fresh, past the cache, even with `"fresh": false`; a
+background job's read uses the cache unless it sends `fresh: true`),
 `400 http:not-http|args:body:type|args:path:invalid|args:query:type|args:query:too-many|args:headers:type|
 args:headers:too-many|args:headers:value|args:body:not-allowed|args:fresh:type`, `413 too-large`,
 `409 oauth:not-connected|expired|unavailable|orphan`; `/mcp` on an `http` connection — `400 mcp:not-mcp`.

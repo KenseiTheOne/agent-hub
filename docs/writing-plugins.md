@@ -391,7 +391,7 @@ every hub.
 | `bar=0…100`, `barColumn=<n>` | body line, table row | a thin progress bar; in a table — in column `n` ([4.4](#44-charts)) |
 | `spark="1,2,3"`, `sparkAvg=`, `sparkMax=`, `sparkLabel=`, `sparkNote=` | first header line | a sparkline in the page header (a large value, [4.4](#44-charts)) and the popover tile |
 | `until=<ISO-8601>` | first header line | a live countdown the app runs itself (hub 0.1.3+): the tile value and the page header value show `mm:ss` (from an hour on `h:mm:ss`) to that moment and stop at `00:00`; no frames needed while it runs. Give a time zone (`2026-11-12T18:30:00Z` or `…+03:00`); unparsable — ignored. Keep a `tile=` too: an older hub shows it instead |
-| `font=mono` | any line | the line title in a monospaced font (ids, hashes, aligned figures; hub 0.1.3+): plain lines, header lines and cards, table rows (the title and its `cells=`), buttons and links; other `font=` values are ignored |
+| `font=mono` | any line | the line title in a monospaced font (ids, hashes, aligned figures; hub 0.1.3+): plain lines, header lines, `stat=`/`gauge=`/`strip=` cards (and strip cells), chart titles and `chart=share` legend rows, `bar=` lines, table rows (the title and its `cells=`) and `group=true` headings, buttons and links, the popover's expanded tile card; captions, notes and badges stay in the regular font; other `font=` values are ignored |
 | `activity="…"`, `needsOn="…"` | header | the "can I shut down" verdict (4.6) |
 | `event=<key>` | any line | a notification key (section 9) |
 | `effect="<primitive> <args>"`, `href=<url>` | any line | a button that runs a core primitive (section 5) |
@@ -515,7 +515,8 @@ Models · 7 days
   - `values="v1,v2,…"` — one bar per number (comma-separated; a broken or negative entry is 0 and keeps its place);
   - `labels="…"` — short captions under the bars, `¦`-separated (comma-separated works when no label has a comma);
   - `valueLabels="…"` — text above each bar, `¦`-separated (empty entries keep their place: no caption);
-  - `avg=<number>` — a dashed average line with a small caption, its text from `avgLabel=` (default "avg");
+  - `avg=<number>` — a dashed average line across the plot; its caption sits under the chart next to a short dashed
+    sample of the line (beside the `legend=true` entries), its text from `avgLabel=` (default «среднее» / "average");
     bars above it are tinted orange unless `tint=none`;
   - `highlight=last|<index>` — that bar (0-based) in the plugin color or `color=`; its label is bold;
   - `tips="…"` — a hover tooltip per bar, entries `¦`-separated; a line break inside an entry is the two characters
@@ -705,7 +706,7 @@ core's confirmation window; `local` plugins get none (except on a test hub with 
 - `background="true"` — a **job**: the command keeps running after the click, with no 30 s timeout, in its own process
   group. The click returns at once with the job id; `/state.plugins[].jobs` lists running jobs (the app shows them with a
   "Stop" button — the `job.cancel` primitive), and "Can I shut down?" counts them. At most 4 jobs per plugin at once
-  (`409 facts:jobs-limit`). A job survives restarts of your streamable process (language, a new secret) but
+  (`409 facts:jobs-limit`; jobs of the previous version that are still being stopped after an update don't count). A job survives restarts of your streamable process (language, a new secret) but
   is stopped (SIGTERM, SIGKILL 2 s later) when the plugin is removed, disabled or updated, when the hub is paused and
   when the daemon stops. When it ends, a streamable plugin gets `{"type":"jobExit","job","actionId","ok","code","signal",
   "durationMs","cancelled"?,"reason"?,"message"?}` on stdin (`cancelled`: `cancelled` | `paused` | `shutdown`); a standard
@@ -737,7 +738,8 @@ core's confirmation window; `local` plugins get none (except on a test hub with 
   typed text (for `input=`), and — at the end — the title of **the row that carries the button** (sanitized, up to 120
   characters: "Button on the row "…""). Keep row titles meaningful: they tell the human what the click is about. The same
   button (same action and argument) on several rows with different titles is a separate button per row, so each window
-  names the row actually pressed. A child button whose own text only repeats the action's title (`--Approve | action=approve
+  names the row actually pressed. A button's id stays the same across frames even when its row text changes every
+  frame; with several copies, the first one keeps its id, so print copies in a stable order. A child button whose own text only repeats the action's title (`--Approve | action=approve
   arg=r8` under `Request r8: wipe the cache`, the layout of banner buttons) is confirmed with its **parent row's** title. Still put a unique request id in `arg=`, not a list position: the token is bound to the action and its argument,
   not to the row text.
 - Before the confirmation and the run the core re-reads your file: a changed command, level, pattern or version cancels
@@ -785,7 +787,7 @@ The tier comes from **where the plugin was installed and who agreed to it**, nev
 | `builtin` | ships with the app (`plugins/`) | any | yes | any key except the reserved `oauth.*` and `telegram.*` |
 | `official` | from the signed registry, the index marks the id official | `open.*`, `session.focus`, `terminal.focus` (`cmux.focus`) | yes | `<id>.*` |
 | `own` | from your own folder, a human confirmed it in the pinned app | `open.*`, `session.focus`, `terminal.focus` (`cmux.focus`) | yes | `<id>.*` |
-| `community` | from the signed registry, not official | `open.*`, `session.focus`, `terminal.focus` (`cmux.focus`) | actions (at least `confirm`, app only) and `push` rules of `kind="plugin"` (label only); no connections, terminal, hub variables or session registry | `<id>.*` |
+| `community` | from the signed registry, not official | `open.*`, `session.focus`, `terminal.focus` (`cmux.focus`) | actions (at least `confirm`, app only) and `push` rules of `kind="plugin"` (label and `macOnly="true"` only); no connections, terminal, hub variables or session registry | `<id>.*` |
 | `local` | `Plugins/local` | `open.*` | no | none |
 
 "Trusted" in this guide means `builtin`, `official` or `own`. Events of untrusted plugins still notify, but as "Other"
@@ -810,9 +812,10 @@ Declare everything your code really touches and nothing it does not.
 or mask that covers them — `~/.claude`, `~/.claude/*`, `~/.claude/sessions` as a whole, `/`, `~`. Allowed masks are
 narrower: `~/.claude/sessions/*.json`. `exec` tokens that look like paths are checked the same way: `/bin/df -k /` is an
 error (`/` covers `~/.claude/projects`), `/bin/df -k` is fine. `..` in a path is an error. In the source text `*.key`
-means a file path at the end of a string literal: a last word with a path character (`/`, `\`, `~`, `*`) or a single-dot
-name (`"server.key"`, `"~/certs/a.b.key"`); a dotted identifier such as an SF Symbol name (`sfimage=person.badge.key`) is
-not a path and passes.
+is any string literal ending in `.key` (`"server.key"`, `"tls.server.key"`, `` `${host}.local.key` ``,
+`"--key-file=my.site.key"`). SF Symbol names are removed first — the value of `sfimage=` and of a `symbol="…"`
+attribute (letters, digits and dots) — so `sfimage=person.badge.key` passes; a bare string such as
+`"lock.rectangle.key"` outside those contexts is flagged.
 
 **Loud permissions** (contract 3) are allowed but shown first in the consent window as a red line, and the linter
 warns the reviewer:
@@ -903,7 +906,10 @@ or python plugin. A background job (5.2) is an action process too.
 `AGENTHUB_HUB_SOCKET` is not the boundary — the socket path is no secret. The boundary is the tier: a process of a
 **community or local** plugin, its action, or any descendant of them (a `curl`, an `agenthub` call — found by its
 parents or its process group, at any depth; the group counts until the run is over, even after its first process
-exited) gets only `GET /health` and `GET /peer`; everything else answers `403 peer:untrusted-plugin` and is journaled ([`api.md`](api.md#peer-classes)).
+exited, as long as the group has a member) gets only `GET /health` and `GET /peer`; everything else answers `403 peer:untrusted-plugin` and is journaled ([`api.md`](api.md#peer-classes)).
+While your plugin is being stopped (it got `{"type":"stopping"}`), its processes are still yours: with the reason
+`restart` they keep your trust; with `updated`, `removed` or `policy` they count as an untrusted plugin's until they
+exit, so don't call the hub after such a `stopping`.
 Processes of trusted plugins keep the plain `cli` view (reading `/state`, `/events`, `/journal`).
 
 ### 8.1 A request helper (node)
@@ -981,8 +987,9 @@ hub's memory for the next call. Details: [`api.md`](api.md), "Connections".
 
 **Writes and read after write.** A call that changes something (create, update, comment) — or a "refresh now" a human
 asked for — passes `fresh: true`. Since hub 0.1.3 a write is never served from the cache even without it: a tool
-listed in `writes=` and **any call from an action process** (a button the human pressed, a background job) count as
-fresh. Older hubs need the flag, so keep passing it:
+listed in `writes=` and **any call from a foreground action process** (a button the human pressed) count as fresh,
+even with `"fresh": false`. A background job reads through the cache like a run — pass `fresh: true` from a job when it
+needs a current answer. Older hubs need the flag, so keep passing it:
 
 ```js
 const w = await hubPost("/connections/tasks/mcp", { tool: "update_task", args: { id, status: "done" }, fresh: true }, 25_000);

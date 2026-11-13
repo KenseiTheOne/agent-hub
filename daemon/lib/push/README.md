@@ -50,8 +50,8 @@ contract 1 kind — if the user turned it off, it turns this toggle off, see "Mi
 `kind="plugin" was="<kind>"`, and the linter warns. The service takes such rules **only from built-in, official and
 own** plugins (`trusted`: the tier comes from the signed registry index or from the human's consent to an own plugin
 from a folder — [`docs/plugins-registry.md`](../../../docs/plugins-registry.md), "Own sources"); they go ahead of the
-shared table. A **community** plugin's `kind="plugin"` rules are taken with their key and label only (hub 0.1.3+; `quiet`,
-`away`, `hold`, `cooldown` and other kinds are ignored): such a key notifies under the plugin's own toggle with the
+shared table. A **community** plugin's `kind="plugin"` rules are taken with their key, label and `macOnly="true"` only (hub 0.1.3+;
+`macOnly` only narrows delivery, so it is allowed; `quiet`, `away`, `hold`, `cooldown` and other kinds are ignored): such a key notifies under the plugin's own toggle with the
 reviewed label and the row text, within the third-party limits below. `local` plugins' tags are ignored. This way the core knows no plugin's keys: official plugins' rules live in
 their metadata (registry `agent-hub-plugins`), own plugins' rules in their metadata in the tool's repository; built-in
 plugins (`agents`, `claude-sessions`) declare theirs the same way. For an own plugin, rules with `kind="security"` and
@@ -83,7 +83,7 @@ rules, labeled "Event "key"" — except community keys described by a `kind="plu
 
 Limits (protecting the daemon from an event flood): at most `maxPerPluginPerMin` (20) new notifications per minute from
 one trusted plugin and `maxPerUntrustedPerMin` (5) from a third-party one; the first one over the limit produces a
-single notification "notifications from the plugin are muted for a minute" (`push-throttled` in the journal), the
+single notification "notifications from the plugin are muted for a minute" (`push-throttled` in the journal) — it goes where the rule goes: a `macOnly` rule's notice stays on the Mac — the
 other events are only remembered. Entries (keys) per plugin — at most `maxEntriesPerPlugin` (500) /
 `maxEntriesPerUntrusted` (100): beyond that the longest-cleared ones are evicted, and if all are raised the new key is
 not remembered (`push-dropped`: the first refusal in a minute is recorded immediately, the rest as one `push-dropped`
@@ -220,7 +220,7 @@ the engine tracks) and in the background to every extra channel that accepts it:
   overnight: the morning digest goes to extra channels without them, and they follow as a separate kind `security`
   message (subtitle "Overnight: N", key `push:digest`) for security channels only; the Mac banner lists everything. `events` narrows to kinds
   (`sessions`, `updates`, `problems`, `other`, `plugin`, `security`, `hub`, `digest`) or key prefixes `<plugin>:<key>*`.
-  A rule with `macOnly` (the plugin tag or `services.push.rules`) goes to `mac` only, security channels included; held
+  A rule with `macOnly` (the plugin tag or `services.push.rules`) goes to `mac` only, security channels included (its "notifications muted" notice too); held
   overnight, its item is in the Mac digest banner and left out of what extra channels get.
 - visible: `/state.notifications.channels` (and Settings → Notifications in the app) lists every channel — `id`, `type`,
   `label`, `security`, `events`, never its URL.

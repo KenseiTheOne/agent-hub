@@ -3,7 +3,7 @@ import Testing
 @testable import AgentHubKit
 
 // Plugin page charts (hub 0.1.3, optional within contract 3): chart=bars, chart=share, bar=, spark=.
-@Suite struct PluginChartsTests {
+@Suite(.hubLang(.ru)) struct PluginChartsTests {
     private func items(_ json: String) throws -> [Item] {
         try JSONDecoder().decode([Item].self, from: Data(json.utf8))
     }

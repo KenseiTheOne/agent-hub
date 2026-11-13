@@ -421,7 +421,8 @@ export class PushEngine {
       // remember but don't notify: while the key is raised there are no repeats anyway; once cleared — the next state follows the usual rules
       e.muted = true;
       if (admit === "first") {
-        const { done } = this.mac.notify({ title: "Agent Hub", subtitle: e.msg.subtitle, body: tr(this.lang(), "push.throttled"), plugin, key: `${plugin}:push-throttled`, kind: this.kindOf(rule, e), actions: [], href: null });
+        // the notice names the rule (subtitle): a macOnly rule's notice stays on the Mac too (task 83)
+        const { done } = this.mac.notify({ title: "Agent Hub", subtitle: e.msg.subtitle, body: tr(this.lang(), "push.throttled"), plugin, key: `${plugin}:push-throttled`, kind: this.kindOf(rule, e), actions: [], href: null, ...(rule.macOnly === true ? { macOnly: true } : {}) });
         this.macPending.push(done);
         this.journal({ type: "push-throttled", plugin, key });
       }

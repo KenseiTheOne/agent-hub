@@ -14,7 +14,7 @@ import { basename, dirname, join } from "node:path";
 import { expandHome, standardPath } from "./config.mjs";
 import { FrameSplitter } from "./output.mjs";
 import { currentLocales, msg, normLocales } from "./i18n.mjs";
-import { interpreterFor, isWindows, killTree, osInfoCommands, treeSpawnOptions } from "./platform.mjs";
+import { groupAlive, interpreterFor, isWindows, killTree, osInfoCommands, treeSpawnOptions } from "./platform.mjs";
 
 // → [command, ...args] for a plugin file. The interpreter by extension comes from the platform layer
 // (POSIX: /usr/bin/python3, /bin/sh…; Windows: from PATH).
@@ -117,6 +117,7 @@ function killGroup(child, signal) {
   killTree(child, signal);
 }
 
+
 // A one-shot run with a timeout. → { code, signal, stdout, timedOut, overflow, durationMs, error? }
 // onSpawn(kill, pid) receives a function that kills the process group (to stop the daemon mid-run) and the pid
 // of the started process (the core uses it to identify the plugin process: fact pluginByPid, oauth service).
@@ -206,6 +207,7 @@ export class StreamProcess {
     this.backoffMs = 1000;
     this.restartTimer = null;
     this.startedAt = 0;
+    this.groupGone = null; // the child whose process group was found empty (groupId, task 82)
   }
   start() {
     if (this.stopped || this.child) return;
@@ -228,6 +230,10 @@ export class StreamProcess {
     child.stdout.on("data", (s) => splitter.push(s));
     child.stdin.on("error", () => {});
     child.on("error", () => {});
+    // the leader exited: if its group is already empty, forget it now (groupId), before its id can be reused
+    child.on("exit", () => {
+      if (!groupAlive(child.pid)) this.groupGone = child;
+    });
     child.on("close", (code, signal) => {
       splitter.end();
       killGroup(child, "SIGKILL");
@@ -283,9 +289,16 @@ export class StreamProcess {
     return c && c.exitCode === null && c.signalCode === null ? (c.pid ?? null) : null;
   }
   // The process group id until 'close' (task 63): the group is killed on 'close', so until then a descendant left in it is
-  // still this process's, even after the leader itself exited.
+  // still this process's, even after the leader itself exited. Task 82: a descendant that left the group (setsid) can hold
+  // stdout forever, so 'close' may never come; once the leader exited the group must still have a member (groupAlive) —
+  // the first time it is found empty it is forgotten for good: from then on its id may be reused by a foreign group.
   get groupId() {
-    return this.child?.pid ?? null;
+    const c = this.child;
+    if (!c?.pid || this.groupGone === c) return null;
+    if (c.exitCode === null && c.signalCode === null) return c.pid;
+    if (groupAlive(c.pid)) return c.pid;
+    this.groupGone = c;
+    return null;
   }
   // reason (G18) — why the hub stops the process: the plugin first gets {"type":"stopping","reason":…} on stdin (and EOF), then
   // after graceMs SIGTERM to the group (if it has not exited by itself), after another second SIGKILL. Reasons: restart (the

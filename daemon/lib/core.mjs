@@ -761,11 +761,15 @@ export class Core {
       pluginByPid: (pid, opts = {}) => {
         const pl = core.host?.pluginByPid?.(pid, opts);
         if (!pl) return null;
-        const trusted = trustedPlugin(pl);
+        // a process of a stopped, removed or updated instance on its way out (task 80, host.pluginByPid): untrusted
+        const trusted = pl.leaving === true ? false : trustedPlugin(pl);
         // terminal — <agenthub.terminal> entries (contract 3): /terminal/* routes check the operation and string against them
         // action — {id, net} when the pid is an action or job process (opts.actions): connection routes hold it to net="none"
+        // action.job — the process is a background job's (G6), not a foreground action's (task 84: connection routes force
+        // fresh calls only for the latter)
         const act = opts.actions ? core.host?.actionByPid?.(pid) : null;
-        return { id: pl.id, source: pl.source, tier: pl.granted?.tier || null, trusted, net: [...(pl.meta?.net || [])], terminal: [...(pl.meta?.terminal || [])], ...(act ? { action: { id: act.id, net: act.net || null } } : {}) };
+        const job = act ? core.host?.jobPid?.(pid) === true : false;
+        return { id: pl.id, source: pl.source, tier: pl.granted?.tier || null, trusted, net: [...(pl.meta?.net || [])], terminal: [...(pl.meta?.terminal || [])], ...(act ? { action: { id: act.id, net: act.net || null, ...(job ? { job: true } : {}) } } : {}) };
       },
       // Extensions add their own facts: provide("bridge.online", () => ...)
       provide(name, fn) {
@@ -1394,9 +1398,11 @@ export class Core {
   jobsOf(pluginId) {
     return [...this.jobs.values()].filter((j) => j.plugin === pluginId);
   }
-  // Running jobs plus those being started right now (B5): the per-plugin limit counts both.
+  // Running jobs plus those being started right now (B5): the per-plugin limit counts both. Jobs of a removed or updated
+  // instance (detached, being killed — task 67) are not counted (task 84): the new instance's job list is empty, so a limit
+  // reached by them would refuse a press with nothing to show; they end within two kill grace periods anyway.
   jobsCount(pluginId) {
-    return this.jobsOf(pluginId).length + (this.jobsStarting.get(pluginId) || 0);
+    return this.jobsOf(pluginId).filter((j) => !j.detached).length + (this.jobsStarting.get(pluginId) || 0);
   }
   // Metadata of the jobs (the jobs fact, /state.plugins[].jobs): no kill handles. For one plugin (its /state entry and the
   // {"type":"jobs"} message) only the jobs of its current instance: a job of a removed or updated instance is being killed
@@ -1517,7 +1523,8 @@ export class Core {
   }
   // Stop every job of a plugin (removed, disabled, updated): SIGTERM, SIGKILL after JOB_KILL_GRACE_MS.
   // The instance is gone (removed, disabled, updated, policy changed): its jobs are detached from the plugin id (task 67) and
-  // stopped; they stay in the table (the per-plugin limit, the idle verdict, jobs.json) until their processes end.
+  // stopped; they stay in the table (the idle verdict, jobs.json) until their processes end — not in the new instance's
+  // per-plugin limit (jobsCount, task 84).
   killJobs(pluginId, why) {
     for (const job of this.jobsOf(pluginId)) {
       job.detached = true;
@@ -1861,9 +1868,13 @@ export class Core {
   }
 
   // Task 64: an offer id is a hash of plugin, action and arguments, so the same button on two rows is one offer — and its
-  // confirmation would name whichever row came first. Where one id sits on rows with different texts, each row gets its own
-  // offer (id over the row text too); an offer on one row (or on rows with one text) keeps the id it always had, so banner
-  // buttons and an open confirmation window keep working across frames. offers — the frame's id set, updated in place.
+  // confirmation would name whichever row came first. Where one id sits on rows with different texts, each row text gets its
+  // own offer, so the 428 names the row that was pressed and a token issued for one row does not act on another.
+  // Task 79: the row text is not part of the new id — a live row text (a time in the header) or a second copy appearing would
+  // change the id every frame, and an open confirmation window or banner buttons would get 404. The first row text (in frame
+  // order: header, then body) keeps the base id, the n-th distinct one gets sha(id|#n). The action and arguments of all the
+  // copies are identical, so whichever copy an id lands on next frame runs the same thing. offers — the frame's id set,
+  // updated in place.
   splitSharedOffers(placed, offers) {
     const byId = new Map();
     for (const p of placed) {
@@ -1871,19 +1882,19 @@ export class Core {
       byId.get(p.offer.id).push(p);
     }
     for (const [id, list] of byId) {
-      if (new Set(list.map((p) => p.offer.row ?? "")).size < 2) {
-        // one row text: the registry holds that row (the last write may be another object with the same row)
-        this.offers.set(id, list[0].offer);
-        continue;
-      }
-      this.offers.delete(id);
-      offers.delete(id);
+      // distinct row texts in frame order → the id of that copy; copies with one text share it
+      const ids = new Map();
       for (const p of list) {
-        const nid = sha(`${id}|row|${p.offer.row ?? ""}`).slice(0, 16);
-        const offer = { ...p.offer, id: nid };
-        this.offers.set(nid, offer);
-        offers.add(nid);
-        p.out.offer.id = nid;
+        const row = p.offer.row ?? "";
+        if (!ids.has(row)) {
+          const n = ids.size;
+          const nid = n === 0 ? id : sha(`${id}|#${n}`).slice(0, 16);
+          // the registry holds the first copy of each text (makeOffer wrote the last copy under the base id)
+          this.offers.set(nid, { ...p.offer, id: nid });
+          offers.add(nid);
+          ids.set(row, nid);
+        }
+        p.out.offer.id = ids.get(row);
       }
     }
   }

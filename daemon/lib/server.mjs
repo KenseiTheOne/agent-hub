@@ -12,17 +12,25 @@
 // Plugin processes (S2): on accept the server also asks whose plugin the peer is — the peer pid or one of its
 // ancestors (any depth, not above the daemon) is a plugin run, a streamable process, an action or a background job
 // (the pluginByPid fact), or the process group of the peer or of one of those ancestors is one of them: every plugin
-// process is spawned detached, so it leads its own group and its descendants stay in it even after a double fork to
-// launchd. A group stays the plugin's until its run, action, job or streamable process has ended and the group was killed —
-// not only while the group's leader lives (task 63: a background `( … ) &` that outlives the leader stays restricted).
+// process is spawned detached, so it leads its own group and its descendants stay in it even after their parent exits and
+// they are reparented to launchd. A group stays the plugin's until its run, action, job or streamable process has ended and
+// the group was killed — not only while the group's leader lives (task 63: a background `( … ) &` that outlives the leader
+// stays restricted) — and only while the group still has a member (task 82). A process that is being stopped (a streamable
+// process restarting, a stopped or removed instance's stream and killed jobs) stays attributed until it is gone (task 80).
 // The answer is bound to the connection as peer.plugin = {id, trusted, tier, source}.
 // A process of an untrusted plugin (community, local) gets only the routes marked `untrustedPlugin: true`
 // (GET /health, GET /peer): everything else is 403 peer:untrusted-plugin, journaled (once a minute per plugin and route).
 // Such a plugin has no use for the hub API: it doesn't get AGENTHUB_HUB_SOCKET, and its own actions are pressed by a
 // human in the app (community — with confirmation), not through the socket; so one rule instead of a filtered /state.
+// Processes of a plugin instance on its way out (stopped, removed, updated, policy changed) count as untrusted the same way.
 // Trusted plugins (builtin, official, own) keep their class.
-// Not a hard boundary: a descendant that leaves both the tree and the group (setsid/setpgid, then a double fork to
-// launchd) under the same UID is a plain cli again.
+// A connection whose process is already gone when it is classified (peer:no-process, peer:no-pid) gets the same narrow set
+// of routes (task 80): it could be a plugin process that exited right after connecting.
+// Not a hard boundary. The attribution follows the parent chain and the process group, nothing else: a descendant that
+// leaves the group (setsid/setpgid — one call, no double fork needed) is a plain cli as soon as the plugin process above it
+// has exited and it was reparented to launchd; while that process still runs, the chain finds it. Under the same UID the
+// plugin's code can always do what a cli can — the restriction keeps honest plugins' helpers in their lane, it does not
+// sandbox a hostile one.
 
 import { createServer } from "node:http";
 import { connect } from "node:net";
@@ -41,6 +49,8 @@ const HOOK_MAX_BODY = 1024 * 1024;
 // How far up the peer's parents to look for a plugin process: all the way (a fixed depth is bypassed by nesting wrappers);
 // the walk ends at launchd, the daemon or a loop in the table.
 export const PLUGIN_ANCESTOR_DEPTH = Infinity;
+// Peer reasons of a connection whose process could not be found when it was classified (task 80).
+const GONE_PEER = new Set(["peer:no-process", "peer:no-pid"]);
 // Denials of one plugin on one route are journaled at most once per this interval.
 const PLUGIN_DENY_JOURNAL_MS = 60_000;
 
@@ -520,6 +530,12 @@ export async function startServer(core) {
           core.journal.write({ type: "denied", route: `${route.method} ${route.path}`, peer: peer.class, pid: peer.pid, plugin: peer.plugin.id, tier: peer.plugin.tier, error: "peer:untrusted-plugin" });
         }
         return json(res, 403, { error: "peer:untrusted-plugin", peer: peer.class, plugin: peer.plugin.id });
+      }
+      // Task 80: a connection whose process was already gone when it was classified (peer:no-process, peer:no-pid) can't be
+      // told from a plugin process that exited after a double fork — it gets only what an untrusted plugin gets
+      if (GONE_PEER.has(peer.reason) && route.untrustedPlugin !== true) {
+        core.journal.write({ type: "denied", route: `${route.method} ${route.path}`, peer: peer.class, pid: peer.pid ?? null, error: peer.reason });
+        return json(res, 403, { error: peer.reason, peer: peer.class });
       }
       if (!route.peers.includes(peer.class)) {
         core.journal.write({ type: "denied", route: `${route.method} ${route.path}`, peer: peer.class, pid: peer.pid, error: denyCode(peer) });

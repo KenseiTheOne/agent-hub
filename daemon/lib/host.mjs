@@ -8,7 +8,7 @@
 import { existsSync, readdirSync, statSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { readPluginMeta, parseFileName } from "./meta.mjs";
-import { isAbsolutePath } from "./platform.mjs";
+import { groupAlive, isAbsolutePath } from "./platform.mjs";
 import { msg } from "./i18n.mjs";
 import { cleanPhrase } from "./output.mjs";
 import { actionArgv, buildEnv, commandFor, ensureDir, nextCron, osVars, parseCron, runOnce, spawnJob, StreamProcess, Watcher } from "./runner.mjs";
@@ -116,7 +116,10 @@ class PluginInstance {
     // left in the group stays the plugin's (pluginByPid with { group: true }, the socket's group check) until that moment.
     this.runGroups = new Set();
     this.actionGroups = new Set();
+    this.jobPids = new Set(); // the actionPids that are background jobs (G6), not foreground actions (task 84)
     this.streamGen = 0; // streamable process generation: a stale launch (overlapping language changes) doesn't start
+    // Task 80: streamable processes being stopped by a restart (restartStream) — still the plugin's until they are gone
+    this.leavingStreams = new Set();
   }
   get id() {
     return this.plugin.id;
@@ -187,8 +190,14 @@ class PluginInstance {
     const gen = ++this.streamGen;
     const old = this.stream;
     this.stream = null;
-    // the plugin is told why first (G18): {"type":"stopping","reason":"restart","cause":<new AGENTHUB_REFRESH_REASON>}
-    await old?.stop("restart", { cause: reason });
+    // the old process stays the plugin's while it stops (task 80): it may still call the hub
+    if (old) this.leavingStreams.add(old);
+    try {
+      // the plugin is told why first (G18): {"type":"stopping","reason":"restart","cause":<new AGENTHUB_REFRESH_REASON>}
+      await old?.stop("restart", { cause: reason });
+    } finally {
+      this.leavingStreams.delete(old);
+    }
     if (this.stopped || gen !== this.streamGen) return;
     await this.startStream(gen, reason);
   }
@@ -297,10 +306,12 @@ class PluginInstance {
         onLeaderExit: (pid) => {
           this.actionPids.delete(pid);
           this.actionGroups.delete(pid);
+          this.jobPids.delete(pid);
         },
         onExit: (x) => {
           this.actionPids.delete(jobPid);
           this.actionGroups.delete(jobPid);
+          this.jobPids.delete(jobPid);
           const m = /(?:^|\n)reason=([a-z0-9][a-z0-9-]{0,47})\s*$/.exec(x.tail || "");
           const message = actionMessage(x.tail);
           onJobExit?.({ ok: x.code === 0, code: x.code, signal: x.signal, durationMs: x.durationMs, ...(x.error ? { error: x.error } : {}), ...(m ? { reason: m[1] } : {}), ...(message ? { message } : {}) });
@@ -309,6 +320,7 @@ class PluginInstance {
       if (job.error) return { ok: false, error: job.error };
       this.actionPids.set((jobPid = job.pid), action);
       this.actionGroups.add(jobPid);
+      this.jobPids.add(jobPid);
       return { ok: true, job };
     }
     let killer = null;
@@ -335,6 +347,23 @@ class PluginInstance {
     const m = /(?:^|\n)reason=([a-z0-9][a-z0-9-]{0,47})\s*$/.exec(out);
     const message = actionMessage(out);
     return { ok: r.code === 0 && !r.timedOut, code: r.code, timedOut: r.timedOut, durationMs: r.durationMs, error: r.error, ...(m ? { reason: m[1] } : {}), ...(message ? { message } : {}) };
+  }
+  // Whether pid is one of this instance's processes (pluginByPid): an ongoing run, the streamable process (also one being
+  // stopped by a restart), with actions — an ongoing action or job; with group — the group of any of them (task 63) while it
+  // still has a member (task 82). A stopped instance's sets keep describing what still runs: runs and actions are dropped
+  // when they end, jobs when they exit, the stream on 'close'.
+  owns(pid, { actions = false, group = false } = {}) {
+    const streams = this.stream ? [this.stream, ...this.leavingStreams] : [...this.leavingStreams];
+    if (this.runPids.has(pid) || streams.some((s) => s.pid === pid)) return true;
+    if (actions && this.actionPids.has(pid)) return true;
+    if (!group) return false;
+    if (!this.runGroups.has(pid) && !streams.some((s) => s.groupId === pid) && !(actions && this.actionGroups.has(pid))) return false;
+    // a group with no member left: its id may already be a foreign group's (task 82)
+    return groupAlive(pid);
+  }
+  // Something of this instance still runs (a stopped instance stays in PluginHost.leaving until not).
+  busy() {
+    return Boolean(this.runPids.size || this.runGroups.size || this.actionPids.size || this.actionGroups.size || this.leavingStreams.size || this.stream?.groupId);
   }
   // reason (G18) — what the streamable process is told before SIGTERM: updated | policy | removed | shutdown.
   async stop(reason = null) {
@@ -400,6 +429,9 @@ export class PluginHost {
     this.instances = new Map();
     this.dirWatcher = null;
     this.rescanTimer = null;
+    // Task 80: stopped instances (removed, updated, policy changed) whose processes still run — killed jobs that have not
+    // exited yet, a stream that has not closed. pluginByPid still finds them; dropped once nothing of them runs.
+    this.leaving = new Set();
   }
   dirs() {
     const p = this.core.config.paths;
@@ -446,6 +478,7 @@ export class PluginHost {
     return this.chain;
   }
   async rescanNow() {
+    for (const inst of this.leaving) if (!inst.busy()) this.leaving.delete(inst);
     const found = this.discover();
     for (const [id, inst] of this.instances) {
       const pl = found.get(id);
@@ -463,6 +496,8 @@ export class PluginHost {
       if (drop) {
         await inst.stop(!pl ? "removed" : pl.file !== inst.plugin.file || pl.mtimeMs !== inst.plugin.mtimeMs ? "updated" : "policy");
         this.instances.delete(id);
+        // its jobs are being killed (core.killJobs), a stream may not have closed: they stay attributed (task 80)
+        if (inst.busy()) this.leaving.add(inst);
         // the same id remains on disk — a restart: events move to the new instance (core.pluginRemoved)
         this.core.pluginRemoved(id, { keepEvents: Boolean(pl) });
       }
@@ -490,21 +525,35 @@ export class PluginHost {
   // (<agenthub.action>, started by a human) — only with { actions: true }: terminal routes (contract 3) and MCP calls
   // through hub connections let it through. → plugin (scanner object with granted) or null.
   // group: true — pid is a process group id (the socket's group check, task 63): the group of an ongoing run, action, job or
-  // streamable process counts until that run ends and its group is killed, not only while its leader lives.
+  // streamable process counts until that run ends and its group is killed, not only while its leader lives — and only while
+  // the group still has a member (task 82).
+  // Task 80: a process that is being stopped stays attributed until it is gone — a streamable process stopping for a restart
+  // (the same instance: its plugin, trust unchanged), and everything of a stopped instance (being stopped, or removed,
+  // updated or with a changed policy, PluginHost.leaving): those come back as { ...plugin, leaving: true }, which the core's
+  // fact treats as untrusted — a plugin on its way out gets only the routes an untrusted plugin gets (/health, /peer).
   pluginByPid(pid, { actions = false, group = false } = {}) {
     if (!Number.isInteger(pid) || pid <= 0) return null;
-    for (const inst of this.instances.values()) {
-      if (inst.stopped) continue;
-      if (inst.runPids.has(pid) || (inst.stream && inst.stream.pid === pid)) return inst.plugin;
-      if (actions && inst.actionPids.has(pid)) return inst.plugin;
-      if (group && (inst.runGroups.has(pid) || (inst.stream && inst.stream.groupId === pid) || (actions && inst.actionGroups.has(pid)))) return inst.plugin;
+    const opts = { actions, group };
+    for (const inst of this.instances.values()) if (!inst.stopped && inst.owns(pid, opts)) return inst.plugin;
+    for (const inst of this.instances.values()) if (inst.stopped && inst.owns(pid, opts)) return { ...inst.plugin, leaving: true };
+    for (const inst of this.leaving) {
+      if (!inst.busy()) {
+        this.leaving.delete(inst);
+        continue;
+      }
+      if (inst.owns(pid, opts)) return { ...inst.plugin, leaving: true };
     }
     return null;
   }
   // The declared action an ongoing action or job process runs (pluginByPid with actions found it). → action or null.
   actionByPid(pid) {
-    for (const inst of this.instances.values()) if (!inst.stopped && inst.actionPids.has(pid)) return inst.actionPids.get(pid) || null;
+    for (const inst of [...this.instances.values(), ...this.leaving]) if (inst.actionPids.has(pid)) return inst.actionPids.get(pid) || null;
     return null;
+  }
+  // Whether an action pid (actionByPid) is a background job's (G6) rather than a foreground action's (task 84).
+  jobPid(pid) {
+    for (const inst of [...this.instances.values(), ...this.leaving]) if (inst.actionPids.has(pid)) return inst.jobPids.has(pid);
+    return false;
   }
   // Something the core puts into every run's environment changed: the language (AGENTHUB_LANG) or the hub pause (AGENTHUB_PAUSED,
   // contract 3). streamable plugins restart (the environment is set at start), interval ones get an extra run;

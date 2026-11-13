@@ -128,8 +128,8 @@ struct BarChartView: View {
         let it = node.item
         HStack(alignment: .center, spacing: 10) {
             if !it.title.isEmpty {
-                Text(it.title).font(.system(size: 15, weight: .semibold)).lineLimit(1)
-                    .reportsTruncation(it.title, font: .system(size: 15, weight: .semibold))
+                Text(it.title).font(it.titleFont(15, .semibold)).lineLimit(1)
+                    .reportsTruncation(it.title, font: it.titleFont(15, .semibold))
                     .hoverHelp(PluginText.rowHelp(it), always: it.tooltip != nil)
             }
             Spacer(minLength: 8)
@@ -425,8 +425,8 @@ struct ShareChartView: View {
         if let chart = PluginShareChart(node) {
             let content = VStack(alignment: .leading, spacing: 12) {
                 if !node.item.title.isEmpty {
-                    Text(node.item.title).font(.system(size: 15, weight: .semibold)).lineLimit(1)
-                        .reportsTruncation(node.item.title, font: .system(size: 15, weight: .semibold))
+                    Text(node.item.title).font(node.item.titleFont(15, .semibold)).lineLimit(1)
+                        .reportsTruncation(node.item.title, font: node.item.titleFont(15, .semibold))
                         .hoverHelp(PluginText.rowHelp(node.item), always: node.item.tooltip != nil)
                 }
                 GeometryReader { g in
@@ -453,8 +453,8 @@ struct ShareChartView: View {
     private func row(_ p: PluginShareChart.Part, _ i: Int) -> some View {
         HStack(spacing: 8) {
             RoundedRectangle(cornerRadius: 3).fill(ChartPalette.color(p.color, i, ChartPalette.share)).frame(width: 9, height: 9)
-            Text(p.title).font(.system(size: 13)).lineLimit(1)
-                .reportsTruncation(p.title, font: .system(size: 13))
+            Text(p.title).font(p.item.titleFont(13)).lineLimit(1)
+                .reportsTruncation(p.title, font: p.item.titleFont(13))
             Spacer(minLength: 6)
             Text(p.percentText).font(.system(size: 13)).foregroundStyle(.white.opacity(0.6)).fixedSize()
             if let n = p.note {
@@ -500,8 +500,8 @@ struct BarLineView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
             HStack(alignment: .firstTextBaseline, spacing: 6) {
-                Text(item.title).font(.system(size: depth == 0 ? 13 : 12.5)).lineLimit(1)
-                    .reportsTruncation(item.title, font: .system(size: depth == 0 ? 13 : 12.5))
+                Text(item.title).font(item.titleFont(depth == 0 ? 13 : 12.5)).lineLimit(1)
+                    .reportsTruncation(item.title, font: item.titleFont(depth == 0 ? 13 : 12.5))
                 if let badge = item.badge {
                     Text(badge).font(.system(size: 11)).foregroundStyle(swiftBarColor(item.badgeColor) ?? .white.opacity(0.5)).lineLimit(1)
                 }

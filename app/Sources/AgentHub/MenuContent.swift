@@ -253,8 +253,9 @@ struct PopoverView: View {
     /// Up to four top-level body lines for the tile's short detail. Controls (2026-11-12) show their value, not a bare
     /// label: a segment or popup — "Model: Opus 5.5" (its `selected=true` child), a switch — "Ultracode: off"; a table —
     /// its title. A label-only line right before a control group ("For new sessions") is skipped: alone it says nothing.
-    static func detailLines(_ body: [Item]) -> [String] {
-        var out: [String] = []
+    /// `mono` — the line asked for `font=mono`.
+    static func detailLines(_ body: [Item]) -> [(text: String, mono: Bool)] {
+        var out: [(text: String, mono: Bool)] = []
         for (i, it) in body.enumerated() where !it.separator && it.level == 0 && it.params["size"] == nil {
             if it.isSegment || it.isSelect {
                 var chosen: String?
@@ -262,14 +263,14 @@ struct PopoverView: View {
                     if c.level == 0 { break }
                     if c.level == 1, c.isSelected { chosen = c.title; break }
                 }
-                out.append(chosen.map { "\(it.title): \($0)" } ?? it.title)
+                out.append((chosen.map { "\(it.title): \($0)" } ?? it.title, it.isMono))
             } else if let on = it.toggleState {
-                out.append("\(it.title): \(on ? tr("вкл", "on") : tr("выкл", "off"))")
+                out.append(("\(it.title): \(on ? tr("вкл", "on") : tr("выкл", "off"))", it.isMono))
             } else if !it.isTable, it.offer == nil, it.stat == nil,
                       i + 1 < body.count, body[i + 1].level == 0, body[i + 1].isSegment || body[i + 1].isSelect || body[i + 1].toggleState != nil {
                 continue
             } else {
-                out.append(it.stat.map { "\($0): \(it.title)" } ?? it.title)
+                out.append((it.stat.map { "\($0): \(it.title)" } ?? it.title, it.isMono))
             }
             if out.count == 4 { break }
         }
@@ -287,11 +288,13 @@ struct PopoverView: View {
         return VStack(alignment: .leading, spacing: 8) {
             Button { router.open(.plugin(p.id)) } label: {
                 VStack(alignment: .leading, spacing: 5) {
-                    Text(p.headline).font(.system(size: 12, weight: .semibold)).lineLimit(2).multilineTextAlignment(.leading)
-                        .reportsTruncation(p.headline, font: .system(size: 12, weight: .semibold))
+                    let headFont = Font.system(size: 12, weight: .semibold, design: p.header.first(where: { !$0.separator })?.isMono == true ? .monospaced : .default)
+                    Text(p.headline).font(headFont).lineLimit(2).multilineTextAlignment(.leading)
+                        .reportsTruncation(p.headline, font: headFont)
                     ForEach(Array(Self.detailLines(p.body).enumerated()), id: \.offset) { _, line in
-                        Text(line).font(.system(size: 12)).foregroundStyle(.white.opacity(0.7)).lineLimit(1)
-                            .reportsTruncation(line, font: .system(size: 12))
+                        let font = Font.system(size: 12, design: line.mono ? .monospaced : .default)
+                        Text(line.text).font(font).foregroundStyle(.white.opacity(0.7)).lineLimit(1)
+                            .reportsTruncation(line.text, font: font)
                     }
                     if p.status == .error, let e = p.error {
                         Text(e).font(.system(size: 12)).foregroundStyle(hexColor(0xFF8A80)).lineLimit(1).reportsTruncation(e, font: .system(size: 12))

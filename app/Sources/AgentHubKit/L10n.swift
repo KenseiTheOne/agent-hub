@@ -28,16 +28,27 @@ public enum LangSetting: String, Sendable, Codable, CaseIterable {
 }
 
 /// A language of its own for one task tree (re-review 62): inside `L10n.$scope.withValue(LangScope(.en)) { … }` the shared
-/// language (`L10n.shared.lang`, so `tr`, `plural`, `locale`) is read from and written to this box, not the app-wide value.
-/// Tests run each case in its own scope (the `.hubLang` trait), so parallel suites can neither see nor break another suite's
-/// language, and the macOS language does not matter. The app never sets a scope.
+/// language (`L10n.shared.lang`, so `tr`, `plural`, `locale`) and the language setting (`setting`, `settingKnown`) are read
+/// from and written to this box, not the app-wide values. Tests run each case in its own scope (the `.hubLang` trait), so
+/// parallel suites can neither see nor break another suite's language or setting, and the macOS language does not matter.
+/// The app never sets a scope.
 public final class LangScope: @unchecked Sendable {
     private let lock = NSLock()
     private var value: Lang
+    private var settingValue: LangSetting = .system
+    private var settingKnownValue = false
     public init(_ lang: Lang) { value = lang }
     public var lang: Lang {
         get { lock.lock(); defer { lock.unlock() }; return value }
         set { lock.lock(); value = newValue; lock.unlock() }
+    }
+    public var setting: LangSetting {
+        get { lock.lock(); defer { lock.unlock() }; return settingValue }
+        set { lock.lock(); settingValue = newValue; lock.unlock() }
+    }
+    public var settingKnown: Bool {
+        get { lock.lock(); defer { lock.unlock() }; return settingKnownValue }
+        set { lock.lock(); settingKnownValue = newValue; lock.unlock() }
     }
 }
 
@@ -59,10 +70,29 @@ public final class L10n: @unchecked Sendable {
             if let s = L10n.scope, self === L10n.shared { s.lang = newValue } else { appLang = newValue }
         }
     }
-    public var setting: LangSetting = .system
+    private var appSetting: LangSetting = .system
+    private var appSettingKnown = false
+    /// The language setting (system, Russian, English): the app-wide value, or the task's scope for `shared`, like `lang`.
+    public var setting: LangSetting {
+        get {
+            if let s = L10n.scope, self === L10n.shared { return s.setting }
+            return appSetting
+        }
+        set {
+            if let s = L10n.scope, self === L10n.shared { s.setting = newValue } else { appSetting = newValue }
+        }
+    }
     /// The language setting is known: it came from the daemon or was remembered for this hub. If not, "Language" in Settings has no
-    /// selected segment rather than an invented "System".
-    public private(set) var settingKnown = false
+    /// selected segment rather than an invented "System". Scoped like `setting`.
+    public private(set) var settingKnown: Bool {
+        get {
+            if let s = L10n.scope, self === L10n.shared { return s.settingKnown }
+            return appSettingKnown
+        }
+        set {
+            if let s = L10n.scope, self === L10n.shared { s.settingKnown = newValue } else { appSettingKnown = newValue }
+        }
+    }
 
     public var locale: Locale { Locale(identifier: lang == .en ? "en_US" : "ru_RU") }
 

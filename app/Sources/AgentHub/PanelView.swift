@@ -1101,7 +1101,7 @@ struct PluginDetailView: View {
                     // full text in a tooltip: the title is truncated after three lines, the explanation after two
                     Text(plugin.headline).font(.system(size: 17, weight: .bold, design: first?.isMono == true ? .monospaced : .default))
                         .lineLimit(3).fixedSize(horizontal: false, vertical: true)
-                        .reportsTruncation(plugin.headline, font: .system(size: 17, weight: .bold))
+                        .reportsTruncation(plugin.headline, font: .system(size: 17, weight: .bold, design: first?.isMono == true ? .monospaced : .default))
                         .hoverHelp(PluginText.help(plugin.headline))
                     HStack(alignment: .firstTextBaseline, spacing: 6) {
                         StatusGlyph(status: plugin.status, size: 14).alignmentGuide(.firstTextBaseline) { $0[VerticalAlignment.center] + 4 }
@@ -1359,6 +1359,14 @@ enum DetailsMemory {
 }
 
 /// A number card (Panel.dc.html): a caption, a large value, a line below it in the `color=` color.
+extension Item {
+    /// The font for this line's title: `font=mono` keeps the size and weight and makes it monospaced (cards, chart titles,
+    /// `bar=` lines, table group headings and the popover card use it, like plain lines and table rows).
+    func titleFont(_ size: CGFloat, _ weight: Font.Weight = .regular) -> Font {
+        .system(size: size, weight: weight, design: isMono ? .monospaced : .default)
+    }
+}
+
 struct StatCard: View {
     let item: Item
 
@@ -1366,8 +1374,8 @@ struct StatCard: View {
         VStack(alignment: .leading, spacing: 4) {
             Text(item.stat ?? "").font(.system(size: 12)).foregroundStyle(.white.opacity(0.6)).lineLimit(1)
                 .reportsTruncation(item.stat ?? "", font: .system(size: 12))
-            Text(item.title).font(.system(size: 22, weight: .bold)).lineLimit(1).minimumScaleFactor(0.6)
-                .reportsTruncation(item.title, font: .system(size: 22, weight: .bold))
+            Text(item.title).font(item.titleFont(22, .bold)).lineLimit(1).minimumScaleFactor(0.6)
+                .reportsTruncation(item.title, font: item.titleFont(22, .bold))
             if let n = item.note {
                 Text(n).font(.system(size: 12)).foregroundStyle(swiftBarColor(item.color) ?? .white.opacity(0.6)).lineLimit(2)
                     .reportsTruncation(n, font: .system(size: 12))
@@ -1391,7 +1399,7 @@ struct GaugeCard: View {
         VStack(alignment: .leading, spacing: 8) {
             // title and explanation in a row; if they don't fit (in Russian "Неделя · Opus — 41% использовано" and "сброс вт 10.11
             // 23:36") — the explanation goes on a line below the title rather than truncating the title
-            let title = Text(it.title).font(.system(size: 13, weight: .semibold))
+            let title = Text(it.title).font(it.titleFont(13, .semibold))
             let note = it.note.map { Text($0).font(.system(size: 12)).foregroundStyle(.white.opacity(0.6)) }
             ViewThatFits(in: .horizontal) {
                 HStack(alignment: .firstTextBaseline) {
@@ -1401,7 +1409,7 @@ struct GaugeCard: View {
                 }
                 VStack(alignment: .leading, spacing: 2) {
                     title.lineLimit(2).fixedSize(horizontal: false, vertical: true)
-                        .reportsTruncation(it.title, font: .system(size: 13, weight: .semibold))
+                        .reportsTruncation(it.title, font: it.titleFont(13, .semibold))
                     if let note, let n = it.note { note.lineLimit(1).reportsTruncation(n, font: .system(size: 12)) }
                 }
             }
@@ -1430,8 +1438,8 @@ struct StripCard: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text(node.item.title).font(.system(size: 13, weight: .semibold))
-                .reportsTruncation(node.item.title, font: .system(size: 13, weight: .semibold))
+            Text(node.item.title).font(node.item.titleFont(13, .semibold))
+                .reportsTruncation(node.item.title, font: node.item.titleFont(13, .semibold))
                 .hoverHelp(PluginText.rowHelp(node.item), always: node.item.tooltip != nil)
             HStack(alignment: .top, spacing: 6) {
                 ForEach(node.children) { c in cell(c.item) }
@@ -1448,8 +1456,8 @@ struct StripCard: View {
             if let sym = it.sfImage, NSImage(systemSymbolName: sym, accessibilityDescription: nil) != nil {
                 Image(systemName: sym).font(.system(size: 20)).foregroundStyle(swiftBarColor(it.color) ?? .white.opacity(0.7))
             }
-            Text(it.title).font(.system(size: 12, weight: .semibold)).lineLimit(1)
-                .reportsTruncation(it.title, font: .system(size: 12, weight: .semibold))
+            Text(it.title).font(it.titleFont(12, .semibold)).lineLimit(1)
+                .reportsTruncation(it.title, font: it.titleFont(12, .semibold))
             if let n = it.note {
                 Text(n).font(.system(size: 11)).foregroundStyle(.white.opacity(0.55)).lineLimit(2).multilineTextAlignment(.center)
                     .reportsTruncation(n, font: .system(size: 11))

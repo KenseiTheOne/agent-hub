@@ -543,15 +543,25 @@ const SOURCE_PATTERNS = [
   [/\.claude(?:[\\/]+\.)*[\\/]+projects/i, "~/.claude/projects"],
   [/workstream\.jsonl/i, "workstream.jsonl"],
   [/auth\.json/i, "auth.json"],
-  // a file path ending a string literal: the last word has a path character (/ \ ~ *) or is a single-dot name (server.key,
-  // .key); a dotted identifier is not a path — an SF Symbol name "sfimage=person.badge.key" passes (re-review 69)
-  [/["'`](?:[^"'`\n]*[\s=])?(?:[^\s"'`=]*[\\/~*][^\s"'`=]*|[^\s"'`=.\\/~*]*)\.key["'`]/, "*.key"],
+  // any string literal that ends in ".key" (example.com.key, `${host}.local.key`, "--key-file=my.site.key"); SF Symbol
+  // names (sfimage=person.badge.key, symbol="lock.rectangle.key") are removed from the text first (sfSymbolsStripped)
+  [/["'`][^"'`\n]*\.key["'`]/, "*.key"],
   [/["'`](?:[^"'`\n]*[\\/])?\.env(?:\.[\w-]+)?["'`]/, ".env"],
 ];
 
+// The source without SF Symbol names (task 81): the value of sfimage= (SwiftBar's icon parameter) and of a symbol="…" attribute
+// is an icon name, not a file — "person.badge.key" must not read as a key file. Only symbol-name characters are removed
+// (letters, digits, dots), so "sfimage=x/../server.key" keeps its path and is still caught.
+export function sfSymbolsStripped(text) {
+  return String(text)
+    .replace(/\bsfimage=[A-Za-z0-9.]+/g, "sfimage=")
+    .replace(/\bsymbol\s*=\s*(["'])[A-Za-z0-9.]+\1/g, "symbol=$1$1");
+}
+
 export function sourceViolations(text) {
   const out = [];
-  for (const [re, what] of SOURCE_PATTERNS) if (re.test(text)) out.push(what);
+  const t = sfSymbolsStripped(text);
+  for (const [re, what] of SOURCE_PATTERNS) if (re.test(t)) out.push(what);
   return out;
 }
 
@@ -686,7 +696,7 @@ export function lintPlugin({ id, meta, source = "", official = false, local = fa
     for (const r of meta.push || []) {
       if (!r || typeof r.key !== "string") continue;
       if (r.kind !== "plugin") warnings.push(L(lang, `<agenthub.push key="${r.key}">: у плагина сообщества действуют только правила kind="plugin" — это правило ядро пропустит`, `<agenthub.push key="${r.key}">: a community plugin only gets kind="plugin" rules — the core skips this one`));
-      else if (r.quietException || r.awayDelayMs || r.hold || r.cooldownMs) warnings.push(L(lang, `<agenthub.push key="${r.key}">: у плагина сообщества quiet, away, hold и cooldown не действуют — только подпись`, `<agenthub.push key="${r.key}">: for a community plugin quiet, away, hold and cooldown have no effect — only the label is used`));
+      else if (r.quietException || r.awayDelayMs || r.hold || r.cooldownMs) warnings.push(L(lang, `<agenthub.push key="${r.key}">: у плагина сообщества quiet, away, hold и cooldown не действуют — только подпись и macOnly`, `<agenthub.push key="${r.key}">: for a community plugin quiet, away, hold and cooldown have no effect — only the label and macOnly are used`));
     }
   }
   // Icon: the symbol name and color are checked by metadata parsing; an invalid tag is a parsing warning (not here).

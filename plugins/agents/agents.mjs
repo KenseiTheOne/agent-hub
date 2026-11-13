@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // <agenthub.title>Claude Code Фоновые агенты</agenthub.title>
 // <agenthub.title lang="en">Claude Code Background Agents</agenthub.title>
-// <agenthub.version>1.2.1</agenthub.version>
+// <agenthub.version>1.2.2</agenthub.version>
 // <agenthub.desc>Фоновые прогоны Workflow в Claude Code: что идёт, что упало, сколько потрачено</agenthub.desc>
 // <agenthub.desc lang="en">Claude Code Workflow runs in the background: what's running, what failed, what it cost</agenthub.desc>
 // <agenthub.status value="ok" label="Прогоны в порядке">Идущие и завершённые прогоны без сбоев</agenthub.status>
@@ -77,6 +77,8 @@ function line(title, params = {}) {
 export function envLang() {
   return process.env.AGENTHUB_LANG === "en" ? "en" : "ru";
 }
+// The popover tile caption: "Claude Code Background Agents" does not fit the tile (~110 pt, one line)
+const TILE_LABEL = (lang) => (lang === "en" ? "Agents" : "Агенты");
 export function fmtTokens(n, lang = "ru") {
   if (lang === "en") {
     if (n >= 1e9) return `${(n / 1e9).toFixed(2)}B`;
@@ -583,7 +585,7 @@ export class Tracker {
       }
     }
     // tileLabel — the popover tile label: "Claude Code Background Agents" does not fit in the tile (~110 pt, one line)
-    const head = line(title, { status, tile, tileLabel: en ? "Agents" : "Агенты", sfimage: running.length ? "gearshape.2" : bad.length ? "exclamationmark.triangle" : "gearshape", activity });
+    const head = line(title, { status, tile, tileLabel: TILE_LABEL(this.lang), sfimage: running.length ? "gearshape.2" : bad.length ? "exclamationmark.triangle" : "gearshape", activity });
     const out = [activity ? head : `${head} activity=""`];
     if (running.length) {
       const sum = running.reduce((a, v) => a + v.r.spend.read, 0);
@@ -767,6 +769,12 @@ export function pidsAlive(pids, procStarts = new Map(), { psStarts = psStartsUtc
 }
 
 // ---------- plugin process ----------
+// The frame for a failed tick: the same short tile caption as a normal frame, so the popover tile keeps its name.
+export function brokenFrame(err, lang = envLang()) {
+  const en = lang === "en";
+  return [line(en ? "Can't read run logs" : "Не получается прочитать журналы прогонов", { status: "unknown", tileLabel: TILE_LABEL(lang), event: "source-broken" }), "---", line(clean(err?.message ?? err), { color: "gray" })].join("\n");
+}
+
 function main() {
   const tickMs = Math.max(500, Number(process.env.AGENTHUB_AGENTS_TICK_MS) || 3000);
   const cacheDir = process.env.AGENTHUB_PLUGIN_CACHE_PATH;
@@ -779,7 +787,7 @@ function main() {
     try {
       text = tracker.tick(opts);
     } catch (e) {
-      text = [line(envLang() === "en" ? "Can't read run logs" : "Не получается прочитать журналы прогонов", { status: "unknown", event: "source-broken" }), "---", line(clean(e.message), { color: "gray" })].join("\n");
+      text = brokenFrame(e);
     }
     const now = Date.now();
     if (text !== lastText || now - lastAt > 60_000) {

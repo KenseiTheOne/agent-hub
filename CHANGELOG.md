@@ -60,6 +60,16 @@ that an older hub ignores, so plugins keep declaring `<agenthub.contract>3</agen
 - **`net="none"` holds on the hub's own proxy.** An action that promised no network (or its background job) could still
   reach a service through `POST /connections/:id/mcp|http`. Now its process gets `403 net:none` there, journaled as
   `mcp-denied`/`http-denied` with the action id (re-review 66).
+- **Plugin processes while they stop.** A streamable plugin told `stopping` (restart, update, removal) and the
+  background jobs of a removed or updated instance being killed were attributed to nobody for about a second and got
+  the plain `cli` view. They stay the plugin's until gone now — with its trust on a restart of the same instance, as an
+  untrusted plugin otherwise. A connection whose process was already gone when classified (`peer:no-process`,
+  `peer:no-pid`) gets only `/health` and `/peer`. A stream's process group is forgotten once it has no member left
+  (review 3).
+- **Linter `*.key` catches multi-dot names again.** `"example.com.key"`, `"tls.server.key"`, `` `${host}.local.key` ``
+  and `"--key-file=my.site.key"` passed since re-review 69; now only SF Symbol names in `sfimage=` and `symbol="…"` are
+  exempt, and a bare dotted string ending in `.key` is flagged. The registry's vendored `perms.mjs` is the same file
+  (review 3).
 
 ### Plugin contract (additive, contract 3)
 
@@ -248,6 +258,15 @@ that an older hub ignores, so plugins keep declaring `<agenthub.contract>3</agen
 - **Linter `*.key`.** The source check matches file paths only (a last word with `/`, `\`, `~`, `*`, or a single-dot
   name); an SF Symbol such as `sfimage=person.badge.key` no longer fails the registry CI or an own-folder install
   (re-review 69). The registry's vendored `scripts/vendor/perms.mjs` is the same file.
+- **Stable ids for one button on several rows.** The per-row offer id of re-review 64 included the row text, so a live
+  header text or a second copy appearing changed it and an open confirmation or banner button got `404`. The first row
+  text keeps the base id, further ones get ids by order (review 3).
+- **Background jobs read connections from the cache.** Only a foreground action process forces fresh calls — on `/http`
+  now even with an explicit `"fresh": false`, like `/mcp`; a job passes `fresh: true` itself when it needs it. Replaces
+  the job part of re-review 76 (review 3).
+- **Job limit after an update.** Jobs of the old instance that are being killed no longer count toward the new
+  instance's `maxJobsPerPlugin` (`409 facts:jobs-limit` with an empty job list) (review 3).
+- **The "notifications muted" notice of a `macOnly` rule stays on the Mac** (review 3).
 
 ### App
 
@@ -303,6 +322,14 @@ that an older hub ignores, so plugins keep declaring `<agenthub.contract>3</agen
 - **Tests don't depend on the macOS language.** Each test case runs with its own language (`.hubLang` trait, a
   task-local `L10n.$scope`), so the suite passes on an English system and parallel suites can't switch each other's
   language (re-review 62).
+- **`font=mono` on cards too.** Number, bar and strip cards (and strip cells), chart titles and `chart=share` legend
+  rows, `bar=` lines, table `group=true` headings and the popover's expanded tile card now draw a `font=mono` title
+  monospaced as well, so it holds everywhere `writing-plugins.md` promises (review 3).
+- **"Catalog not connected" names the built-in plugins from the state** (their own titles) instead of a fixed list in
+  the shell, so it stays right after the rename and with Spend (review 3).
+- **Tests: the language setting is scoped too.** `L10n.shared.setting` and `settingKnown` live in the test case's
+  `LangScope` like the language, so parallel suites can't race on them; `PluginChartsTests` carries the `.hubLang`
+  trait like every other suite (review 3).
 
 ### Built-in plugins
 
@@ -325,9 +352,18 @@ that an older hub ignores, so plugins keep declaring `<agenthub.contract>3</agen
     Unknown models are counted in tokens only.
   - An optional notification when today's cost passes a threshold picked on the page (`daily-over`, its own switch).
   - The plugin uses the generic contract only (two actions, the chart elements, a table, a popup); no effects.
+- **Quota 0.5.2: push labels without the plugin name.** «Неделя ≥ 80%» / "Week ≥ 80%" and «Не обновляется: нужен вход в
+  Claude» / "Not updating: sign in to Claude": with the new title the banner read "Claude Code Quota · Quota: week ≥ 80%"
+  (review 3).
+- **The "broken" frames keep the tile caption.** When Background Agents (1.2.2), Spend (0.2.2) or Sessions (0.5.2)
+  can't render, the frame still carries `tileLabel`, so the popover tile keeps its short name instead of the long title
+  (review 3).
 
 ### Docs
 
+- **Contract 3 is frozen** ([`extension-points.md`](docs/extension-points.md#contract-versions)): nothing in it changes
+  meaning or goes away; only optional items an older hub ignores may join it, and each registry contract feature is
+  named there (`daemon/test/contract-freeze.test.mjs` checks both). Removals wait for contract 4.
 - [`writing-plugins.md`](docs/writing-plugins.md) now covers the process lifecycle (process groups killed when a run or
   action ends, background jobs, restarts of a streamable process, the `stopping` message), the frame cost and the
   ≤ 4/s coalescing, secret cache timings (5 min found, 1 min missing) and key limits, chart autoscale vs `max=`, the
@@ -346,6 +382,10 @@ that an older hub ignores, so plugins keep declaring `<agenthub.contract>3</agen
   exception too; §9.1 says what the CLI class may press on the live hub versus a test hub; extension terminal adapters
   ignore `order` and get no `ctx`, only `facts`. The linter now says a community `immediate` action with network or
   `cost=` is raised to `confirm-cost`, not `confirm`, and the action confirmation text puts a period after the command.
+- Review 3 corrections: "Input actions" in [`extension-points.md`](docs/extension-points.md) describes both forms
+  (with and without `inputPattern=`, which also joins the "other additions within contract 3" list); community push
+  rules take `macOnly="true"` as well as the label (writing-plugins, api, extension-points, plugins-registry, the push
+  README); the `avg=` caption sits under the chart beside a dashed sample, default «среднее» / "average".
 
 ## 0.1.2 — 2026-11-11
 

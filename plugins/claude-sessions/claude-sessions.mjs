@@ -3,7 +3,7 @@
 //
 // <agenthub.title>Claude Code Сессии</agenthub.title>
 // <agenthub.title lang="en">Claude Code Sessions</agenthub.title>
-// <agenthub.version>0.5.1</agenthub.version>
+// <agenthub.version>0.5.2</agenthub.version>
 // <agenthub.author.name>Kensei</agenthub.author.name>
 // <agenthub.author.github>KenseiTheOne</agenthub.author.github>
 // <agenthub.desc>Сессии Claude Code по вкладкам cmux: кто работает, кто ждёт вас, кто оборвался</agenthub.desc>
@@ -723,7 +723,7 @@ export function envLang() {
   return process.env.AGENTHUB_LANG === "en" ? "en" : "ru";
 }
 // The popover tile caption: "Claude Code Sessions" does not fit the tile (~110 pt, one line)
-const TILE_LABEL = () => (envLang() === "en" ? "Sessions" : "Сессии");
+const TILE_LABEL = (lang = envLang()) => (lang === "en" ? "Sessions" : "Сессии");
 
 const pl = {
   ru: (n, one, few, many) => {
@@ -962,7 +962,7 @@ export function render({ sessions, died, problems, agentsOk, hintsCount = 0, bin
   else [head, tile] = [L.headNone, "0"];
   // The header itself names the corruption reason — the event is on it, and the body has only details the header lacks.
   const headBroken = broken && head === brokenText;
-  const out = [`${head} | status=${status} tile=${q(tile)} tileLabel=${q(TILE_LABEL())}${headBroken ? " event=source-broken" : ""} sfimage=${waiting ? "bubble.left.and.exclamationmark.bubble.right" : "terminal"}`, "---"];
+  const out = [`${head} | status=${status} tile=${q(tile)} tileLabel=${q(TILE_LABEL(lang))}${headBroken ? " event=source-broken" : ""} sfimage=${waiting ? "bubble.left.and.exclamationmark.bubble.right" : "terminal"}`, "---"];
   if (broken) {
     // "claude not found" in the details isn't a repeat of the header but where we looked and what to do; other codes — as is
     const rest = problems;
@@ -1039,6 +1039,11 @@ export async function poll({ home = homedir(), mem, nowMs = Date.now(), effortCa
   return render({ ...merged, hintsCount: hints.count, bindingsCount: bindings.size }, nowMs, envLang());
 }
 
+// The frame for a failed poll: the same short tile caption as a normal frame, so the popover tile keeps its name.
+export function brokenFrame(err, lang = envLang()) {
+  return `${T[lang].pluginError} | status=unknown tileLabel=${q(TILE_LABEL(lang))}\n---\n${clean(err?.message || err, 140)} | event=source-broken`;
+}
+
 async function main() {
   const dataDir = process.env.AGENTHUB_PLUGIN_DATA_PATH || null;
   const memPath = dataDir ? join(dataDir, "memory.json") : null;
@@ -1063,7 +1068,7 @@ async function main() {
       try {
         frame = await poll({ mem, nowMs: now, effortCache });
       } catch (e) {
-        frame = `${T[envLang()].pluginError} | status=unknown\n---\n${clean(e?.message || e, 140)} | event=source-broken`;
+        frame = brokenFrame(e);
       }
       if (frame !== last) {
         process.stdout.write(`${frame}\n~~~\n`);
