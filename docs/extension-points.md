@@ -247,7 +247,10 @@ export async function stop(ctx) { ... }      // remove subscriptions and timers;
   plugins; network — only `api.anthropic.com`; the Claude Code token never leaves the service: not to disk, the journal,
   the bus or plugins; an expired one is not refreshed. In test mode — doubles only: `services.usage.securityPath`,
   `services.usage.credentialsFile`, `services.usage.url` on 127.0.0.1/localhost; `services.usage.live: true` — the real
-  keychain and host even in a test directory, for a live check).
+  keychain and host even in a test directory, for a live check), `models` (hub 0.1.5: the Claude models this sign-in
+  can use → `Cache/models.json`, the `AGENTHUB_CLAUDE_MODELS_FILE` variable for trusted plugins; one
+  `GET api.anthropic.com/v1/models` every 6 h with the same sign-in and the same token rules as `usage`; doubles in test
+  mode — `services.models.securityPath|credentialsFile|url`, `live`; `docs/api.md`, "Hub directory").
 
 ### Push channel
 
@@ -784,7 +787,9 @@ hub socket (contract 3: always; previously only with the `oauth` service): the p
 the declared `<agenthub.net>` against the service host; the core enforces rate and limits), and with the
 `<agenthub.terminal>` permission — `POST /terminal/read-screen|send-text`; `AGENTHUB_CLAUDE_SESSIONS_FILE` (contract 3) —
 the path to `<home>/Cache/claude-sessions.json` (the `sessions` service; no variable — the hub is older or the service is
-off: the plugin lives without this data). On Windows also `USERPROFILE` (= `HOME`: `os.homedir()` reads it there) and
+off: the plugin lives without this data); `AGENTHUB_CLAUDE_MODELS_FILE` (within contract 3, hub 0.1.5) — the path to
+`<home>/Cache/models.json`, the Claude models this sign-in can use (the `models` service; no variable — the hub is older
+or the service is off: the plugin keeps its own way of knowing models). On Windows also `USERPROFILE` (= `HOME`: `os.homedir()` reads it there) and
 the system `SystemRoot`, `windir`, `COMSPEC`, `PATHEXT`, `TEMP`, `TMP`. Nothing else (no `NODE_OPTIONS`).
 
 **Output:** the header is everything before the first `---`, the body after it; `Title | k=v k2="v 2"` (the separator is
@@ -921,6 +926,15 @@ action attributes `input=`, `inputPattern=`, `net="none"`, `background="true"`; 
 `<agenthub.push>` now keeps the event off the extra channels (older hubs ignore it); a `>` inside a quoted attribute
 value. A plugin that relies on one of them keeps `<agenthub.contract>3</agenthub.contract>` and should read
 on an older hub as the fallback each item describes.
+
+**Model list within contract 3 (hub 0.1.5).** `AGENTHUB_CLAUDE_MODELS_FILE` — for trusted plugins, the path to
+`<home>/Cache/models.json`: `{version: 1, fetched_at, checked_at, error, retry_at?, models: [{id, name?, created_at?}]}`
+— the Claude models the Claude Code sign-in can use, newest first, refreshed every 6 h by the core `models` service
+(`error` — a code or `null`; on an error the previous list stays, signed out — the list is empty). The permission is
+`<agenthub.fsRead>$AGENTHUB_CLAUDE_MODELS_FILE — why</agenthub.fsRead>`; to run right after a write —
+`<agenthub.watch>$AGENTHUB_CLAUDE_MODELS_FILE — why</agenthub.watch>`. Optional: an older hub gives no variable (the
+`fsRead`/`watch` lines on it are skipped), and the plugin falls back to whatever it did before. A plugin that offers a
+model choice builds it from this list instead of carrying its own.
 
 **Contract 3 is frozen (2026-11-12).** Contract 3 changed three times in two days; from now on it stays as it is until
 contract 4:

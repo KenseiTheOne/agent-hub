@@ -106,7 +106,7 @@ export const SEC_NOT_FOUND = 44;
 
 // → { value } | { missing: true } (no entry: code 44, empty output, no program) | { unavailable: true } (timeout,
 // access dialog denied, locked keychain, other codes — a temporary failure, not a sign-out).
-function readKeychain(file, timeoutMs, args) {
+export function readKeychain(file, timeoutMs, args) {
   return new Promise((resolve) => {
     execFile(file, args, { timeout: timeoutMs, maxBuffer: 64 * 1024, env: { PATH: "/usr/bin:/bin" } }, (err, stdout) => {
       // neither stderr nor the error text is kept: only "present / missing / unavailable"
@@ -143,8 +143,9 @@ export function writeCache(path, data) {
 }
 
 // Request URL: live — only https://api.anthropic.com/api/oauth/usage; in test mode — a double on loopback.
-export function endpoint(cfg, testMode) {
-  if (!testMode || cfg.live === true) return { proto: "https:", host: USAGE_HOST, port: 443, path: USAGE_PATH };
+// path — the live path for another service on the same host (the models service).
+export function endpoint(cfg, testMode, path = USAGE_PATH) {
+  if (!testMode || cfg.live === true) return { proto: "https:", host: USAGE_HOST, port: 443, path };
   if (typeof cfg.url !== "string") return null;
   let u;
   try {
@@ -157,7 +158,8 @@ export function endpoint(cfg, testMode) {
 }
 
 // One GET. → { status, body } | { error: "network" | "timeout" | "too-large" | "bad-response" }. Never throws.
-function fetchUsage(ep, token, timeoutMs) {
+// headers — extra request headers (the models service adds anthropic-version).
+export function fetchJson(ep, token, timeoutMs, headers = {}) {
   return new Promise((resolve) => {
     const req = (ep.proto === "https:" ? httpsRequest : httpRequest)(
       {
@@ -166,7 +168,7 @@ function fetchUsage(ep, token, timeoutMs) {
         path: ep.path,
         method: "GET",
         // the same headers as the Claude Code statusline scripts; our own User-Agent
-        headers: { Authorization: `Bearer ${token}`, "anthropic-beta": "oauth-2025-04-20", "Content-Type": "application/json", "User-Agent": "agent-hub" },
+        headers: { Authorization: `Bearer ${token}`, "anthropic-beta": "oauth-2025-04-20", "Content-Type": "application/json", "User-Agent": "agent-hub", ...headers },
         timeout: timeoutMs,
         agent: false,
       },
@@ -216,6 +218,39 @@ function fetchUsage(ep, token, timeoutMs) {
   });
 }
 
+// Where the Claude Code sign-in is read from, for a service's config cfg (securityPath, credentialsFile,
+// claudeConfigDir). → { read() → { token } | { error: "no-token" | "token-expired" | "keychain-unavailable" } }.
+// keychain-unavailable — the keychain could not be read (not "no entry"): the cached data is kept, the plugin does not
+// ask to sign in again. Shared by the usage and models services.
+export function tokenSource(ctx, cfg, testMode) {
+  const securityPath = testMode ? cfg.securityPath || null : process.platform === "darwin" ? "/usr/bin/security" : null;
+  const configDir = typeof cfg.claudeConfigDir === "string" && cfg.claudeConfigDir ? cfg.claudeConfigDir : process.env.CLAUDE_CONFIG_DIR || null;
+  const service = keychainService({ configDir, secureDir: process.env.CLAUDE_SECURESTORAGE_CONFIG_DIR });
+  // .credentials.json: live — in the Claude config directory (CLAUDE_CONFIG_DIR, otherwise claudeHome = ~/.claude);
+  // test — only an explicit double (the real ~/.claude is not read)
+  const credentialsFile = testMode ? cfg.credentialsFile || null : join(configDir || ctx.config.claudeHome, ".credentials.json");
+  return {
+    async read() {
+      let raw = null;
+      let unavailable = false;
+      if (securityPath) {
+        const r = await readKeychain(securityPath, 5_000, ["find-generic-password", "-s", service, "-w"]);
+        raw = r.value || null;
+        unavailable = r.unavailable === true;
+      }
+      if (!raw && credentialsFile) {
+        try {
+          raw = readFileSync(credentialsFile, "utf8");
+        } catch {
+          raw = null;
+        }
+      }
+      if (!raw) return { error: unavailable ? "keychain-unavailable" : "no-token" };
+      return tokenFrom(raw);
+    },
+  };
+}
+
 export class UsageService {
   constructor(ctx) {
     this.ctx = ctx;
@@ -226,12 +261,7 @@ export class UsageService {
     this.dir = dir;
     this.file = join(dir, "usage.json");
     this.ep = endpoint(cfg, Boolean(ctx.config.testMode));
-    this.securityPath = this.testMode ? cfg.securityPath || null : process.platform === "darwin" ? "/usr/bin/security" : null;
-    const configDir = typeof cfg.claudeConfigDir === "string" && cfg.claudeConfigDir ? cfg.claudeConfigDir : process.env.CLAUDE_CONFIG_DIR || null;
-    this.service = keychainService({ configDir, secureDir: process.env.CLAUDE_SECURESTORAGE_CONFIG_DIR });
-    // .credentials.json: live — in the Claude config directory (CLAUDE_CONFIG_DIR, otherwise claudeHome = ~/.claude);
-    // test — only an explicit double (the real ~/.claude is not read)
-    this.credentialsFile = this.testMode ? cfg.credentialsFile || null : join(configDir || ctx.config.claudeHome, ".credentials.json");
+    this.token = tokenSource(ctx, cfg, this.testMode);
     const minInterval = this.testMode ? 50 : 60_000;
     this.intervalMs = Math.max(minInterval, Number(cfg.intervalMs) || TTL_MS);
     this.timeoutMs = Number(cfg.timeoutMs) || 8_000;
@@ -240,25 +270,8 @@ export class UsageService {
     this.lastError = undefined;
   }
 
-  // → { token } | { error: "no-token" | "token-expired" | "keychain-unavailable" }. keychain-unavailable — the keychain
-  // could not be read (not "no entry"): quota rows are kept, the plugin does not ask to sign in again.
-  async readToken() {
-    let raw = null;
-    let unavailable = false;
-    if (this.securityPath) {
-      const r = await readKeychain(this.securityPath, 5_000, ["find-generic-password", "-s", this.service, "-w"]);
-      raw = r.value || null;
-      unavailable = r.unavailable === true;
-    }
-    if (!raw && this.credentialsFile) {
-      try {
-        raw = readFileSync(this.credentialsFile, "utf8");
-      } catch {
-        raw = null;
-      }
-    }
-    if (!raw) return { error: unavailable ? "keychain-unavailable" : "no-token" };
-    return tokenFrom(raw);
+  readToken() {
+    return this.token.read();
   }
 
   // One cycle. → delay until the next one, ms.
@@ -279,7 +292,7 @@ export class UsageService {
         out = { ...base, error: tk.error, rows: tk.error === "no-token" ? [] : keep };
         delay = NO_TOKEN_RETRY_MS;
       } else {
-        const r = await fetchUsage(this.ep, tk.token, this.timeoutMs);
+        const r = await fetchJson(this.ep, tk.token, this.timeoutMs);
         if (r.error) {
           out = { ...base, error: r.error, rows: keep };
           delay = ERROR_BACKOFF_MS;

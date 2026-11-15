@@ -849,6 +849,7 @@ The hub starts every run and every action with **only** these variables (nothing
 | `AGENTHUB_HUB_SOCKET` | trusted | the hub socket path, for section 8 |
 | `AGENTHUB_USAGE_FILE` | trusted, while the `usage` service runs | the Claude subscription quota cache, `<home>/Cache/usage.json` |
 | `AGENTHUB_CLAUDE_SESSIONS_FILE` | trusted, contract 3, while the `sessions` service runs | metadata of live Claude Code sessions, `<home>/Cache/claude-sessions.json` |
+| `AGENTHUB_CLAUDE_MODELS_FILE` | trusted, hub 0.1.5+, while the `models` service runs | the Claude models this sign-in can use, newest first: `<home>/Cache/models.json`, `{error, models: [{id, name?, created_at?}]}`; refreshed every 6 h. No variable — an older hub: keep a fallback |
 
 On Windows also `USERPROFILE` and the system `SystemRoot`, `windir`, `COMSPEC`, `PATHEXT`, `TEMP`, `TMP`.
 

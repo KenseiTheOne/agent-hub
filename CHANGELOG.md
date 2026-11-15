@@ -6,6 +6,15 @@ The plugin contract has its own version history in
 
 ## Unreleased
 
+### Plugin contract (additive, contract 3)
+
+- **The hub knows which Claude models exist.** A new core service, `models`, asks Anthropic for the model list of the
+  Claude Code sign-in once every 6 hours (`GET api.anthropic.com/v1/models`, the same sign-in and the same token rules
+  as the quota service: the token never reaches the disk, the journal or plugins) and keeps it in `Cache/models.json`.
+  Trusted plugins get the path as `AGENTHUB_CLAUDE_MODELS_FILE`, so a plugin with a model choice shows a new model by
+  itself instead of waiting for its own update. Optional for plugins: an older hub gives no variable. Switch:
+  `services.models.enabled = false`.
+
 ### Bridge
 
 - **The cmux bridge survives a hub update.** The daemon knows the bridge by its directory, and after an update the

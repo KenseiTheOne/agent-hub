@@ -415,6 +415,7 @@ always below the new instance's start, so after a daemon restart the client gets
 | `plugins.update-available` | `{plugin, title, installed, version, permissionsGrow}` — a new version of an installed plugin, **once** per "id@version" (also across restarts: `Registry/updates.json`); the push service → a macOS notification "Update available: Builder 0.4.1" — the title from the verified catalog in the hub language, as in the popover (`@hub:plugin-update:<id>:<version>`, no flap window) |
 | `bridge.connected` / `bridge.disconnected` / `bridge.op` / `bridge.launch.registered` / `bridge.launch.timeout` | the cmux bridge and session launches ([`bridge/README.md`](../bridge/README.md)); `bridge.disconnected` with `reason: "stale"` — the bridge stopped polling without `bye`, `bridge.connected` with `reason: "resumed"` — it is polling again |
 | `usage.updated` | `{ok, error}` — the usage service refreshed the quota cache (`error` — a code or `null`; no rows and no token) |
+| `models.updated` | `{ok, error, models}` — the models service's outcome or model list changed (`error` — a code or `null`, `models` — how many; no ids and no token) |
 | `plugins.catalog` / `plugins.installed` / `plugins.removed` / `plugins.blocked` / `plugins.quarantined` | the plugin manager ([`plugins-registry.md`](plugins-registry.md)) |
 | `<ext>.*` | other extension events (`source` — who sent it) |
 
@@ -1169,7 +1170,9 @@ now?, skipped?}`, `extension-denied {path, kind, sha256, status: pending|changed
 `extension-approve-refused {path, sha256, now, pid}`, `extension-revoked {path, pid}`, and `service-start` of an
 extension service carries `extension: true`; answers — `hook-session`, `hook-session-end`, `hook-card`,
 `hook-answer`, `hook-cancel`, `hook-skip`, `hook-paused`; bridge — `bridge-op`, `bridge-stale`; quota — `usage-fetch`
-(when the outcome changes: `ok`, the `error` code, the number of rows), `usage-write-error`, `usage-error`; registry —
+(when the outcome changes: `ok`, the `error` code, the number of rows), `usage-write-error`, `usage-error`; models —
+`models-fetch` (when the outcome or the list changes: `ok`, the `error` code, the number of models),
+`models-write-error`, `models-error`; registry —
 `registry-*`, `plugin-installed`, `plugin-consent-requested`, `plugin-removed-by-user`, `plugin-installed-terminal`,
 `plugin-consent-declined`, `plugin-blocked`, `plugin-unblocked`, `plugin-quarantined`, `registry-update-check`
 (background check: `ok`, `error`, `failures`; when the outcome changes), `plugin-update-available` (`plugin`, `from`,
@@ -1213,6 +1216,21 @@ a fallback to `<Claude config directory>/.credentials.json`, and makes `GET http
 (`Authorization: Bearer`, `anthropic-beta: oauth-2025-04-20`, no redirects, body ≤ 256 KB). Plugins get the path as
 `AGENTHUB_USAGE_FILE` (only builtin, official and own); `<agenthub.watch>$AGENTHUB_USAGE_FILE` runs the plugin right
 after the cache is written (for example, quota). The switch is `services.usage.enabled: false`.
+
+`Cache/models.json` (0600, atomic writes; hub 0.1.5) — the Claude models the Claude Code sign-in can use, from the
+`models` service (`daemon/lib/services/models.mjs`):
+`{version: 1, fetched_at, checked_at, error, retry_at?, models: [{id, name?, created_at?}]}` — `models` in the API's
+order (newest first), only the id (`claude-…`), the display name and the release date, at most 200; `error` — a code
+without text (`no-token`, `token-expired`, `keychain-unavailable`, `http-<code>`, `network`, `timeout`, `too-large`,
+`bad-response`, `no-endpoint`) or `null`. On an error the previous list stays (an empty reply counts as `bad-response`);
+signed out (`no-token`) — the list is erased. Every 6 h (backoff: 401 and 429 — 1 h, 403 and 404 — 6 h, other — 15 min;
+without a token — only a keychain check every 10 min; the backoff survives a daemon restart) the service reads the
+token exactly as `usage` does (the same keychain entry and fallback file; `services.models.claudeConfigDir`, otherwise
+the one of `usage`) and makes `GET https://api.anthropic.com/v1/models?limit=1000` (`Authorization: Bearer`,
+`anthropic-beta: oauth-2025-04-20`, `anthropic-version: 2023-06-01`, no redirects, body ≤ 256 KB). The token never
+reaches the disk, the journal, the bus or plugins. Plugins get the path as `AGENTHUB_CLAUDE_MODELS_FILE` (only builtin,
+official and own); `<agenthub.watch>$AGENTHUB_CLAUDE_MODELS_FILE` runs the plugin right after a write. The switch is
+`services.models.enabled: false`.
 
 `Cache/claude-sessions.json` (0600, atomic writes; contract 3) — metadata of live Claude Code sessions from the
 `sessions` service (`daemon/lib/services/sessions.mjs`), taken from the core session registry:
