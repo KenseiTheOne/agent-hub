@@ -4,15 +4,16 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawn, execFile } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { REPO_DIR } from "../lib/config.mjs";
 import { loadNative } from "../lib/native.mjs";
-import { buildArgv, runOp, shQuote, childEnv } from "../../bridge/agenthub-bridge.mjs";
+import { buildArgv, runOp, shQuote, childEnv, movedEntry, rejectedLine, shownCommand, RESTART_EXIT } from "../../bridge/agenthub-bridge.mjs";
 import { cleanup, curl, onlyDarwin, startHub, tempHome, waitFor, writePlugin } from "./helpers.mjs";
 
 const BRIDGE = join(REPO_DIR, "bridge", "agenthub-bridge.mjs");
 const LAUNCH = join(REPO_DIR, "bridge", "launch.sh");
+const WRAPPER = join(REPO_DIR, "bridge", "agenthub-bridge");
 const SURF = "C0FFEE00-1111-4111-8111-111111111111";
 const WS = "DEADBEEF-2222-4222-8222-222222222222";
 const SID = "aaaaaaaa-1111-4111-8111-111111111111";
@@ -236,5 +237,108 @@ test("end-to-end: a real bridge on the socket (class bridge), cmux.focus from cu
     await h.stop();
     cleanup(tools);
     cleanup(project);
+  }
+});
+
+// ---------- hub updates: the bridge hands over to the new version ----------
+// Repoint a symlink the way the hub updater does it: atomically, via rename.
+function repoint(link, target) {
+  symlinkSync(target, `${link}.new`);
+  renameSync(`${link}.new`, link);
+}
+
+test("movedEntry: the entry path leads to another version's bridge → that directory; same place, no bridge, bad path → null", { skip: CMUX }, () => {
+  const dir = tempHome("ah-mv-");
+  try {
+    for (const v of ["v1", "v2", "empty"]) mkdirSync(join(dir, v, "bridge"), { recursive: true });
+    for (const v of ["v1", "v2"]) writeFileSync(join(dir, v, "bridge", "agenthub-bridge.mjs"), "");
+    symlinkSync("v1", join(dir, "current"));
+    const entry = join(dir, "current", "bridge", "agenthub-bridge");
+    const here = join(dir, "v1", "bridge");
+    assert.equal(movedEntry(entry, here), null, "the link still leads here");
+    repoint(join(dir, "current"), "v2");
+    assert.equal(movedEntry(entry, here), join(dir, "v2", "bridge"));
+    repoint(join(dir, "current"), "empty");
+    assert.equal(movedEntry(entry, here), null, "no bridge there: stay and keep knocking");
+    repoint(join(dir, "current"), "gone");
+    assert.equal(movedEntry(entry, here), null, "a dangling link");
+    assert.equal(movedEntry("current/bridge/agenthub-bridge", here), null, "a relative path is not followed");
+    assert.equal(movedEntry(undefined, here), null, "started without the wrapper");
+  } finally {
+    cleanup(dir);
+  }
+});
+
+test("a rejected bridge names its own folder and the command the hub expects — printed, shell-quoted, nothing else from /state", { skip: CMUX }, () => {
+  assert.equal(shownCommand({ bridge: { command: "/a b/bridge/agenthub-bridge" } }), "/a b/bridge/agenthub-bridge");
+  for (const bad of [null, {}, { bridge: null }, { bridge: { command: "bridge/agenthub-bridge" } }, { bridge: { command: "/x\nrm -rf ~" } }, { bridge: { command: `/${"a".repeat(400)}` } }, { bridge: { command: 7 } }]) {
+    assert.equal(shownCommand(bad), null, JSON.stringify(bad));
+  }
+  const line = rejectedLine("peer:cli", "/Users/me/It's/bridge/agenthub-bridge", "/old/bridge");
+  assert.ok(line.includes("(peer:cli)") && line.includes("runs from /old/bridge"), line);
+  assert.ok(line.endsWith(`start: ${shQuote("/Users/me/It's/bridge/agenthub-bridge")}`), line);
+  assert.match(rejectedLine("peer:cli", null, "/old/bridge"), /Settings → Terminal$/);
+});
+
+test("wrapper: exit code 75 → starts itself again by the path it was started with (now the new version); another code is passed through", { skip: CMUX }, async () => {
+  const dir = tempHome("ah-wr-");
+  try {
+    const log = join(dir, "log");
+    // a stand-in bridge: logs where it runs from and the entry path it got, then exits with its version's code
+    const fake = (code, flip) => `import { appendFileSync, renameSync, symlinkSync } from "node:fs";
+appendFileSync(${JSON.stringify(log)}, import.meta.dirname + " " + process.env.AGENTHUB_BRIDGE_ENTRY + " " + process.argv.slice(2).join(",") + "\\n");
+${flip ? `symlinkSync("v2", ${JSON.stringify(join(dir, "current.new"))}); renameSync(${JSON.stringify(join(dir, "current.new"))}, ${JSON.stringify(join(dir, "current"))});` : ""}
+process.exit(${code});
+`;
+    for (const [v, code, flip] of [["v1", RESTART_EXIT, true], ["v2", 3, false]]) {
+      mkdirSync(join(dir, v, "bridge"), { recursive: true });
+      copyFileSync(WRAPPER, join(dir, v, "bridge", "agenthub-bridge"));
+      chmodSync(join(dir, v, "bridge", "agenthub-bridge"), 0o755);
+      writeFileSync(join(dir, v, "bridge", "agenthub-bridge.mjs"), fake(code, flip));
+    }
+    symlinkSync("v1", join(dir, "current"));
+    const entry = join(dir, "current", "bridge", "agenthub-bridge");
+    const r = await sh(entry, ["a", "b"], { PATH: `${join(process.execPath, "..")}:/usr/bin:/bin`, NODE_OPTIONS: "--no-such-flag" });
+    assert.equal(r.code, 3, r.stderr);
+    assert.deepEqual(readFileSync(log, "utf8").trim().split("\n"), [`${join(dir, "v1", "bridge")} ${entry} a,b`, `${join(dir, "v2", "bridge")} ${entry} a,b`]);
+  } finally {
+    cleanup(dir);
+  }
+});
+
+test("end-to-end: a bridge from a tree the hub doesn't list is told what to start; once its entry path leads elsewhere it exits for a restart", { skip: CMUX || (!loadNative() && "no peercred addon") }, async () => {
+  const dir = tempHome("ah-rj-");
+  const tools = tempHome("ah-tl-");
+  const { cmux } = fakeTools(tools);
+  const h = await startHub({ services: "actions" });
+  // two copies of the bridge outside the hub's tree: the daemon takes neither for a bridge
+  for (const v of ["v1", "v2"]) {
+    mkdirSync(join(dir, v, "bridge"), { recursive: true });
+    mkdirSync(join(dir, v, "daemon", "lib", "terminals"), { recursive: true });
+    copyFileSync(BRIDGE, join(dir, v, "bridge", "agenthub-bridge.mjs"));
+    copyFileSync(join(REPO_DIR, "daemon", "lib", "terminals", "_screen.mjs"), join(dir, v, "daemon", "lib", "terminals", "_screen.mjs"));
+    copyFileSync(join(REPO_DIR, "VERSION"), join(dir, v, "VERSION"));
+  }
+  symlinkSync("v1", join(dir, "current"));
+  const child = spawn(process.execPath, [join(dir, "v1", "bridge", "agenthub-bridge.mjs")], {
+    env: { HOME: tools, PATH: "/usr/bin:/bin", AGENTHUB_HOME: h.home, AGENTHUB_CMUX: cmux, AGENTHUB_BRIDGE_ENTRY: join(dir, "current", "bridge", "agenthub-bridge") },
+    stdio: ["ignore", "ignore", "pipe"],
+  });
+  let stderr = "";
+  child.stderr.on("data", (d) => (stderr += d));
+  const exited = new Promise((r) => child.once("exit", (code) => r(code)));
+  try {
+    await waitFor(() => stderr.includes("doesn't accept this bridge"), { timeoutMs: 8000 });
+    assert.ok(stderr.includes(`runs from ${join(dir, "v1", "bridge")}`), stderr);
+    assert.ok(stderr.includes(`start: ${shQuote(join(REPO_DIR, "bridge", "agenthub-bridge"))}`), stderr);
+    assert.equal(h.core.facts.get("bridge.online"), false);
+    repoint(join(dir, "current"), "v2");
+    assert.equal(await exited, RESTART_EXIT, stderr);
+    assert.ok(stderr.includes("restarting the bridge from the new version"), stderr);
+  } finally {
+    child.kill("SIGKILL");
+    await h.stop();
+    cleanup(dir);
+    cleanup(tools);
   }
 });

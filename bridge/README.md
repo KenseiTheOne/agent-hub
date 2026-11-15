@@ -27,6 +27,19 @@ imports it from there, so it runs only from a hub tree that has `daemon/` next t
 Stop it with Ctrl-C (the bridge tells the daemon `bye`). A second bridge started while the first is alive gets
 `409 bridge:busy` and waits.
 
+**Hub updates.** The daemon knows the bridge by the directory it runs from, and an installed hub lives in
+`Versions/<version>`: the new daemon does not take the previous version's bridge for one. So the wrapper passes the
+bridge the path it was started by, symlinks kept (`AGENTHUB_BRIDGE_ENTRY`; for an install that is
+`…/Versions/current/src/bridge/agenthub-bridge`, the command the shell shows). While the bridge is not registered and
+that path leads to another directory holding a bridge, it exits with code 75 and the wrapper starts itself again by the
+same path — now the new version's code. Started without the wrapper (`node agenthub-bridge.mjs`), the bridge does not
+restart.
+
+**A rejected bridge.** A bridge started from a tree the running hub does not list (a working copy next to an installed
+hub, an old checkout) gets `403 peer:cli` on `hello`. On every attempt it writes to its tab where it runs from and the
+command the hub expects (`bridge.command` from `GET /state`): the bridge only prints that command — it runs nothing the
+daemon sent. Stop it and start the printed one.
+
 ## Allowlist
 
 | Operation | cmux commands |

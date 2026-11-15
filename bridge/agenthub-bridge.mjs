@@ -20,10 +20,17 @@
 //
 // Environment: AGENTHUB_HOME (the daemon directory, as for agenthubd), AGENTHUB_CMUX (absolute path to the cmux CLI,
 // by default /Applications/cmux.app/Contents/Resources/bin/cmux). The bridge doesn't print environment values.
+//
+// Hub updates. The daemon knows the bridge by the directory it runs from, and an installed hub lives in
+// Versions/<version>: after an update the new daemon no longer takes the old version's bridge for one (403 peer:cli).
+// The wrapper passes the path it was started by (AGENTHUB_BRIDGE_ENTRY, e.g. …/Versions/current/src/bridge/…); once
+// that path leads to another version, the bridge exits with RESTART_EXIT and the wrapper starts the new code.
+// A bridge the daemon rejects for another reason (started from a different tree) says so on every attempt, with the
+// command the hub expects — it only prints it, it never runs anything the daemon sent.
 
 import { request } from "node:http";
 import { execFile } from "node:child_process";
-import { accessSync, constants, lstatSync, readFileSync, statSync } from "node:fs";
+import { accessSync, constants, lstatSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -54,6 +61,34 @@ export const SEND_TEXT_RE = /^[\x21-\x5B\x5D-\x7E](?:[\x20-\x5B\x5D-\x7E]{0,198}
 export { SCREEN_LINES_MAX, SCREEN_LINES_DEFAULT };
 // Pause between typing the line and checking the field (lets the terminal render).
 const SETTLE_MS = 250;
+
+// Exit code that asks the wrapper to start the bridge again by the same path (EX_TEMPFAIL)
+export const RESTART_EXIT = 75;
+
+// AGENTHUB_BRIDGE_ENTRY — the path the wrapper was started by, symlinks not resolved. → the directory that path leads
+// to now when it is no longer this one and holds a bridge (the hub was updated, Versions/current moved); otherwise null.
+export function movedEntry(entry, here = HERE) {
+  if (typeof entry !== "string" || !isAbsolute(entry)) return null;
+  try {
+    const dir = realpathSync(dirname(entry));
+    if (dir === realpathSync(here)) return null;
+    return statSync(join(dir, "agenthub-bridge.mjs")).isFile() ? dir : null;
+  } catch {
+    return null;
+  }
+}
+
+// The launch command from /state (bridge.command) — only to print it: an absolute path without control characters.
+export function shownCommand(state) {
+  const c = state?.bridge?.command;
+  return typeof c === "string" && c.length <= 400 && isAbsolute(c) && !/[\x00-\x1f\x7f]/.test(c) ? c : null;
+}
+
+// What a rejected bridge writes to its tab (403 on hello: the daemon doesn't take this process for a bridge)
+export function rejectedLine(error, command, here = HERE) {
+  const why = `the hub doesn't accept this bridge (${error || "403"}): it runs from ${here}`;
+  return command ? `${why} — stop it (Ctrl-C) and start: ${shQuote(command)}` : `${why} — stop it (Ctrl-C) and start the one from the hub's Settings → Terminal`;
+}
 
 export function hubHome(env = process.env) {
   return env.AGENTHUB_HOME ? resolve(env.AGENTHUB_HOME) : join(homedir(), "Library", "Application Support", "AgentHub");
@@ -252,6 +287,13 @@ export async function main({ env = process.env } = {}) {
 
   let stopping = false;
   let registered = false;
+  let command; // the launch command the hub expects: asked once, on the first rejection
+  // not registered and the entry path leads to another version → hand over to it (the wrapper restarts us)
+  const restartIfMoved = () => {
+    if (!movedEntry(env.AGENTHUB_BRIDGE_ENTRY)) return;
+    log("the hub was updated — restarting the bridge from the new version");
+    process.exit(RESTART_EXIT);
+  };
   const bye = async () => {
     if (stopping) return;
     stopping = true;
@@ -270,6 +312,14 @@ export async function main({ env = process.env } = {}) {
         if (h.status === 409) {
           log("another bridge is already connected — waiting");
           await sleep(10_000);
+          continue;
+        }
+        if (h.status === 403) {
+          restartIfMoved();
+          if (command === undefined) command = shownCommand((await call(sock, "GET", "/state", undefined, 5000).catch(() => null))?.body);
+          log(rejectedLine(h.body?.error, command));
+          await sleep(backoff);
+          backoff = Math.min(backoff * 2, 30_000);
           continue;
         }
         if (h.status !== 200) {
@@ -302,6 +352,7 @@ export async function main({ env = process.env } = {}) {
     } catch (e) {
       if (registered) log(`daemon connection: ${e.code || e.message}`);
       registered = false;
+      restartIfMoved(); // the daemon is restarting after an update: don't wait to be rejected by the new one
       await sleep(backoff);
       backoff = Math.min(backoff * 2, 30_000);
     }

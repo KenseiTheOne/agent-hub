@@ -4,6 +4,21 @@ Releases are git tags `vX.Y.Z` (also published as GitHub releases); the current 
 The plugin contract has its own version history in
 [`docs/extension-points.md`](docs/extension-points.md#contract-versions).
 
+## Unreleased
+
+### Bridge
+
+- **The cmux bridge survives a hub update.** The daemon knows the bridge by its directory, and after an update the
+  running bridge was still the previous version's process: the new daemon answered it `403 peer:cli`, the bridge kept
+  knocking in silence, and everything that goes through cmux (new session, interrupt, go to tab, typing into tabs for
+  plugins) failed with `bridge-offline` until someone restarted the bridge by hand. Now the wrapper remembers the path
+  it was started by (`Versions/current/…`), and a bridge that is not registered while that path leads to another
+  version exits with code 75 — the wrapper starts the new code in the same tab. A bridge started before this release
+  has to be restarted once.
+- **A rejected bridge says what to start.** A bridge from a tree the hub does not list (for example a working copy
+  left running after moving to an installed hub) now writes to its tab where it runs from and the command the hub
+  expects, instead of `hello: 403 peer:cli`.
+
 ## 0.1.4 — 2026-11-13
 
 ### Actions

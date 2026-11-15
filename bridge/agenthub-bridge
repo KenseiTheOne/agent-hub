@@ -3,5 +3,15 @@
 #   ~/path/to/agent-hub/bridge/agenthub-bridge
 # We drop NODE_OPTIONS: the cmux preload crashes child node processes. The daemon recognizes the bridge by the agenthub-bridge.mjs path
 # (peer.bridgePaths), so the path is passed as absolute, without symlinks.
-dir=$(cd "$(dirname "$0")" && pwd -P) || exit 1
-exec /usr/bin/env -u NODE_OPTIONS node "$dir/agenthub-bridge.mjs" "$@"
+#
+# The bridge also gets the path it was started by, symlinks kept (AGENTHUB_BRIDGE_ENTRY). An installed hub is started via
+# Versions/current: after a hub update that link leads to the new version, the bridge sees it and exits with code 75 —
+# and this wrapper starts itself again by the same path, now with the new code. Ctrl-C goes to the bridge (it says bye
+# to the daemon and exits 0), then the wrapper exits too.
+entry_dir=$(cd "$(dirname "$0")" && pwd -L) || exit 1
+entry="$entry_dir/$(basename "$0")"
+dir=$(cd "$entry_dir" && pwd -P) || exit 1
+AGENTHUB_BRIDGE_ENTRY="$entry" /usr/bin/env -u NODE_OPTIONS node "$dir/agenthub-bridge.mjs" "$@"
+code=$?
+[ "$code" -eq 75 ] || exit "$code"
+exec "$entry" "$@"
