@@ -17,6 +17,7 @@ import { locate, ADAPTERS, canFocus, tabOf } from "../lib/terminals/index.mjs";
 import * as cmuxAdapter from "../lib/terminals/cmux.mjs";
 import { routes } from "../lib/routes/terminal.mjs";
 import { analyzeScreen, buildArgv, runOp, OPS } from "../../bridge/agenthub-bridge.mjs";
+import { confirmsCommand } from "../lib/terminals/_screen.mjs";
 import { BRIDGE_OPS } from "../lib/services/actions.mjs";
 import { cleanup, curl, startHub, tempHome, waitFor, writePlugin } from "./helpers.mjs";
 
@@ -32,8 +33,10 @@ const RULE = "─".repeat(60);
 
 // ---------- cmux double: tab screen and argv ----------
 // The Claude Code screen: output, the turn line (busy), the input field between rules, the hints line.
+// t.hint — the pale hint Claude Code shows in an empty field; t.ask — the session asks before applying a command
 function screen(t) {
-  return ["● Ответ: секретный текст переписки", t.busy ? "✻ Thinking… (3s · esc to interrupt)" : "", RULE, `> ${t.prompt}`, RULE, "  ? for shortcuts", ""].join("\n");
+  if (t.dialog) return ["Switch model?", "", `❯ 1. Yes, switch to ${t.dialog}`, "  2. No, go back", ""].join("\n");
+  return ["● Ответ: секретный текст переписки", t.busy ? "✻ Thinking… (3s · esc to interrupt)" : "", RULE, `> ${t.prompt || t.hint || ""}`, RULE, "  ? for shortcuts", ""].join("\n");
 }
 function fakeCmux(tabs) {
   const log = [];
@@ -44,11 +47,19 @@ function fakeCmux(tabs) {
     if (!t) return { code: 1, stdout: "" };
     if (argv[0] === "read-screen") return { code: 0, stdout: screen(t) };
     if (argv[0] === "send") {
-      t.prompt += argv.at(-1) + (t.typeAlso || "");
+      const text = argv.at(-1);
+      if (/^\x7f+$/.test(text)) t.prompt = t.prompt.slice(0, -text.length);
+      else t.prompt += text + (t.typeAlso || "");
       return { code: 0, stdout: "" };
     }
     if (argv[0] === "send-key" && argv.at(-1) === "enter") {
+      if (t.dialog) {
+        (t.answered ||= []).push(t.dialog);
+        t.dialog = null;
+        return { code: 0, stdout: "" };
+      }
       t.submitted.push(t.prompt);
+      if (t.ask) t.dialog = t.prompt.split(" ").pop();
       t.prompt = "";
       return { code: 0, stdout: "" };
     }
@@ -287,13 +298,40 @@ test("bridge: send-text requires an empty field and no turn in progress, otherwi
   let r = await run(op("/model opus"));
   assert.deepEqual(r, { ok: true, code: 0 });
   assert.deepEqual(tabs[SURF].submitted, ["/model opus"]);
-  assert.deepEqual(log.map((a) => a[0]), ["read-screen", "send", "read-screen", "send-key"]);
-  // a human's draft is left alone
+  assert.deepEqual(log.map((a) => a[0]), ["read-screen", "send", "read-screen", "send-key", "read-screen"]);
+  // a human's draft stays exactly as it was: the typed characters are erased, Enter is not pressed
   tabs[SURF].prompt = "мой черновик";
   log.length = 0;
   r = await run(op("/model opus"));
   assert.equal(r.error, "prompt-not-empty");
-  assert.deepEqual(log.map((a) => a[0]), ["read-screen"]);
+  assert.equal(r.promptEmpty, false);
+  assert.equal(tabs[SURF].prompt, "мой черновик");
+  assert.deepEqual(log.map((a) => a[0]), ["read-screen", "send", "read-screen", "send"]);
+  assert.equal(log.at(-1).at(-1), "\x7f".repeat("/model opus".length));
+  assert.deepEqual(tabs[SURF].submitted, ["/model opus"]);
+  // a draft the human keeps typing into: hands off, nothing is erased
+  tabs[SURF].typeAlso = "!";
+  log.length = 0;
+  r = await run(op("/model opus"));
+  assert.equal(r.error, "prompt-mismatch");
+  assert.deepEqual(log.map((a) => a[0]), ["read-screen", "send", "read-screen"]);
+  tabs[SURF].typeAlso = "";
+  // a pale hint of Claude Code is not a draft: it vanishes at the first character and the line goes in
+  Object.assign(tabs[SURF], { prompt: "", hint: "add a rule about tests" });
+  r = await run(op("/effort medium"));
+  assert.deepEqual(r, { ok: true, code: 0 });
+  assert.equal(tabs[SURF].submitted.at(-1), "/effort medium");
+  tabs[SURF].hint = "";
+  // Claude Code asks about exactly this command — "Yes"; about anything else — the question is left to the human
+  tabs[SURF].ask = true;
+  r = await run(op("/model claude-fable-5-2"));
+  assert.deepEqual(r, { ok: true, code: 0, confirmed: true });
+  assert.deepEqual(tabs[SURF].answered, ["claude-fable-5-2"]);
+  tabs[SURF].ask = false;
+  assert.equal(confirmsCommand(["Switch model?", "❯ 1. Yes, switch to claude-opus-5-5", "  2. No, go back"].join("\n"), "/model claude-fable-5-2"), false);
+  assert.equal(confirmsCommand(["Do you want to proceed?", "❯ 1. Yes", "  2. No"].join("\n"), "/model claude-fable-5-2"), false);
+  assert.equal(confirmsCommand(["  1. Yes, switch to claude-fable-5-2", "❯ 2. No, go back"].join("\n"), "/model claude-fable-5-2"), false);
+  assert.equal(confirmsCommand(["❯ 1. Yes, switch to claude-fable-5-2", "  2. No, go back"].join("\n"), "fix the bug in claude-fable-5-2"), false);
   // a turn is in progress
   tabs[SURF].prompt = "";
   tabs[SURF].busy = true;

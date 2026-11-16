@@ -11,8 +11,9 @@
 //   focus       — select-window and select-pane of the pane, switch-client to it; then the window of the terminal the tmux
 //                 client runs in (iTerm2, Terminal.app) is brought to the front if that terminal has an adapter;
 //   read-screen — capture-pane of the visible pane (no history): only the input field flags leave the adapter;
-//   send-text   — the same protocol as the cmux bridge (lib/terminals/_screen.mjs): the field is empty and no turn runs →
-//                 send-keys -l (literal) → the field holds exactly this line → send-keys Enter;
+//   send-text   — the same protocol as the cmux bridge (lib/terminals/_screen.mjs): no turn runs →
+//                 send-keys -l (literal) → the field holds exactly this line → send-keys Enter; a draft in the
+//                 field — the typed characters are erased (send-keys BSpace × length);
 //   send-esc    — send-keys Escape;
 //   launch      — new-window -d in the default server (the most recently used session) with bridge/launch.sh.
 
@@ -156,6 +157,7 @@ export async function sendText(target, text, facts, opts = {}) {
       read: () => capture(target, facts, p.pane),
       type: (t) => key(["-l", "--", t]),
       enter: () => key(["Enter"]),
+      erase: (n) => key(Array.from({ length: Math.min(Math.max(0, n | 0), 200) }, () => "BSpace")),
     },
     text,
     opts,

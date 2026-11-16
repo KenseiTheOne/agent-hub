@@ -10,6 +10,44 @@ public enum ConnectionState: Sendable, Equatable {
     public var isLive: Bool { self == .live }
 }
 
+/// What the shell tells the human when something didn't work. `title` is the reason in one phrase, `rows` say what and
+/// where, `hint` — what to do, `code` — the small print for a bug report. `canFocus` / `canRetry` add the "Show the tab" and
+/// "Try again" buttons. `plainTitle` / `plainDetail` — the same for a presenter that has two strings only.
+public struct Report: Sendable, Equatable {
+    public struct Row: Sendable, Equatable {
+        public var label: String
+        public var value: String
+        public var note: String?
+        public init(label: String, value: String, note: String? = nil) { self.label = label; self.value = value; self.note = note }
+    }
+    public var title: String
+    public var detail: String
+    public var rows: [Row]
+    public var hint: String?
+    public var code: String?
+    public var canFocus: Bool
+    public var canRetry: Bool
+    public var plainTitle: String
+    public var plainDetail: String
+
+    public init(title: String, detail: String = "", rows: [Row] = [], hint: String? = nil, code: String? = nil, canFocus: Bool = false, canRetry: Bool = false,
+                plainTitle: String? = nil, plainDetail: String? = nil) {
+        self.title = title; self.detail = detail; self.rows = rows; self.hint = hint; self.code = code; self.canFocus = canFocus; self.canRetry = canRetry
+        self.plainTitle = plainTitle ?? title; self.plainDetail = plainDetail ?? detail
+    }
+}
+
+/// What the human pressed in a report window.
+public enum ReportChoice: Sendable, Equatable { case ok, focus, retry }
+
+extension ConfirmPresenter {
+    /// A report with rows and buttons. The default shows its two plain strings and offers nothing.
+    public func report(_ report: Report) -> ReportChoice {
+        self.report(title: report.plainTitle, detail: report.plainDetail)
+        return .ok
+    }
+}
+
 /// How the shell asks the human. Implementation — NSAlert in the AgentHub target; in tests — a double.
 @MainActor
 public protocol ConfirmPresenter: AnyObject {
@@ -17,6 +55,9 @@ public protocol ConfirmPresenter: AnyObject {
     func confirm(_ request: ConfirmRequest, actionLabel: String) async -> Bool
     /// Show a core refusal or a connection error.
     func report(title: String, detail: String)
+    /// A refusal with rows, advice and buttons ("Show the tab", "Try again"); what the human pressed. A requirement, not
+    /// only an extension method — the store holds the presenter as `any ConfirmPresenter`. Default: the two plain strings.
+    @discardableResult func report(_ report: Report) -> ReportChoice
     /// Plugin permissions window (`428 consent-required`): permissions with "why", new ones marked. true — the human agreed.
     func consent(_ request: ConsentRequest) async -> Bool
     /// Typed text for an input action (G1): the field alone (immediate) or inside the core's confirmation (`request.confirm`).
@@ -855,25 +896,40 @@ public final class HubStore {
                     text = t
                     outcome = try await client.invoke(offer.id, input: text, confirmToken: token)
                 default:
-                    return finish(outcome, label: label)
+                    return finish(outcome, label: label) ?? false
                 }
             }
             // out of retries (a refusal after every attempt, or the core asking again and again): say why instead of
             // stopping silently — the last refusal reads like any other
-            return finish(outcome, label: label)
+            return finish(outcome, label: label) ?? false
         } catch {
             reportOffline(error)
             return false
         }
     }
 
-    /// Show the end of an action: a refusal or a failure; true — it ran and succeeded.
-    private func finish(_ outcome: ActionOutcome, label: String) -> Bool {
+    /// Show the end of an action: a refusal or a failure; true — it ran and succeeded; nil — the human pressed "Try again"
+    /// in the refusal window (offered only with `canRetry`).
+    private func finish(_ outcome: ActionOutcome, label: String, canRetry: Bool = false) -> Bool? {
         switch outcome {
         case .done(let ok, let result):
-            // a plugin action checks its own facts and names the refusal reason with a `reason=<code>` line
-            if !ok { presenter?.report(title: tr("Не получилось: \(label)", "Couldn't: \(label)"), detail: Explain.failure(result: result, label: label)) }
-            return ok
+            guard !ok else { return true }
+            // a plugin action checks its own facts and names the refusal with `reason=` / `message=` lines; `session=` says
+            // which session it is about — the window names its tab and offers to switch to it
+            let sid = result?["session"]?.stringValue?.lowercased()
+            let session = sid.flatMap { id in sessions.first { $0.sessionId.lowercased() == id } }
+            let focus = session.flatMap { focusRequest(sessionId: $0.sessionId) }
+            let report = Explain.report(result: result, label: label, session: session, canFocus: focus != nil, canRetry: canRetry)
+            switch presenter?.report(report) ?? .ok {
+            case .retry:
+                return nil
+            case .focus:
+                // after this action is over (busyAction is reset when the caller returns)
+                if let focus { Task { await self.perform(id: focus.primitive, args: focus.args, label: tr("Перейти во вкладку", "Switch to tab")) } }
+            case .ok:
+                break
+            }
+            return false
         case .needsConfirm:
             presenter?.report(title: tr("Хаб снова просит подтверждение", "The hub asks to confirm again"), detail: tr("\(label): повторите действие.", "\(label): try again."))
         case .denied(let status, let code):
@@ -894,18 +950,21 @@ public final class HubStore {
         busyAction = id
         defer { busyAction = nil }
         do {
-            var outcome = try await client.invoke(id, args: args)
-            if case .needsConfirm(let req) = outcome {
-                // an input action reached without its field (a banner button): the confirmation sheet asks for the text
-                if let field = req.input, let presenter {
-                    guard let t = await presenter.prompt(InputPrompt(actionLabel: label, input: field, confirm: req)) else { return false }
-                    outcome = try await client.invoke(id, args: args, input: t, confirmToken: req.token)
-                } else {
-                    guard let presenter, await presenter.confirm(req, actionLabel: label) else { return false }
-                    outcome = try await client.invoke(id, args: args, confirmToken: req.token)
+            // "Try again" in the refusal window runs the whole thing once more, the confirmation included
+            while true {
+                var outcome = try await client.invoke(id, args: args)
+                if case .needsConfirm(let req) = outcome {
+                    // an input action reached without its field (a banner button): the confirmation sheet asks for the text
+                    if let field = req.input, let presenter {
+                        guard let t = await presenter.prompt(InputPrompt(actionLabel: label, input: field, confirm: req)) else { return false }
+                        outcome = try await client.invoke(id, args: args, input: t, confirmToken: req.token)
+                    } else {
+                        guard let presenter, await presenter.confirm(req, actionLabel: label) else { return false }
+                        outcome = try await client.invoke(id, args: args, confirmToken: req.token)
+                    }
                 }
+                if let ok = finish(outcome, label: label, canRetry: true) { return ok }
             }
-            return finish(outcome, label: label)
         } catch {
             reportOffline(error)
             return false

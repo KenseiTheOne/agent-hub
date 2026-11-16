@@ -146,7 +146,7 @@ public enum QuitPolicy {
     /// Keys of diagnostic launches (snapshots, self-checks, icon output). The same list as APP_DIAGNOSTIC_ARGS in
     /// daemon/lib/peer.mjs: the daemon does not treat such a process as the app for supervision (its exit is not a crash).
     public static let diagnosticArguments: Set<String> = [
-        "--quit-after-snapshot", "--snapshot-panel", "--snapshot-menubar", "--print-status-item", "--show-popover", "--snapshot-popover", "--snapshot-consent",
+        "--quit-after-snapshot", "--snapshot-panel", "--snapshot-menubar", "--print-status-item", "--show-popover", "--snapshot-popover", "--snapshot-consent", "--snapshot-report",
         "--self-test-popover", "--self-test-status-menu",
     ]
 

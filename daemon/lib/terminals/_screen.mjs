@@ -2,10 +2,12 @@
 // (bridge/agenthub-bridge.mjs imports analyzeScreen and the line limits from here, so the daemon stays self-contained) and the
 // adapters that run the terminal's tool themselves (tmux). The file starts with `_`: a helper of the terminal layer.
 //
-// typeLine follows the bridge's send-text protocol:
-//   1. read the screen: the input field is found, empty, no turn running — otherwise refuse (the line would join a human's draft);
+// typeLine is the send-text protocol of every terminal (the bridge runs it too):
+//   1. read the screen: the input field is found, no turn running — otherwise refuse;
 //   2. type the line without Enter;
-//   3. read again: the field holds exactly this line (nobody typed meanwhile) — only then press Enter.
+//   3. read again: the field holds exactly this line (nobody typed meanwhile, no draft was there) — only then press Enter;
+//      a draft that was there gets the typed characters erased and stays as it was;
+//   4. read once more: Claude Code's own "are you sure" about exactly this command gets its "Yes".
 // The screen text stays inside the adapter: only the input field flags leave it.
 
 // How many last lines of the visible screen read-screen looks at (the Claude Code input field is at the bottom).
@@ -56,21 +58,72 @@ export function analyzeScreen(text, maxLines = SCREEN_LINES_DEFAULT) {
 
 export const flags = (a) => ({ promptFound: a.promptFound, promptEmpty: a.promptEmpty, busy: a.busy });
 
-// io: { read() → {ok, text?, error?}, type(text) → {ok, error?}, enter() → {ok, error?} }. → { ok, error? }
-export async function typeLine(io, text, { settleMs = SETTLE_MS, sleep = pause } = {}) {
+// Claude Code asks before it applies some commands ("Switch model? … ❯ 1. Yes, switch to <id> / 2. No, go back"). The line
+// was sent on purpose, so the answer is known — but only for exactly this picture: no input field, the first option is
+// selected, says "Yes" and ends with the argument of the command just sent, and the next option is "No".
+const esc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+export function confirmsCommand(screenText, text) {
+  const m = /^\/[a-z-]+ (\S{2,})$/.exec(String(text));
+  if (!m) return false;
+  if (analyzeScreen(screenText, SCREEN_LINES_MAX).promptFound) return false;
+  const lines = String(screenText ?? "").replace(/\r/g, "").split("\n").slice(-SCREEN_LINES_MAX);
+  const yes = new RegExp(`^\\s*[❯›>]\\s*1\\.\\s+Yes,\\s(?:\\S+\\s){1,4}${esc(m[1])}\\s*$`);
+  for (let i = 0; i < lines.length - 1; i++) {
+    if (yes.test(lines[i]) && /^\s*2\.\s+No\b/.test(lines[i + 1])) return true;
+  }
+  return false;
+}
+
+// io: { read() → {ok, text?, error?}, type(text) → {ok, error?}, enter() → {ok, error?}, erase?(n) → {ok, error?} }.
+// → { ok, error?, flags? }. An io failure is returned as the io gave it.
+//
+// A field that is not empty may hold a human's draft or a pale hint of Claude Code (a suggested next message, "Try …"):
+// on a text screen they look the same. With io.erase the line is typed anyway and the screen tells them apart: a hint
+// vanishes at the first character (the field then holds exactly the line — go on), a draft stays — then exactly the typed
+// characters are erased and the tab is left alone (prompt-not-empty). Without io.erase a non-empty field is refused at once.
+// enterBy/clock — after this moment Enter is not pressed (the caller has already answered "not sent").
+export async function typeLine(io, text, { settleMs = SETTLE_MS, sleep = pause, enterBy = null, clock = Date.now, withFlags = false } = {}) {
+  const settle = async () => {
+    if (settleMs > 0) await sleep(settleMs);
+  };
+  const no = (error, a) => ({ ok: false, error, ...(withFlags && a ? flags(a) : {}) });
   let r = await io.read();
-  if (!r.ok) return { ok: false, error: r.error };
+  if (!r.ok) return r;
   let a = analyzeScreen(r.text);
-  if (!a.promptFound) return { ok: false, error: "prompt-not-found" };
-  if (a.busy) return { ok: false, error: "session-busy" };
-  if (!a.promptEmpty) return { ok: false, error: "prompt-not-empty" };
+  if (!a.promptFound) return no("prompt-not-found", a);
+  if (a.busy) return no("session-busy", a);
+  const before = a.promptEmpty ? "" : squash(a.promptText);
+  if (before && !io.erase) return no("prompt-not-empty", a);
   r = await io.type(text);
-  if (!r.ok) return { ok: false, error: r.error };
-  if (settleMs > 0) await sleep(settleMs);
+  if (!r.ok) return r;
+  await settle();
   r = await io.read();
-  if (!r.ok) return { ok: false, error: r.error };
-  a = analyzeScreen(r.text);
-  if (!a.promptFound || squash(a.promptText) !== squash(text)) return { ok: false, error: "prompt-mismatch" };
+  if (!r.ok) return r;
+  let b = analyzeScreen(r.text);
+  const want = squash(text);
+  if (!b.promptFound || squash(b.promptText) !== want) {
+    if (!before) return no("prompt-mismatch");
+    // a draft: our characters are in it, and nothing else changed — take them back; anything else — someone is typing, hands off
+    const now = b.promptFound ? squash(b.promptText) : "";
+    if (now.length !== before.length + want.length || !now.includes(want)) return no("prompt-mismatch");
+    r = await io.erase(text.length);
+    if (!r.ok) return r;
+    return no("prompt-not-empty", a);
+  }
+  if (typeof enterBy === "number" && clock() > enterBy) return no("deadline");
   r = await io.enter();
-  return r.ok ? { ok: true } : { ok: false, error: r.error };
+  if (!r.ok) return r;
+  // the line is in: a question about exactly this command gets its "Yes"; a failure here doesn't undo the sending
+  // no input field and no question yet — the screen is being redrawn: look once more
+  for (let i = 0; i < 2; i++) {
+    await settle();
+    r = await io.read();
+    if (!r.ok) break;
+    if (confirmsCommand(r.text, text)) {
+      await io.enter();
+      return { ok: true, confirmed: true };
+    }
+    if (analyzeScreen(r.text).promptFound) break;
+  }
+  return { ok: true };
 }

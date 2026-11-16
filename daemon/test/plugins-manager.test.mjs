@@ -500,6 +500,7 @@ const OFFICIAL_TEXT = `#!/bin/sh
 if [ "$1" = "--action" ]; then
   printf '%s\\n' "$@" > "$AGENTHUB_PLUGIN_DATA_PATH/argv.txt"
   if [ "$2" = "stop" ]; then echo ok; exit 0; fi
+  echo "fact=Holder: run r7"; echo "hint=Wait for it"; echo "session=3f0f76ea-b6e4-4e45-97f0-aed028912915"
   if [ "$AGENTHUB_LANG" = "en" ]; then echo "message=Another run holds the task"; else echo "message=Задачу держит другой прогон"; fi
   echo "reason=demo-refused"
   exit 3
@@ -553,6 +554,8 @@ test("official from the signed index: tier official, actions with an argument �
     assert.deepEqual([done.body.ok, done.body.result.code, done.body.result.reason], [false, 3, "demo-refused"]);
     // contract 2: the plugin writes the refusal explanation itself in the hub language (message=), the core passes it as is
     assert.equal(done.body.result.message, h.core.lang() === "en" ? "Another run holds the task" : "Задачу держит другой прогон");
+    // hub 0.1.6: the rows, the advice and the session of a refusal reach the shell as they are
+    assert.deepEqual([done.body.result.facts, done.body.result.hint, done.body.result.session], [["Holder: run r7"], "Wait for it", "3f0f76ea-b6e4-4e45-97f0-aed028912915"]);
     const argv = readFileSync(join(h.config.paths.pluginData, "off", "argv.txt"), "utf8").trim().split("\n");
     assert.deepEqual(argv, ["--action", "skip", "T-1;echo"], "the argument is a single argv element, no shell");
     // an action without an argument

@@ -880,6 +880,40 @@ public enum Explain {
         if let e = result?["error"]?.stringValue { return text(code: "facts:\(e)", status: 200, label: label) }
         return label
     }
+
+    /// The same failure for the shell's own window: the reason is the headline (the plugin's `message=`, else what the
+    /// shell knows itself), the rows are the action, the session's tab (`session=`, named as the human sees it) and the
+    /// plugin's `fact=` rows, `hint=` is the advice. The small print carries the code and the session id.
+    public static func report(result: JSONValue?, label: String, session: SessionInfo? = nil, canFocus: Bool = false, canRetry: Bool = false) -> Report {
+        let message = result?["message"]?.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let reason = result?["reason"]?.stringValue.flatMap { $0.isEmpty ? nil : $0 }
+        let exit = result?["code"]?.intValue
+        let sid = result?["session"]?.stringValue
+        var title: String
+        if let message, !message.isEmpty { title = message }
+        else if reason != nil { title = tr("Плагин отказал", "The plugin refused") }
+        else if result?["timedOut"]?.boolValue == true { title = tr("Команда не уложилась в 30 с и остановлена", "The command took over 30 s and was stopped") }
+        else if exit != nil { title = tr("Команда завершилась с ошибкой", "The command failed") }
+        else if let e = result?["error"]?.stringValue { title = text(code: "facts:\(e)", status: 200, label: label) }
+        else { title = tr("Не получилось", "It didn't work") }
+        // the core appends the action's argument to its title; when that argument is the session, its row says it better
+        var action = label
+        if let sid, action.lowercased().hasSuffix(" " + sid.lowercased()) { action = String(action.dropLast(sid.count + 1)) }
+        var rows = [Report.Row(label: tr("Действие", "Action"), value: action)]
+        if let session {
+            rows.append(Report.Row(label: tr("Вкладка", "Tab"), value: session.displayName, note: session.terminalInfo?.label ?? session.terminal))
+        }
+        if case .array(let facts)? = result?["facts"] {
+            for f in facts.prefix(3) {
+                guard let line = f.stringValue, let cut = line.range(of: ": ") else { continue }
+                rows.append(Report.Row(label: String(line[..<cut.lowerBound]), value: String(line[cut.upperBound...])))
+            }
+        }
+        let hint = result?["hint"]?.stringValue.flatMap { $0.isEmpty ? nil : $0 }
+        let code = [reason, reason == nil ? exit.map { tr("код выхода \($0)", "exit code \($0)") } : nil, sid].compactMap { $0 }.joined(separator: " · ")
+        return Report(title: title, rows: rows, hint: hint, code: code.isEmpty ? nil : code, canFocus: canFocus, canRetry: canRetry,
+                      plainTitle: tr("Не получилось: \(label)", "Couldn't: \(label)"), plainDetail: failure(result: result, label: label))
+    }
 }
 
 // MARK: - journal

@@ -28,7 +28,7 @@
 // and one function per declared capability:
 //   focus           focus(target, facts)                              → { ok, error? }
 //   read-screen     readScreen(target, facts, {sessionId, lines})     → { ok, error?, promptFound, promptEmpty, busy } — flags only;
-//   send-text       sendText(target, text, facts, {sessionId})        → { ok, error? } — only into an empty field with no turn running
+//   send-text       sendText(target, text, facts, {sessionId})        → { ok, error? } — only into a field without a draft, with no turn running
 //                                                                        (the adapter checks before typing and before Enter);
 //   send-esc        sendKey(target, "escape", facts, {sessionId})     → { ok, error? };
 //   launch          launch({cwd, name, sessionId, promptFile}, facts) → { ok, error?, workspaceId? }; registered?(sessionId, facts,

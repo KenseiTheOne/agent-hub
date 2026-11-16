@@ -770,7 +770,10 @@ if (i >= 0) {
 
 `reason=<code>` (last line, `[a-z0-9-]`, up to 48) goes to `result.reason`; `message=<text>` (one of the last 5 lines,
 contract 2) is shown to the human as `"<button>": <text>` — in the hub language, up to 120 characters, without the button
-name. Without `message=` the human only sees "the plugin refused (<code>)". After an action the hub runs the plugin
+name. Without `message=` the human only sees "the plugin refused (<code>)". Hub 0.1.6 shows a refusal in its own
+window with `message=` as the headline; three optional lines fill the rest — write them **before** `message=` (older
+hubs read only the last 5 lines): `hint=<what to do>`, `session=<session id>` (the window names that session's tab and
+offers "Show the tab") and up to three `fact=<label>: <value>` rows. After an action the hub runs the plugin
 again (a streamable plugin gets `{"type":"actionResult","id":…,"actionId":…,"primitive":null,"arg":…,"ok":…,"code":…}`
 instead — `arg` is the checked value from the offer, `null` without one and for an input action, which adds
 `inputLength`; a background action adds `job`), so the new state shows right away: the first frame after an action
@@ -1091,7 +1094,7 @@ human click — 30 s budget; typing may take up to ~20 s, so prefer an action or
 Rate limits: 60 requests and 12 sends per minute per plugin, 4 sends per minute per tab. Do not call anything with
 `AGENTHUB_PAUSED=1`.
 
-What to do with refusals: `prompt-not-empty` — the human has a draft (or Claude Code shows a placeholder): show "clear
+What to do with refusals: `prompt-not-empty` — the human has a draft (the hub typed, saw the draft and erased its own characters): show "clear
 the input field"; `prompt-mismatch` — **the line was typed but Enter was not pressed**: tell the human, never retry
 automatically; `session-busy`, `not-foreground`, `prompt-not-found` — try on the next frame; `unverified`,
 `pid-mismatch` — never type into that session; `unsupported` — the session's terminal cannot do it (iTerm2 and

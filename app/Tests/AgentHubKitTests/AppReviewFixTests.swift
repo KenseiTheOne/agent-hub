@@ -30,6 +30,55 @@ import Testing
         #expect(store.busyAction == nil)
     }
 
+    // MARK: the refusal window (hub 0.1.6)
+
+    @Test func refusalReportPutsTheReasonFirstAndNamesTheTab() {
+        let sid = "3f0f76ea-b6e4-4e45-97f0-aed028912915"
+        let result: JSONValue = .object([
+            "ok": .bool(false), "code": .number(3), "reason": .string("prompt-not-empty"), "message": .string("В строке ввода есть текст"),
+            "hint": .string("Сотрите текст и повторите"), "session": .string(sid),
+            "facts": .array([.string("Хотел набрать: /model claude-opus-5-5, /effort medium"), .string("без двоеточия"), .number(1)]),
+        ])
+        let s = SessionInfo(sessionId: sid, status: "idle", name: "релиз 0.1.5")
+        let r = Explain.report(result: result, label: "Привести вкладку к базе \(sid)", session: s, canFocus: true, canRetry: true)
+        #expect(r.title == "В строке ввода есть текст")
+        #expect(r.rows == [
+            Report.Row(label: "Действие", value: "Привести вкладку к базе"),
+            Report.Row(label: "Вкладка", value: "релиз 0.1.5"),
+            Report.Row(label: "Хотел набрать", value: "/model claude-opus-5-5, /effort medium"),
+        ], "the session id leaves the action's name; a fact without \"label: value\" is dropped")
+        #expect(r.hint == "Сотрите текст и повторите")
+        #expect(r.code == "prompt-not-empty · \(sid)")
+        #expect(r.canFocus && r.canRetry)
+        #expect(r.plainTitle == "Не получилось: Привести вкладку к базе \(sid)", "a presenter with two strings gets the old text")
+        // a refusal that names nothing: the shell's own words, the action row only
+        let bare = Explain.report(result: .object(["code": .number(2)]), label: "X")
+        #expect(bare.title == "Команда завершилась с ошибкой")
+        #expect(bare.rows == [Report.Row(label: "Действие", value: "X")])
+        #expect(bare.hint == nil && bare.code == "код выхода 2" && !bare.canFocus && !bare.canRetry)
+        #expect(Explain.report(result: .object(["reason": .string("zzz")]), label: "X").title == "Плагин отказал")
+        #expect(Explain.report(result: .object(["timedOut": .bool(true)]), label: "X").title.contains("30 с"))
+    }
+
+    @MainActor @Test func tryAgainInTheRefusalWindowRunsTheActionOnceMore() async throws {
+        let d = try FakeDaemon()
+        defer { d.shutdown() }
+        let refused = #"{"ok":false,"result":{"ok":false,"code":3,"reason":"busy","message":"Занято","hint":"Подождите","facts":["Очередь: 2"]}}"#
+        d.reply = { method, uri in method == "POST" && uri == "/actions/o9" ? (200, refused) : nil }
+        let store = HubStore(client: HubClient(socketPath: d.path))
+        let p = PromptPresenter()
+        p.choices = [.retry, .retry]
+        store.presenter = p
+        #expect(!(await store.perform(id: "o9", args: [:], label: "Запустить")))
+        #expect(d.requests.filter { $0.uri == "/actions/o9" }.count == 3, "the first run, two retries, then OK")
+        #expect(p.windows.count == 3)
+        #expect(p.windows.first?.title == "Занято")
+        #expect(p.windows.first?.rows.last == Report.Row(label: "Очередь", value: "2"))
+        #expect(p.windows.first?.hint == "Подождите")
+        #expect(p.windows.first?.canRetry == true && p.windows.first?.canFocus == false, "no known session — no tab button")
+        #expect(store.busyAction == nil)
+    }
+
     // MARK: D3 — length in code points
 
     @Test func inputLengthCountsCodePointsLikeTheCore() {

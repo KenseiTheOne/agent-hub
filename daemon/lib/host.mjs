@@ -283,6 +283,7 @@ class PluginInstance {
   // The last stdout line of the form `reason=<code>` is the machine-readable refusal reason (result.reason); a `message=<text>` line
   // among the last lines (contract 2) is an explanation for humans in the hub language (AGENTHUB_LANG): the shell
   // shows it as is (result.message); the core and the shell know nothing about plugin codes.
+  // hint= / session= / fact= lines (actionDetails below) give the shell's refusal window its rows, advice and tab button.
   // input (G1) — the text a human typed for an input action: stdin is that text plus "\n", then EOF; argv never carries it.
   // background (G6) — start a job and return at once: { ok, job: { pid, kill } }; onJobExit({code, signal, ok, reason?, message?,
   // durationMs, error?}) when it ends. A job has no timeout and its own process group; its pid counts as an action pid.
@@ -346,7 +347,7 @@ class PluginInstance {
     const out = String(r.stdout || "");
     const m = /(?:^|\n)reason=([a-z0-9][a-z0-9-]{0,47})\s*$/.exec(out);
     const message = actionMessage(out);
-    return { ok: r.code === 0 && !r.timedOut, code: r.code, timedOut: r.timedOut, durationMs: r.durationMs, error: r.error, ...(m ? { reason: m[1] } : {}), ...(message ? { message } : {}) };
+    return { ok: r.code === 0 && !r.timedOut, code: r.code, timedOut: r.timedOut, durationMs: r.durationMs, error: r.error, ...(m ? { reason: m[1] } : {}), ...(message ? { message } : {}), ...actionDetails(out) };
   }
   // Whether pid is one of this instance's processes (pluginByPid): an ongoing run, the streamable process (also one being
   // stopped by a restart), with actions — an ongoing action or job; with group — the group of any of them (task 63) while it
@@ -388,6 +389,32 @@ export function actionMessage(stdout) {
     return v || null;
   }
   return null;
+}
+
+// The structured parts of a refusal (hub 0.1.6, optional lines — no contract bump), for the shell's "Couldn't" window:
+//   hint=<text>            what the human can do about it, in the hub language (sanitized like message=)
+//   session=<session id>   the agent session the refusal is about: the shell names its tab and offers to switch to it
+//   fact=<label>: <value>  a row of the window (at most 3; label ≤ 40 characters, both sanitized)
+// They are looked for among the last 12 non-empty stdout lines; a plugin writes them BEFORE message= and reason=, so a hub
+// that knows only message= (it reads the last 5 lines) still finds it. → { hint?, session?, facts?: ["<label>: <value>"] }
+export function actionDetails(stdout) {
+  const lines = String(stdout || "").split("\n").map((l) => l.trim()).filter(Boolean).slice(-12);
+  const out = {};
+  const facts = [];
+  for (const l of lines) {
+    if (l.startsWith("hint=")) {
+      const v = cleanPhrase(l.slice(5).replace(/^"(.*)"$/s, "$1"));
+      if (v) out.hint = v;
+    } else if (l.startsWith("session=")) {
+      const v = l.slice(8).trim();
+      if (/^[0-9a-fA-F-]{36}$/.test(v)) out.session = v;
+    } else if (l.startsWith("fact=")) {
+      const m = /^([^:]{1,40}):\s*(\S.*)$/s.exec(cleanPhrase(l.slice(5)));
+      if (m && m[1].trim() && facts.length < 3) facts.push(`${m[1].trim()}: ${m[2]}`);
+    }
+  }
+  if (facts.length) out.facts = facts;
+  return out;
 }
 
 // A wall-clock timer. A single long setTimeout on macOS runs on mach_absolute_time, which stops while the system

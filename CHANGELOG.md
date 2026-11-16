@@ -4,6 +4,33 @@ Releases are git tags `vX.Y.Z` (also published as GitHub releases); the current 
 The plugin contract has its own version history in
 [`docs/extension-points.md`](docs/extension-points.md#contract-versions).
 
+## 0.1.6 — 2026-11-16
+
+### Shell
+
+- **"It didn't work" is the hub's own window, not a system alert.** The reason is the headline; below it — rows that
+  say what was asked and where, an advice line, and buttons: "Show the tab" (when the refusal names a session the hub
+  knows), "Try again" and "OK". The reason code and the session id moved to small print. Every refusal and connection
+  error of the shell uses the same window.
+- **A plugin can fill that window** with optional lines of a refused action: `hint=`, `session=` and up to three
+  `fact=<label>: <value>` rows (`result.hint`, `result.session`, `result.facts`). No contract bump: an older hub
+  ignores them. See "Plugin actions" in [`docs/extension-points.md`](docs/extension-points.md).
+- `--snapshot-report <png>` draws the window with sample content (diagnostic launch).
+
+### Terminal
+
+- **A faint suggestion in the input field no longer blocks typing.** Claude Code shows a suggested next message (or
+  `Try "…"`) in an empty field, and on a text screen it looks like a human draft, so the hub refused with
+  `prompt-not-empty`. Now the hub types the line and looks again: faint text vanishes at the first character and the
+  line goes in; a real draft stays — the hub erases exactly the characters it typed, leaves the draft as it was and
+  refuses as before. If the field changes in any other way (someone is typing), nothing is erased and Enter is not
+  pressed (`prompt-mismatch`).
+- **Claude Code's "Switch model?" question is answered.** After Enter the hub reads the screen once more; a question
+  about exactly the command it sent (the selected option is `1. Yes, … <the command's argument>`, the next is
+  `2. No…`) gets Enter. Any other question is left to the human.
+- The cmux bridge and the tmux adapter now run one shared implementation of the protocol (`typeLine`). **Restart the
+  bridge** to get the new behaviour in cmux tabs.
+
 ## 0.1.5 — 2026-11-16
 
 ### Terminal

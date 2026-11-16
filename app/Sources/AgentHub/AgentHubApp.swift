@@ -33,6 +33,7 @@ import SwiftUI
 ///                             (own window, no screen recording permission) and quit
 ///   --idle-expanded           the "Can I shut down" card in the popover starts expanded (snapshots)
 ///   --open-tile <plugin id>   the popover starts with that plugin's tile expanded (its detail card; snapshots)
+///   --snapshot-report <png>   draw the "It didn't work" window with sample content and quit (synthetic; nothing is run)
 ///   --snapshot-consent <png>  capture the consent window and quit (own window, no screen recording permission): from the
 ///                             first request for an own plugin (`POST /registry/own/approve` without a token installs
 ///                             nothing) or, with --consent-install <id>, from `POST /registry/install` (an update with
@@ -57,6 +58,7 @@ struct LaunchOptions {
     var openTile: String?
     var settingsFocus: String?
     var consentSnapshot: String?
+    var reportSnapshot: String?
     var consentInstall: String?
     var tooltip: String?
     var reopenPanel = false
@@ -83,6 +85,7 @@ struct LaunchOptions {
         }
         o.idleExpanded = a.contains("--idle-expanded")
         if let i = a.firstIndex(of: "--open-tile"), i + 1 < a.count { o.openTile = a[i + 1] }
+        if let i = a.firstIndex(of: "--snapshot-report"), i + 1 < a.count { o.reportSnapshot = (a[i + 1] as NSString).expandingTildeInPath }
         if let i = a.firstIndex(of: "--snapshot-consent"), i + 1 < a.count { o.consentSnapshot = (a[i + 1] as NSString).expandingTildeInPath }
         if let i = a.firstIndex(of: "--consent-install"), i + 1 < a.count { o.consentInstall = a[i + 1] }
         if let i = a.firstIndex(of: "--tooltip"), i + 1 < a.count { o.tooltip = a[i + 1] }
@@ -192,6 +195,7 @@ final class AppModel {
         if LaunchOptions.current.openPanel { Task { await reportPanelWindow() } }
         if LaunchOptions.current.showPopover { Task { await showPopoverWindow() } }
         if let path = LaunchOptions.current.consentSnapshot { Task { await snapshotConsent(to: path) } }
+        if let path = LaunchOptions.current.reportSnapshot { Task { await snapshotReport(to: path) } }
         if let path = LaunchOptions.current.menubarSnapshot { Task { MenuBarSnapshot.write(to: path); NSApp.terminate(nil) } }
         if LaunchOptions.current.printStatusItem { Task { await printStatusItem() } }
         if LaunchOptions.current.demoSessions { store.showDemoSessions(DemoSessions.all) }
@@ -409,6 +413,31 @@ final class AppModel {
         w.makeKeyAndOrderFront(nil)
         try? await Task.sleep(for: .milliseconds(600))
         w.setContentSize(host.fittingSize)
+        await snapshot(w, to: path, quit: true)
+    }
+
+    /// `--snapshot-report`: the refusal window with every part filled in — for looking at the layout without a real refusal.
+    private func snapshotReport(to path: String) async {
+        let sample = Report(
+            title: tr("В строке ввода есть текст", "There's text in the input line"),
+            detail: tr("Пример окна: ничего не запускалось.", "A sample window: nothing was run."),
+            rows: [
+                Report.Row(label: tr("Действие", "Action"), value: tr("Набрать команду во вкладке", "Type a command into the tab")),
+                Report.Row(label: tr("Вкладка", "Tab"), value: tr("релиз 0.1.6", "release 0.1.6"), note: tr("терминал, рабочее пространство 3", "terminal, workspace 3")),
+                Report.Row(label: tr("Хотел набрать", "Wanted to type"), value: "/model claude-opus-5-5, /effort medium"),
+            ],
+            hint: tr("Сотрите или отправьте текст во вкладке и нажмите «Повторить».", "Clear or send the text in the tab and press \"Try again\"."),
+            code: "prompt-not-empty · 3f0f76ea-b6e4-4e45-97f0-aed028912915", canFocus: true, canRetry: true)
+        let host = NSHostingView(rootView: ReportSheet(report: sample, pick: { _ in })
+            .frame(width: 460).environment(\.colorScheme, .dark)
+            .background(GlassBackground(tint: hexColor(0x282830, 0.84), radius: 26)))
+        let w = KeyPanel(contentRect: NSRect(origin: .zero, size: host.fittingSize), styleMask: [.borderless], backing: .buffered, defer: false)
+        w.isOpaque = false
+        w.backgroundColor = .clear
+        w.contentView = host
+        w.setContentSize(host.fittingSize)
+        w.center()
+        w.makeKeyAndOrderFront(nil)
         await snapshot(w, to: path, quit: true)
     }
 

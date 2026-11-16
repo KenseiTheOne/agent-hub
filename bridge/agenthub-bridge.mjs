@@ -9,8 +9,10 @@
 //   new-workspace  → cmux new-workspace --name N --cwd D --command '<bridge/launch.sh> <uuid> <N> <prompt file>'
 //   read-screen    → cmux read-screen --workspace W --surface S                (visible screen only, no history)
 //                    only Claude Code input field flags go to the daemon {promptFound, promptEmpty, busy} — not text
-//   send-text      → read-screen (input field empty, session idle) → cmux send --workspace W --surface S -- <line>
+//   send-text      → read-screen (input field found, session idle) → cmux send --workspace W --surface S -- <line>
 //                    → read-screen (the field holds exactly this line) → cmux send-key --workspace W --surface S enter
+//                    a human's draft was in the field → the typed characters are erased (cmux send -- <DEL × length>), no Enter
+//                    → read-screen: Claude Code asks about exactly this command ("1. Yes, … <argument>") → enter once more
 //                    Enter only before enterBy (deadline from the daemon): later the daemon has already told the plugin the line didn't go
 //                    the line — printable ASCII without "\" (cmux send treats \n, \r, \t as Enter and Tab), 1…200 chars
 // The target (tab, workspace) is always given explicitly: otherwise cmux would take $CMUX_SURFACE_ID — the bridge's own tab.
@@ -34,7 +36,7 @@ import { accessSync, constants, lstatSync, readFileSync, realpathSync, statSync 
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { analyzeScreen, SCREEN_LINES_DEFAULT, SCREEN_LINES_MAX } from "../daemon/lib/terminals/_screen.mjs";
+import { analyzeScreen, SCREEN_LINES_DEFAULT, SCREEN_LINES_MAX, typeLine } from "../daemon/lib/terminals/_screen.mjs";
 
 // The version is the VERSION file at the repository root (the hub's single source of truth, docs/hub-updates.md).
 export const VERSION = (() => {
@@ -135,6 +137,8 @@ export function buildArgv(op, { launchDir, launchSh = LAUNCH_SH, uid = process.g
         read,
         send: ["send", "--workspace", op.workspaceId, "--surface", op.surfaceId, "--", op.text],
         enter: ["send-key", "--workspace", op.workspaceId, "--surface", op.surfaceId, "enter"],
+        // take back exactly n typed characters (DEL is Backspace for the terminal); n comes from the line's own length
+        erase: (n) => ["send", "--workspace", op.workspaceId, "--surface", op.surfaceId, "--", "\x7f".repeat(Math.min(Math.max(0, n | 0), 200))],
       };
     }
     if (op.op === "surface.focus") {
@@ -184,7 +188,6 @@ function execCmux(cmux, argv) {
 // ---------- Claude Code input field on screen ----------
 // The screen analysis is shared with the daemon's terminal layer (tmux types with the same protocol): daemon/lib/terminals/_screen.mjs.
 export { analyzeScreen };
-const squash = (s) => String(s).replace(/[\s\u00a0]+/g, "");
 
 const flags = (a) => ({ promptFound: a.promptFound, promptEmpty: a.promptEmpty, busy: a.busy });
 const pause = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -201,27 +204,17 @@ export async function runOp(op, { cmux, launchDir, exec = execCmux, now = Date.n
     return { ok: true, code: 0, ...flags(analyzeScreen(r.stdout, op.lines ?? SCREEN_LINES_DEFAULT)) };
   }
   if (op.op === "send-text") {
-    // 1) the input field is found, empty, no turn running — otherwise the line would be appended to the human's draft
-    let r = await exec(cmux, b.read);
-    if (r.code !== 0) return fail(r);
-    let a = analyzeScreen(r.stdout);
-    if (!a.promptFound) return { ok: false, code: null, error: "prompt-not-found", ...flags(a) };
-    if (a.busy) return { ok: false, code: null, error: "session-busy", ...flags(a) };
-    if (!a.promptEmpty) return { ok: false, code: null, error: "prompt-not-empty", ...flags(a) };
-    // 2) type the line (without Enter)
-    r = await exec(cmux, b.send);
-    if (r.code !== 0) return fail(r);
-    // 3) the field holds exactly this line (nobody typed at the same time) — only then Enter
-    if (settleMs > 0) await sleep(settleMs);
-    r = await exec(cmux, b.read);
-    if (r.code !== 0) return fail(r);
-    a = analyzeScreen(r.stdout);
-    if (!a.promptFound || squash(a.promptText) !== squash(op.text)) return { ok: false, code: null, error: "prompt-mismatch" };
-    // the daemon waits for a reply until the deadline: after enterBy we don't press Enter — the line stays in the field, and the daemon already said "not sent"
-    if (typeof op.enterBy === "number" && clock() > op.enterBy) return { ok: false, code: null, error: "deadline" };
-    r = await exec(cmux, b.enter);
-    if (r.code !== 0) return fail(r);
-    return { ok: true, code: 0 };
+    // the protocol itself (draft or hint, the line check before Enter, Claude Code's question) is typeLine
+    const io = async (argv, text) => {
+      const r = await exec(cmux, argv);
+      return r.code === 0 ? { ok: true, ...(text ? { text: r.stdout } : {}) } : fail(r);
+    };
+    const r = await typeLine(
+      { read: () => io(b.read, true), type: () => io(b.send), enter: () => io(b.enter), erase: (n) => io(b.erase(n)) },
+      op.text,
+      { settleMs, sleep, enterBy: op.enterBy, clock, withFlags: true },
+    );
+    return r.ok ? { ok: true, code: 0, ...(r.confirmed ? { confirmed: true } : {}) } : { code: null, ...r };
   }
   let last = { code: 0, stdout: "" };
   for (const argv of b.argvs) {

@@ -123,6 +123,7 @@ function fakeTerminals() {
         if (!pane) return { code: 1, stdout: "" };
         const rest = a.slice(a.indexOf("-t") + 2);
         if (rest[0] === "-l") pane.prompt += rest.at(-1) + (pane.typeAlso || "");
+        else if (rest[0] === "BSpace") pane.prompt = pane.prompt.slice(0, -rest.length);
         else if (rest[0] === "Enter") {
           pane.submitted.push(pane.prompt);
           pane.prompt = "";
@@ -295,9 +296,10 @@ test("tmux: focus selects the pane by tty and raises the window of the client's 
   assert.deepEqual(pane.submitted, ["/model opus"]);
   const typed = term.calls.find((c) => c.includes("-l"));
   assert.deepEqual(typed.slice(-3), ["-l", "--", "/model opus"], "literal typing, the line after --");
-  // a draft in the field — refused before typing; someone typed meanwhile — no Enter
+  // a draft in the field — the typed characters are erased and the draft stays; someone typed meanwhile — no Enter
   pane.prompt = "draft";
   assert.deepEqual(await tmux.sendText(t, "/model x", f, { settleMs: 0 }), { ok: false, error: "prompt-not-empty" });
+  assert.equal(pane.prompt, "draft");
   pane.prompt = "";
   pane.busy = true;
   assert.deepEqual(await tmux.sendText(t, "/model x", f, { settleMs: 0 }), { ok: false, error: "session-busy" });

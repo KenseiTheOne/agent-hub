@@ -6,7 +6,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { CONTRACT_VERSION, parseMetaText } from "../lib/meta.mjs";
 import { lintPlugin, permissionGrowth, permissionList, permissionsFingerprint, permissionsFromMeta } from "../lib/registry/perms.mjs";
-import { actionMessage } from "../lib/host.mjs";
+import { actionDetails, actionMessage } from "../lib/host.mjs";
 import { contractTooNew } from "../lib/plugins.mjs";
 import { cleanup, req, startHub, tempHome, waitFor, writePlugin } from "./helpers.mjs";
 
@@ -86,6 +86,19 @@ test("permissions: a connection is a connections-kind permission; a new one — 
   // a new tool in the allowlist — growth
   const more = permissionsFromMeta(parseMetaText(`${BASE}# <agenthub.connection url="https://mcp.example.com/mcp" scope="read" tools="get_user,filter_tasks,create_task">тикеты</agenthub.connection>`).meta);
   assert.equal(permissionGrowth(after, more).length, 1);
+});
+
+test("refusal details: hint=, session= and up to three fact= rows before message=; junk is dropped; message= stays within the last 5 lines", () => {
+  const id = "3f0f76ea-b6e4-4e45-97f0-aed028912915";
+  const out = `работаю\nfact=Хотел набрать: /model claude-opus-5-5, /effort medium\nfact=Очередь: 2\nhint="Сотрите текст и повторите"\nsession=${id}\nmessage=В строке ввода есть текст\nreason=prompt-not-empty\n`;
+  assert.deepEqual(actionDetails(out), { hint: "Сотрите текст и повторите", session: id, facts: ["Хотел набрать: /model claude-opus-5-5, /effort medium", "Очередь: 2"] });
+  assert.equal(actionMessage(out), "В строке ввода есть текст", "a hub that reads only the last 5 lines still finds message=");
+  assert.deepEqual(actionDetails("reason=x\n"), {});
+  assert.deepEqual(actionDetails("session=not-a-session\nfact=без двоеточия\nfact=: пусто\nhint=\u0007\nreason=x"), {});
+  assert.deepEqual(actionDetails("fact=a: 1\nfact=b: 2\nfact=c: 3\nfact=d: 4\nreason=x").facts, ["a: 1", "b: 2", "c: 3"]);
+  assert.equal(actionDetails(`hint=${"я".repeat(500)}`).hint.length, 120);
+  assert.equal(actionDetails("fact=Метка:\u202E подмена").facts[0], "Метка: подмена", "bidi characters are stripped");
+  assert.deepEqual(actionDetails(`hint=рано\n${"строка\n".repeat(12)}`), {}, "only among the last 12 lines");
 });
 
 test("action refusal text: message= among the last lines, sanitized; without it — nothing", () => {

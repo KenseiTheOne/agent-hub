@@ -347,7 +347,7 @@ export function installed({ exists }) {}     // optional: on this Mac (Settings 
 export function findTab({ surfaceId, workspaceId }, facts) {} // optional: a tab by its id (terminal.focus)
 export async function focus(target, facts) {}                       // focus
 export async function readScreen(target, facts, { lines }) {}       // read-screen → {ok, promptFound, promptEmpty, busy}
-export async function sendText(target, text, facts) {}              // send-text: only into an empty field, no turn running
+export async function sendText(target, text, facts) {}              // send-text: only into a field without a draft, no turn running
 export async function sendKey(target, "escape", facts) {}           // send-esc
 export async function launch({ cwd, name, sessionId, promptFile }, facts) {} // launch: runs bridge/launch.sh in a new tab
 export function registered(sessionId, facts, { workspaceId }) {}   // optional: the launched session appeared (default: the registry)
@@ -505,6 +505,8 @@ no names, no icons, no notification kinds, no error texts. Everything plugin-spe
   removes the sign-in.
 - `<agenthub.push … kind="plugin" was="runs|night">` — the plugin's own notification toggle (below, "`event=` keys").
 - `message=<text>` in action output — an explanation of a refusal (below, "Plugin actions").
+- `hint=<text>`, `session=<session id>`, `fact=<label>: <value>` in action output (hub 0.1.6) — the advice, the tab and
+  the rows of the refusal window (below, "Plugin actions").
 
 **Contract 3 (2026-11-10): sessions, pause, terminal, loud permissions.** Declare
 `<agenthub.contract>3</agenthub.contract>` if the plugin does not work without these (an older hub will say "requires a
@@ -621,8 +623,10 @@ newer hub"); a plugin that can live without them may declare 2 and check the var
   The order of `send-text` checks: the plugin process and permission; request rate; pause (423); the line and its
   permission; the session is in the registry, the Claude Code signature verified now, the same pid and start time; the
   terminal knows the tab and it is recorded for the same pid and start time; the session is free; the process is in the
-  foreground; typing rate; then the bridge: field found, empty, no turn running → typing → the field holds exactly this
-  line → Enter (not after the deadline: the daemon waits for the answer ~20 s, and after the deadline Enter is not
+  foreground; typing rate; then the terminal: field found, no turn running → typing → the field holds exactly this
+  line (a human draft in it — the typed characters are erased, `prompt-not-empty`) → Enter → Claude Code's own
+  question about exactly this command ("Switch model?": `1. Yes, … <argument>` / `2. No…`) gets its "Yes" (Enter
+  not after the deadline: the daemon waits for the answer ~20 s, and after the deadline Enter is not
   pressed — `504 terminal:deadline`). Rates are in `services.terminal` (`requestsPerMin` 60 per plugin, `sendPerMin` 12
   per plugin, `sendPerTabPerMin` 4 per tab; every attempt that reaches the terminal counts).
 
@@ -636,9 +640,10 @@ newer hub"); a plugin that can live without them may declare 2 and check the var
   terminal:bridge-outdated`; `502 terminal:cmux-failed | tmux-failed`, `504 terminal:bridge-timeout |
   bridge-pickup-timeout | cmux-timeout | tmux-timeout | deadline` — a bridge or terminal failure; `503 terminal:disabled`
   — the service is off. What the plugin should do:
-  - `prompt-not-empty` — the field holds a human draft **or** faint text: the placeholder of a fresh session
-    (`Try "…"`) and Claude Code's next-prompt suggestion are indistinguishable from typed text on a text screen (cmux
-    returns the screen without colors). The hub does not type into such a field; show "clear the input field" or wait.
+  - `prompt-not-empty` — the field holds a human draft. Faint text (the placeholder of a fresh session `Try "…"`,
+    Claude Code's next-prompt suggestion) looks the same on a text screen, so the hub tells them apart by typing: faint
+    text vanishes at the first character, a draft stays — then the hub erases exactly what it typed and refuses. The
+    draft is left as it was; show "clear the input field" or wait. (Hubs before 0.1.6 refused faint text too.)
   - `prompt-mismatch` — the line was typed, but before Enter the field did not hold exactly it (a human was typing at
     the same time). **Enter was not pressed, but the typed text stays in the field**, and the human's next Enter will send
     the mix. Do not retry automatically: show the human that a line was left in the field.
@@ -770,6 +775,24 @@ to `result.reason`). **The plugin writes the refusal explanation itself** (contr
 last 5 stdout lines (usually before `reason=`) — in the hub language (`AGENTHUB_LANG`), cleaned like `activity=` phrases
 (up to 120 graphemes); it goes to `result.message`, and the shell shows it as is: ""button": text". Without `message=`
 the shell writes "the plugin refused (<code>)" — the hub has no texts of its own for specific plugins' codes.
+**Refusal details** (hub 0.1.6, optional lines, no contract bump — an older hub ignores them). The shell shows a refusal
+in its own window: the reason (`message=`) as the headline, then rows, an advice line and buttons. A plugin fills it
+with lines among the last 12 non-empty stdout lines, written **before** `message=` and `reason=` (a hub older than 0.1.6
+looks for `message=` in the last 5 lines only):
+
+- `hint=<text>` — what the human can do about it, in the hub language; cleaned like `message=` (up to 120 graphemes);
+  goes to `result.hint`.
+- `session=<session id>` — the agent session the refusal is about (36 characters of hex and dashes); goes to
+  `result.session`. When the hub knows this session, the window names its tab the way the human sees it, drops the id
+  from the action's name and offers "Show the tab" (the `session.focus` primitive, under its usual gates).
+- `fact=<label>: <value>` — a row of the window, at most 3 (the rest are dropped); the label is up to 40 characters
+  without a colon, both parts are cleaned like `message=`; they go to `result.facts` as `"<label>: <value>"` strings —
+  the only list an action result carries.
+
+The window always has the "Action" row (the offer's label) and, for a foreground action started by a button, "Try
+again": the action runs once more from the start, the confirmation included. The reason code, the exit code and the
+session id are kept in small print for a bug report. Without these lines the window has the headline and the "Action"
+row.
 
 **Plugin environment:** `HOME`, `PATH` (as for agents under launchd:
 `~/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin`), `TMPDIR`, `LANG`, `USER`,

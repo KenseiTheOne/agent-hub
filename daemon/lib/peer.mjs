@@ -108,6 +108,7 @@ export const APP_DIAGNOSTIC_ARGS = new Set([
   "--show-popover",
   "--snapshot-popover",
   "--snapshot-consent",
+  "--snapshot-report",
   "--self-test-popover",
   "--self-test-status-menu",
 ]);

@@ -18,8 +18,9 @@
 //      would go to the shell); the session is free — per the registry (Claude Code's own status: idle; no status — per the terminal),
 //      whether a turn is running or not, the bridge looks at the screen once more; send rate — per plugin (sendPerMin) and per tab
 //      (sendPerTabPerMin);
-//   6. before typing, the bridge looks at the screen once more: the input field is found, empty, no turn running; before Enter the field holds exactly
-//      this line (otherwise it doesn't press Enter: prompt-mismatch).
+//   6. before typing, the bridge looks at the screen once more: the input field is found, no turn running; before Enter the field holds exactly
+//      this line (a draft was there — the typed characters are erased: prompt-not-empty; otherwise prompt-mismatch, no Enter);
+//      after Enter, Claude Code's question about exactly this command gets its "Yes" (lib/terminals/_screen.mjs).
 // Journal: every send is terminal-send {plugin, sessionId, surfaceId, workspaceId, terminal, tab, len, sha, head, ok,
 // error} (surfaceId and workspaceId — cmux only, tab — the adapter's tab key): head is the declared slash command at the start of the line (shown in the consent sheet), sha is the first 12 chars of the line's sha256,
 // only together with head (a line sent under "*" isn't hashed: a short one could be brute-forced), otherwise both null. The line

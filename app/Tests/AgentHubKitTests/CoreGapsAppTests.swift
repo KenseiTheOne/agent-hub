@@ -15,6 +15,14 @@ final class PromptPresenter: ConfirmPresenter {
     var reports: [(title: String, detail: String)] = []
     func confirm(_ request: ConfirmRequest, actionLabel: String) async -> Bool { confirms.append(request); return true }
     func report(title: String, detail: String) { reports.append((title, detail)) }
+    /// The refusal windows as the shell would draw them, and the buttons to press in them (none left — "OK").
+    var windows: [Report] = []
+    var choices: [ReportChoice] = []
+    func report(_ report: Report) -> ReportChoice {
+        windows.append(report)
+        reports.append((report.plainTitle, report.plainDetail))
+        return choices.isEmpty ? .ok : choices.removeFirst()
+    }
     func consent(_ request: ConsentRequest) async -> Bool { false }
     func prompt(_ request: InputPrompt) async -> String? {
         prompts.append(request)

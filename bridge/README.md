@@ -57,11 +57,15 @@ daemon sent. Stop it and start the printed one.
   within `pickupMs` (5 s), so Esc cannot be pressed later during someone else's turn.
 - `read-screen` / `send-text`: the Claude Code input field is a line with `>` or `❯` right under a `─` rule, plus the
   lines up to the next rule (the older `│ … │` frame too); a turn is running when "esc to interrupt" is outside the
-  field. `send-text` refusals: `prompt-not-found`, `prompt-not-empty` (a human draft is never touched), `session-busy`,
-  `prompt-mismatch` (after typing, the field does not hold exactly that line — someone was typing at the same time;
-  Enter is not pressed, the typed text stays in the field). The faint placeholder of an empty field ("Try "…"") cannot
-  be told apart from typed text on a text screen: in that case the field counts as non-empty — a refusal rather than
-  typing. The line is printable ASCII without `\` (cmux `send` treats `\n`, `\r`, `\t` as Enter and Tab), without
+  field. `send-text` refusals: `prompt-not-found`, `prompt-not-empty` (a human draft: the typed characters are erased, the draft
+  stays as it was, Enter is not pressed), `session-busy`, `prompt-mismatch` (after typing, the field does not hold
+  exactly that line and it is not "the draft plus our line" — someone was typing at the same time; Enter is not
+  pressed, the typed text stays in the field). The faint text of an empty field (the `Try "…"` placeholder, Claude
+  Code's suggested next message) cannot be told apart from typed text on a text screen, so a non-empty field is tested
+  by typing: faint text vanishes at the first character and the field then holds exactly the line; a draft does not.
+  After Enter the screen is read once more: when Claude Code asks about exactly this command (no input field, the
+  selected option is `1. Yes, … <the command's argument>`, the next one is `2. No…` — "Switch model?"), Enter is
+  pressed once more and the answer carries `confirmed: true`. Any other question is left to the human. The line is printable ASCII without `\` (cmux `send` treats `\n`, `\r`, `\t` as Enter and Tab), without
   leading or trailing spaces, 1…200 characters; Enter is pressed only as a key after the check (`send-key` still allows
   only `escape`). Neither the screen text nor the line ends up in the result, in the bridge's stderr or in the daemon
   journal (`bridge-op` is metadata only).

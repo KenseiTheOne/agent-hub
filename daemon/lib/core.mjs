@@ -2188,6 +2188,11 @@ export class Core {
     }
     const safe = {};
     for (const [k, v] of Object.entries(result || {})) if (v === null || ["string", "number", "boolean"].includes(typeof v)) safe[k] = typeof v === "string" ? v.slice(0, 200) : v;
+    // the rows of a refusal (fact= lines of a plugin action, host.mjs actionDetails): the only list a result carries
+    if (target.kind === "action" && Array.isArray(result?.facts)) {
+      const facts = result.facts.filter((f) => typeof f === "string" && f).slice(0, 3).map((f) => f.slice(0, 200));
+      if (facts.length) safe.facts = facts;
+    }
     this.journal.write({
       type: "action",
       action: id,

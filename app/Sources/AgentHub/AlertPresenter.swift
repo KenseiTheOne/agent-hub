@@ -101,13 +101,95 @@ final class AlertPresenter: ConfirmPresenter {
     }
 
     func report(title: String, detail: String) {
-        NSApp.activate(ignoringOtherApps: true)
-        let alert = NSAlert()
-        alert.alertStyle = .warning
-        alert.messageText = title
-        alert.informativeText = detail
-        alert.addButton(withTitle: tr("Понятно", "OK"))
-        alert.runModal()
+        _ = report(Report(title: title, detail: detail))
+    }
+
+    /// The hub's own window instead of a system alert: the reason first, then what and where, the advice and the buttons.
+    func report(_ report: Report) -> ReportChoice {
+        let box = ReportChoiceBox()
+        _ = ModalWindow.run(width: 460) { done in
+            ReportSheet(report: report) { choice in
+                box.choice = choice
+                done(true)
+            }
+        }
+        return box.choice
+    }
+}
+
+@MainActor
+final class ReportChoiceBox {
+    var choice = ReportChoice.ok
+}
+
+/// "It didn't work": a badge and the reason as the headline, rows (action, tab, the plugin's facts), the advice, then the
+/// small-print code on the left and the buttons on the right. Esc and Return close it as "OK".
+struct ReportSheet: View {
+    let report: Report
+    let pick: (ReportChoice) -> Void
+    private let orange = hexColor(0xFF9F0A)
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack(alignment: .top, spacing: 12) {
+                Image(systemName: "exclamationmark").font(.system(size: 16, weight: .bold)).foregroundStyle(orange)
+                    .frame(width: 34, height: 34)
+                    .background(RoundedRectangle(cornerRadius: 10).fill(orange.opacity(0.16)))
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(report.title).font(.system(size: 16, weight: .bold)).fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
+                    if !report.detail.isEmpty {
+                        Text(report.detail).font(.system(size: 12.5)).foregroundStyle(.white.opacity(0.72))
+                            .fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
+                    }
+                }
+                .frame(minHeight: 34, alignment: .center)
+                Spacer(minLength: 0)
+            }
+            if !report.rows.isEmpty {
+                VStack(spacing: 0) {
+                    ForEach(Array(report.rows.enumerated()), id: \.offset) { i, row in
+                        if i > 0 { Rectangle().fill(.white.opacity(0.09)).frame(height: 0.5) }
+                        HStack(alignment: .firstTextBaseline, spacing: 10) {
+                            Text(row.label).foregroundStyle(.white.opacity(0.45))
+                                .frame(width: 104, alignment: .leading).fixedSize(horizontal: false, vertical: true)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(row.value).fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
+                                if let note = row.note, !note.isEmpty {
+                                    Text(note).font(.system(size: 11.5)).foregroundStyle(.white.opacity(0.55)).fixedSize(horizontal: false, vertical: true)
+                                }
+                            }
+                            Spacer(minLength: 0)
+                        }
+                        .font(.system(size: 12.5))
+                        .padding(.horizontal, 14).padding(.vertical, 9)
+                    }
+                }
+                .background(RoundedRectangle(cornerRadius: 14).fill(.white.opacity(0.06)))
+            }
+            if let hint = report.hint {
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Image(systemName: "arrow.right").font(.system(size: 11, weight: .bold)).foregroundStyle(hexColor(0x4C9DFF))
+                    Text(hint).font(.system(size: 12.5)).fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            HStack(spacing: 8) {
+                if let code = report.code {
+                    Text(code).font(.system(size: 10.5, design: .monospaced)).foregroundStyle(.white.opacity(0.38))
+                        .lineLimit(1).truncationMode(.middle).textSelection(.enabled).help(code)
+                }
+                Spacer(minLength: 8)
+                if report.canFocus {
+                    Button(tr("Показать вкладку", "Show the tab")) { pick(.focus) }.buttonStyle(CapsuleStyle(height: 32, expand: false))
+                }
+                if report.canRetry {
+                    Button(tr("Повторить", "Try again")) { pick(.retry) }.buttonStyle(CapsuleStyle(height: 32, expand: false))
+                }
+                Button(tr("Понятно", "OK")) { pick(.ok) }
+                    .buttonStyle(CapsuleStyle(fill: hexColor(0x0A84FF), stroke: .clear, height: 32, expand: false))
+                    .keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(22)
     }
 }
 
