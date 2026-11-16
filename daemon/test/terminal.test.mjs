@@ -268,6 +268,12 @@ test("bridge: input field signs from the screen, without text; a placeholder and
   // an old-style frame and a wrapped long line
   const boxed = ["╭" + "─".repeat(30) + "╮", "│ > /model op │", "│   us        │", "╰" + "─".repeat(30) + "╯"].join("\n");
   assert.deepEqual([analyzeScreen(boxed).promptFound, analyzeScreen(boxed).promptText], [true, "/model op us"]);
+  // the session name printed inside the line above the field (the line below stays plain)
+  const named = ["⏺ done", "─".repeat(40) + " my-session ──", "❯\u00a0", "─".repeat(54), "  status line"].join("\n");
+  assert.deepEqual([analyzeScreen(named).promptFound, analyzeScreen(named).promptEmpty], [true, true]);
+  const labelBelow = ["─".repeat(54), "❯ ", "─".repeat(40) + " my-session ──"].join("\n");
+  assert.equal(analyzeScreen(labelBelow).promptFound, false);
+  assert.equal(analyzeScreen(["──────── a heading in the conversation", "❯ quoted", "─".repeat(54)].join("\n")).promptFound, false);
   // no field (a permission dialog, a plain shell): promptFound false
   assert.equal(analyzeScreen("$ ls\nfoo\n$ ").promptFound, false);
   assert.equal(analyzeScreen(["│ Do you want to proceed?", "│ ❯ 1. Yes", "│   2. No"].join("\n")).promptFound, false);

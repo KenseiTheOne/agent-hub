@@ -4,7 +4,14 @@ Releases are git tags `vX.Y.Z` (also published as GitHub releases); the current 
 The plugin contract has its own version history in
 [`docs/extension-points.md`](docs/extension-points.md#contract-versions).
 
-## Unreleased
+## 0.1.5 — 2026-11-16
+
+### Terminal
+
+- **Typing into a named session works again.** Claude Code prints the session name inside the line above the input
+  field (`──── name ──`); the hub took such a screen for "no input field" and refused every line with
+  `prompt-not-found`, so a plugin's queued commands waited forever. The line above the field may now carry a short
+  label; the line below it must still be plain. Needs a restart of the cmux bridge after the update.
 
 ### Plugin contract (additive, contract 3)
 

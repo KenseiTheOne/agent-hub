@@ -15,10 +15,12 @@ const SETTLE_MS = 250;
 const squash = (s) => String(s).replace(/[\s\u00a0]+/g, "");
 const pause = (ms) => new Promise((r) => setTimeout(r, ms));
 
-// The input field is a line starting with ">" or "❯" (with a frame "│ > …") right under a horizontal line (─), plus continuation
+// The input field is a line starting with ">" or "❯" (with a frame "│ > …") right under a horizontal line (─, possibly with a label in it), plus continuation
 // lines up to the next such line. A turn is running — "esc to interrupt" is on screen outside the field. The empty field placeholder
 // (pale "Try "…"") can't be told apart from typed text on a text screen — then the field counts as non-empty: refuse, don't type.
 const RULE_RE = /^\s*[╭╰┌└]?[─━]{8,}[╮╯┐┘]?\s*$/;
+// The line above the field may carry a short label inside it (Claude Code prints the session name there: "──── name ──").
+const TOP_RULE_RE = /^\s*[╭┌]?[─━]{8,}(?:[ \u00a0][^─━]{1,80}[ \u00a0][─━]+)?[╮┐]?\s*$/;
 const PROMPT_RE = /^\s*[│┃]?\s*[>❯›](?:[ \u00a0]|$)/;
 const BUSY_RE = /\besc to interrupt\b/i;
 
@@ -32,7 +34,7 @@ export function analyzeScreen(text, maxLines = SCREEN_LINES_DEFAULT) {
   while (all.length && !all[all.length - 1].trim()) all.pop();
   const lines = all.slice(-Math.min(Math.max(1, maxLines | 0), SCREEN_LINES_MAX));
   for (let i = lines.length - 1; i > 0; i--) {
-    if (!PROMPT_RE.test(lines[i]) || !RULE_RE.test(lines[i - 1])) continue;
+    if (!PROMPT_RE.test(lines[i]) || !TOP_RULE_RE.test(lines[i - 1])) continue;
     let end = i + 1;
     while (end < lines.length && !RULE_RE.test(lines[end])) end++;
     if (end >= lines.length) continue; // no bottom line — not an input field
