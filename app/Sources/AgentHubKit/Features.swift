@@ -900,8 +900,4 @@ public struct PushNotify: Decodable, Sendable, Hashable {
     enum CodingKeys: String, CodingKey { case notifyId, title, subtitle, body, plugin, key, digest, actions, href }
 }
 
-func parseISODate(_ s: String) -> Date? {
-    let f = ISO8601DateFormatter()
-    f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-    return f.date(from: s) ?? ISO8601DateFormatter().date(from: s)
-}
+func parseISODate(_ s: String) -> Date? { ISODate.parse(s) }

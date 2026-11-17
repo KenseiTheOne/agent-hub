@@ -4,6 +4,148 @@ Releases are git tags `vX.Y.Z` (also published as GitHub releases); the current 
 The plugin contract has its own version history in
 [`docs/extension-points.md`](docs/extension-points.md#contract-versions).
 
+## 0.1.7 — 2026-11-17
+
+### Security
+
+- **A registry's signing key no longer changes silently.** The key a catalog is verified with sits in `config.json`,
+  which any process of the same user can write. The hub now remembers the key that was in force when a registry was
+  first used (`Registry/registry-keys.json`) and keeps verifying with it. A different key in `config.json` is reported
+  (`/state.registryKeys`, the `plugins.registry-keys` event, the audit journal), a catalog signed with it is refused
+  (`registry:key-changed`), and it takes over only after a human accepts it: `POST /registry/key/accept` from the app
+  (a window with both fingerprints, a single-use token) or `agenthub plugins trust-key [<registry>]` in a terminal.
+  See "The registry key is remembered" in [`docs/plugins-registry.md`](docs/plugins-registry.md).
+- **A stale catalog cannot be replayed.** The index may carry a signed `expiresAt`; nothing is installed or updated
+  from a catalog past it (`registry:expired`), while its tiers and blocklist keep working. An index without the field
+  is read as before and journaled once (`registry-no-expiry`). A signed pair on disk that is older than the last
+  catalog the hub accepted is no longer loaded (`registry-cache-rejected`, `registry:rollback`) — until now only a
+  fetch checked that.
+- **The cmux bridge is recognised by more than a path string.** A process is the bridge only when the interpreter runs
+  the script directly (no `--require` / `--import` / `--inspect` before it), the script's real path — not a symlink
+  with the right name — is the listed one, and the file sits inside the hub's own tree where nobody but the user (or
+  root) can write to it or to the directories above it. Otherwise the process is an ordinary CLI and is told why:
+  `403 peer:bridge-launch` or `peer:bridge-file`, with a `detail` in the journal and in `GET /peer`. A script has no
+  code signature, so this narrows the class rather than proves it — "The bridge class" in
+  [`docs/api.md`](docs/api.md) says what remains.
+- **A plugin's line is not typed into a tab the hub cannot tie to the session.** When the start time of the session
+  process or of the terminal's record of the tab is unknown, `send-text` used to go ahead; now it refuses with
+  `409 terminal:binding-unknown` (`part: "process" | "tab"`), and `read-screen` reports `bound: false`.
+- The consent rule for reinstalling an own plugin from its folder (a changed folder installs by itself only when the
+  set of permission keys is exactly the same) is unchanged and now covered by its own tests.
+
+### Daemon
+
+- **The official plugin registry is built in.** A hub whose `config.json` names no registry uses the official catalog
+  and its signing key, so a fresh install has a catalog without editing files. An `indexUrl` or `publicKey` of your
+  own (or `"defaultRegistry": false`) switches it off. The key is remembered on first use like any other.
+- **One daemon per state directory.** A second `agenthubd` on a directory that already has a live daemon exits with
+  code 1 and one line, and touches nothing (`<home>/daemon.lock`). Before, it could kill the live daemon's background
+  jobs as "orphans" and rewrite its files. A lock left by a killed daemon is taken over by the next start.
+- **A damaged state file is kept, reported, and no longer stops the hub.** A `config.json`, `settings.json`,
+  `jobs.json`, `streams.json` or `app-pin.json` that cannot be read is copied to `<file>.bad`, journaled
+  (`state-file-damaged`) and listed in `/state.damagedFiles`. With a broken `config.json` the daemon used to exit and
+  be restarted by launchd every 10 seconds; now it starts on the defaults with the risky parts closed (no pinned app,
+  no extensions, no typing into terminals) until the file is fixed.
+- **State files are written atomically, and `config.json` under a lock.** The daemon, the CLI and the hub updater no
+  longer lose each other's changes to `config.json`.
+- **Streamable plugin processes do not outlive a crashed daemon.** The live ones are recorded in `<home>/streams.json`;
+  the next daemon stops provable leftovers before it starts plugins, so a plugin never runs twice
+  (`stream-orphan-killed`, `stream-orphan-skipped`).
+- **A streamable plugin cannot flood the daemon with frames.** At most `plugins.maxFramesPerSec` (10) frames a second
+  per plugin are applied, with a second's burst; above that the frames in between are dropped and the latest one is
+  always applied (`plugin-throttled` in the journal). `0` turns the limit off.
+- **A watched file's change is no longer missed.** `fs.watch` loses events — the one for a write made right after the
+  watch is armed, and now and then others under load; a slow poll of the watched files' time and size — twice right after arming,
+  then every 5 seconds — catches what was lost.
+- **`/state.limits.actionTimeoutMs`** — the effective time limit of one plugin action (`plugins.actionTimeoutMs`), so
+  a client can show it instead of guessing.
+- **`/state.hook`** — `{installed, lastEventAt, reason?, installCommand}`: whether a verified Claude Code hook event
+  has ever reached this hub and when the last one did (kept across restarts in `<home>/hook-seen.json`). The hub still
+  reads nothing of Claude Code's settings: no event yet is `installed: false` with `reason: "no-events"`.
+  `installCommand` is the command that installs the hook for good (the one in `claude-plugin/README.md`), so a client
+  shows the hub's text instead of its own copy.
+- **`/state.registryKeys[]` entries carry `registryLabel`** — the same display name as the `428` window of
+  `POST /registry/key/accept` (`null` while the default registry is the only one).
+- **A diagnostic shell run can see the registry key window.** `POST /registry/key/accept` from a diagnostic peer
+  (`--snapshot-consent`) used to be `403 peer:diagnostic`; now it answers with the same `428` window as for the app,
+  with a token that is not recorded and that nothing accepts, and leaves the human's open window alone. A diagnostic
+  request that carries a `consentToken` is still `403 peer:diagnostic` — as for `/registry/install` and
+  `/registry/own/approve`.
+- **Services put their own sections into `/state`** (`ctx.provideState(section, fn)`): update checks, own plugins,
+  registry keys, the hub update, the idle verdict, connections and the bridge are no longer assembled inside the core.
+  The existing keys, their order and their values are unchanged; a service or an approved extension may add a section
+  of its own, which comes after `hook`.
+- **Fewer pauses of the daemon.** The system language is re-read every minute without stopping the event loop
+  (`defaults` used to run synchronously, up to 2 s); so are `ps` for the terminal routes and the built-in terminal
+  adapters, `xattr` for `open.file`, and the process table read before a timed-out build is killed. For hub
+  extensions the `Promise` forms are new — `ctx.peer.procStateAsync(pid)` and the adapter fact `processTtyAsync(pid)`;
+  the synchronous `ctx.peer.procState` and `processTty` stay.
+- **Quieter terminal journal.** `terminal-send` is no longer duplicated into the audit journal (routine sends pushed
+  rare records out of its single 1 MB file), and a refusal repeated over and over is written once and then as one line
+  with `repeats: N` per `services.terminal.deniedWindowMs` (a minute). A `terminal-denied` line for
+  `terminal:binding-unknown` carries the reply's `part` (`"process"` | `"tab"`), in the counted line too, so a client
+  that reads the journal can say which half of the binding was not confirmed.
+- **`Core` and `PluginManager` are split into modules by area** — `daemon/lib/core/` (tiers, action rules, settings,
+  bus, sessions, plugin policy and environment, `/state`, plugin state, frames, jobs, invoking actions) and
+  `daemon/lib/plugins/` (registry sources, accepted keys, catalog, blocklist, trust, consent, install, own plugins and
+  their watch, lists for the shell, plus the index format and shared helpers). The methods moved as they were and are
+  put back onto the two classes (`daemon/lib/parts.mjs`); `core.mjs` and `plugins.mjs` export the same names as before.
+  No behaviour change.
+
+### Hook
+
+- **No card for a session that has ended.** A `PermissionRequest` that arrives after `SessionEnd` from the same Claude
+  process no longer registers the session again ("lazy registration"); it is skipped (`hook-skip`, reason
+  `session-ended`) and Claude Code asks in its own window. A new `SessionStart` lifts it.
+
+### Shell
+
+- **The hub's windows no longer freeze the app.** Confirmations, refusals, permission and text windows are not modal
+  any more: the menu bar icon, "Needs you" and the answer cards keep updating while a window is open. One window is
+  shown at a time and the next waits in line; a confirmation counts its validity down live and closes by itself when
+  the time runs out, leaving a short "The request timed out" notice that goes away after a few seconds.
+- **Confirmations are the hub's own window, not a system alert.** "Update the hub to X?" shows "now → new", what's new
+  as a list (the release description), warnings (a moved tag, a major version change) as separate blocks, how the
+  update goes, the tag and commit in small print, and "Cancel" / "Update". Rollback and the core's confirmations use
+  the same window: the text, the row the button is on and the cost as rows, the validity time in small print.
+- **"Details" in Settings → Hub updates opens on a click anywhere on its row.** It was the system disclosure, which
+  toggles only from its small chevron; the same fix for "About this plugin" and "How to connect".
+- `--snapshot-confirm <png>` (with `--confirm-cost`) draws the confirmation window with sample content.
+- **Damaged state files are shown.** One row per file from `/state.damagedFiles`: where the copy is, what to do, "Show
+  in Finder" and "Log".
+- "Needs you" in the popover shows the first five rows and an "N more" row; a gear button opens "Settings" in one
+  click; a quiet row says when macOS notifications are denied for the app; a slow answer to a card request can no
+  longer bring back a card that was already answered.
+
+### CLI
+
+- `agenthub plugins trust-key [<registry>]` — accept a changed registry key (see "Security").
+- `agenthub restart` — restart the hub daemon: `launchctl kickstart -k` on the launchd job (a job that is not loaded is
+  loaded from `~/Library/LaunchAgents`), then wait until a new daemon answers. It works with a `config.json` the other
+  commands refuse to parse, and names the state files the new daemon could not read. A test directory
+  (`AGENTHUB_HOME`) is refused: its daemon is started by hand.
+- `agenthub` without a command lists the commands that actually exist (both languages).
+
+### Plugin contract (additive, contract 3)
+
+- `POST /terminal/read-screen` answers with `bound`; `ready` is `false` without it. `POST /terminal/send-text` may
+  refuse with `409 terminal:binding-unknown` — try again on a later frame. Nothing to change in a plugin that already
+  treats an unknown refusal as "not now".
+- A streamable plugin that prints more than 10 frames a second loses the frames in between (the latest one is always
+  applied). Print a frame when something changed.
+- For registries: an optional top-level `expiresAt` (ISO 8601) in `index.json`, signed with the rest. Older hubs
+  ignore it.
+
+### Tests and docs
+
+- `npm test` in `daemon/` runs with `--test-timeout=300000`: a hung test fails after five minutes instead of blocking
+  the suite. The README and [`docs/hub-updates.md`](docs/hub-updates.md) now give `npm test` as the command (a bare
+  `node --test` hangs on fixtures).
+- One implementation of the "value — reason" split of a metadata entry (`splitWhy`, `daemon/lib/registry/perms.mjs`)
+  instead of copies of its pattern in six other files.
+- Docs caught up with the code: the audit journal's record types, `terminal-denied` repeats, the state directory's
+  files (`daemon.lock`, `streams.json`, `.bad` copies), the `hook-skip` reasons.
+
 ## 0.1.6 — 2026-11-16
 
 ### Shell

@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { writeFileSync, mkdirSync } from "node:fs";
+import { writeFileSync, mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { buildEnv, nextCron, parseCron, runOnce, splitCommand, StreamProcess, Watcher } from "../lib/runner.mjs";
 import { cleanup, tempHome, waitFor, writePlugin } from "./helpers.mjs";
@@ -71,7 +71,7 @@ test("standard: timeout kills the whole process group", async () => {
     const r = await runOnce(["/bin/sh", p], { env: { PATH: "/usr/bin:/bin" }, timeoutMs: 400 });
     assert.equal(r.timedOut, true);
     const child = Number(execFileSync("/bin/cat", [pidFile], { encoding: "utf8" }).trim());
-    await waitFor(() => !alive(child), { timeoutMs: 2000 });
+    await waitFor(() => !alive(child), { timeoutMs: 15_000 });
   } finally {
     cleanup(dir);
   }
@@ -122,7 +122,7 @@ test("streamable: a crashed process is restarted", async () => {
     const sp = new StreamProcess([process.execPath, p], { env: {}, cwd: dir, onStart: () => starts++ });
     sp.backoffMs = 50;
     sp.start();
-    await waitFor(() => starts >= 2, { timeoutMs: 4000 });
+    await waitFor(() => starts >= 2, { timeoutMs: 15_000 });
     await sp.stop();
   } finally {
     cleanup(dir);
@@ -136,12 +136,81 @@ test("watch: a change to a file matching the mask fires the callback", async () 
     const seen = [];
     const w = new Watcher([`${dir}/sessions/*.json — сессии`], (paths) => seen.push(...paths), { debounceMs: 50 });
     w.start();
-    await new Promise((r) => setTimeout(r, 100));
+    // written right after start(), with no pause for fs.watch to arm: if that event is lost, the poll reports the change
     writeFileSync(join(dir, "sessions", "1.key"), "x");
     writeFileSync(join(dir, "sessions", "123.json"), "{}");
-    await waitFor(() => seen.some((p) => p.endsWith("123.json")), { timeoutMs: 3000 });
+    await waitFor(() => seen.some((p) => p.endsWith("123.json")), { timeoutMs: 15_000 });
     assert.ok(!seen.some((p) => p.endsWith(".key")));
     w.close();
+  } finally {
+    cleanup(dir);
+  }
+});
+
+test("watch: fs.watch alone (the poll is off) reports a change", async () => {
+  const dir = tempHome();
+  try {
+    mkdirSync(join(dir, "sessions"));
+    const seen = [];
+    const w = new Watcher([`${dir}/sessions/*.json`], (paths) => seen.push(...paths), { debounceMs: 20, pollMs: 0 });
+    w.start();
+    assert.equal(w.pollTimer, null);
+    // when fs.watch is armed is not guessed: the file is rewritten until an event comes
+    let n = 0;
+    await waitFor(
+      () => {
+        if (seen.length) return true;
+        writeFileSync(join(dir, "sessions", "a.json"), "x".repeat(++n));
+        return false;
+      },
+      { timeoutMs: 15_000, stepMs: 100, label: "an fs.watch event for sessions/a.json" },
+    );
+    assert.ok(seen.every((p) => p.endsWith("a.json")));
+    w.close();
+  } finally {
+    cleanup(dir);
+  }
+});
+
+test("watch: the poll reports changes whose fs.watch events were lost, each one once", async () => {
+  const dir = tempHome();
+  try {
+    mkdirSync(join(dir, "sessions"));
+    mkdirSync(join(dir, "flat", "sub"), { recursive: true });
+    const later = join(dir, "later");
+    const calls = [];
+    const all = () => calls.flat();
+    const w = new Watcher([`${dir}/sessions/*.json`, join(dir, "state.json"), join(dir, "flat"), later], (paths) => calls.push(paths), { debounceMs: 20, pollMs: 40 });
+    w.start();
+    // from here on every fs.watch event is lost
+    for (const t of w.targets) t.w.close();
+    writeFileSync(join(dir, "sessions", "1.key"), "x");
+    writeFileSync(join(dir, "sessions", "1.json"), "{}");
+    writeFileSync(join(dir, "state.json"), "{}"); // did not exist at start: watched by name in the parent directory
+    writeFileSync(join(dir, "flat", "sub", "deep.json"), "{}"); // a subdirectory of a non-recursive entry
+    await waitFor(() => all().includes(join(dir, "sessions", "1.json")) && all().includes(join(dir, "state.json")));
+    // a change of content and a removal
+    writeFileSync(join(dir, "sessions", "1.json"), '{"n":1}');
+    await waitFor(() => all().filter((p) => p === join(dir, "sessions", "1.json")).length === 2);
+    rmSync(join(dir, "state.json"));
+    await waitFor(() => all().filter((p) => p === join(dir, "state.json")).length === 2);
+    // the awaited directory appeared: reported, and the watch moves from its parent onto it
+    mkdirSync(later);
+    await waitFor(() => all().includes(later) && w.targets[3].viaParent === false);
+    w.targets[3].w.close(); // the new watch loses its events as well
+    writeFileSync(join(later, "x"), "1");
+    await waitFor(() => all().includes(join(later, "x")));
+    // nothing changes anymore — several polls report nothing; what was reported is not reported again
+    const n = calls.length;
+    await new Promise((r) => setTimeout(r, 250));
+    assert.equal(calls.length, n);
+    assert.ok(!all().some((p) => p.endsWith(".key")), "the mask holds for the poll too");
+    assert.ok(!all().some((p) => p.includes(join("flat", "sub"))), "a non-recursive entry: neither the subdirectory nor its file");
+    w.close();
+    // closed: the poll has stopped
+    writeFileSync(join(dir, "sessions", "2.json"), "{}");
+    await new Promise((r) => setTimeout(r, 150));
+    assert.equal(calls.length, n);
   } finally {
     cleanup(dir);
   }

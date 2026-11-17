@@ -336,3 +336,66 @@ var pauseHubHelp: String {
 var resumeHubHelp: String {
     tr("Снять паузу можно только из закреплённой сборки приложения", "Only the pinned app build can resume the hub")
 }
+
+/// The shell's one collapsible block: the title row (chevron + title) is a single plain button, the content appears
+/// under it. Not SwiftUI's `DisclosureGroup`: on macOS that one toggles only from its small chevron, and a click on the
+/// title does nothing — it reads as "doesn't work" (2026-11-10, a bug from a plugin page).
+///
+/// Every collapsible block is drawn by this view — "About the plugin", the hub update details, the registry set-up
+/// steps, a plugin's `details=true` block (`DetailsDisclosure`) and a table group (`TableGroupView`). They differ only
+/// in the values below and in where the open state lives: the caller owns it and passes a binding.
+struct RowDisclosure<Label: View, Content: View>: View {
+    @Binding var isExpanded: Bool
+    /// The chevron's color; the title is styled by the caller.
+    var chevron: Color
+    /// Between the chevron and the title.
+    var gap: CGFloat
+    /// Between the title row and the content.
+    var spacing: CGFloat
+    /// Padding of the title row, inside the clickable area.
+    var insets: EdgeInsets
+    /// true — the clickable area takes the row's whole width; false — it hugs the chevron and the title.
+    var fillsRow: Bool
+    /// The title row's hover text, as for `hoverHelp`; nil — the row has no hover text of its own.
+    var help: (text: String?, always: Bool)?
+    @ViewBuilder var content: () -> Content
+    @ViewBuilder var label: () -> Label
+
+    init(isExpanded: Binding<Bool>, chevron: Color = .white.opacity(0.6), gap: CGFloat = 5, spacing: CGFloat = 0,
+         insets: EdgeInsets = EdgeInsets(), fillsRow: Bool = true, help: (text: String?, always: Bool)? = nil,
+         @ViewBuilder content: @escaping () -> Content, @ViewBuilder label: @escaping () -> Label) {
+        _isExpanded = isExpanded
+        self.chevron = chevron
+        self.gap = gap
+        self.spacing = spacing
+        self.insets = insets
+        self.fillsRow = fillsRow
+        self.help = help
+        self.content = content
+        self.label = label
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: spacing) {
+            header
+                .accessibilityAddTraits(.isButton)
+                .accessibilityValue(isExpanded ? tr("развёрнуто", "expanded") : tr("свёрнуто", "collapsed"))
+            if isExpanded { content() }
+        }
+    }
+
+    @ViewBuilder private var header: some View {
+        let button = Button { isExpanded.toggle() } label: {
+            HStack(spacing: gap) {
+                Image(systemName: "chevron.right").font(.system(size: 9, weight: .semibold)).foregroundStyle(chevron)
+                    .rotationEffect(.degrees(isExpanded ? 90 : 0))
+                label()
+            }
+            .padding(insets)
+            .frame(maxWidth: fillsRow ? .infinity : nil, alignment: .leading)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        if let help { button.hoverHelp(help.text, always: help.always) } else { button }
+    }
+}

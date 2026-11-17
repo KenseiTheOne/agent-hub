@@ -251,6 +251,11 @@ export async function start(ctx) {
   try {
     ctx.facts.provide("push.channels", () => ({ register: (ch) => set.register(ch), list: () => set.list() }));
   } catch {}
+  // /state.notifications.channels (and GET /settings): mac plus services.push.channels and the channels services registered —
+  // id, type, label, security, events; never a URL or token (lib/push/channels.mjs list).
+  ctx.provideState("notifications", () => ({
+    channels: (ctx.facts.get("push.channels")?.list?.() || []).map((c) => ({ id: c.id, type: c.type, label: c.label, security: c.security === true, events: Array.isArray(c.events) ? [...c.events] : null })),
+  }));
   engine = new PushEngine({
     config: cfg,
     presence: createPresence({ exec: ctx.exec }),

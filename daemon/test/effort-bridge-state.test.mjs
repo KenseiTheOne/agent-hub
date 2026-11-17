@@ -67,7 +67,7 @@ test("/state.bridge: actions service — online:false, bridge command and direct
     assert.equal(on.body.bridge.online, true);
     assert.equal(on.body.bridge.version, "1");
     assert.ok(events.some((e) => e.type === "bridge.connected"));
-    await waitFor(() => events.find((e) => e.type === "bridge.disconnected" && e.reason === "stale"), { timeoutMs: 3000 });
+    await waitFor(() => events.find((e) => e.type === "bridge.disconnected" && e.reason === "stale"), { timeoutMs: 15_000 });
     const off = await req(h.sock, "GET", "/state");
     assert.equal(off.body.bridge.online, false);
     // polling again — online again, connected event (resumed)

@@ -32,11 +32,12 @@
 //   hub watch --home <dir>             internal: watchdog for the trial run of a new version (run by the daemon)
 
 import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { request } from "node:http";
 import { homedir, tmpdir, userInfo } from "node:os";
 import { dirname, join, resolve, sep } from "node:path";
-import { readJsonFile, REPO_DIR } from "../config.mjs";
+import { REPO_DIR } from "../config.mjs";
+import { updateConfig } from "../statefile.mjs";
 import { msg } from "../i18n.mjs";
 import { Journal } from "../journal.mjs";
 import { pinFingerprint, requirementSha } from "../app-pin.mjs";
@@ -44,7 +45,7 @@ import { builtinCopyDir, builtinStatus } from "../builtin-copy.mjs";
 import { bootstrapJob, daemonLocation, hasLaunchd, installPlan, LABEL, launchdNode, plistXml } from "../launchd.mjs";
 import { appControl, samePath } from "../platform.mjs";
 import { compareVersions, isLabel, parseVersionFile } from "../version.mjs";
-import { parseFileName, readPluginMeta } from "../meta.mjs";
+import { parseFileName, readPluginMeta, splitWhy } from "../meta.mjs";
 import { buildVersion, HubUpdateError, liveCodeOf, testCodeOf, verifyApp } from "./build.mjs";
 import { currentLabel, ensureDir, hubPaths, listVersions, pinnedCdhash, previousLabel, readBuild, readJson, rememberPin, rememberPrevious, versionApp, versionDir, versionPlugins } from "./layout.mjs";
 import { GIT, gitEnv, hasUserinfo, listTags, redactText, redactUrl } from "./remote.mjs";
@@ -994,7 +995,13 @@ async function repair({ config, isLiveHome, has, home, codeOf, label, apply, yes
 
 // What the hub itself puts in its directory (top level). --purge deletes the whole directory only if it contains
 // nothing else: a typo in `--home ~/Projects` must not wipe the projects folder.
-const HUB_TOP = new Set(["config.json", "settings.json", "journal.jsonl", "journal.jsonl.1", "journal-audit.jsonl", "journal-audit.jsonl.1", "app-pin.json", "verified-code.json", "push-state.json", "plugins.lock", "hub.sock", "ESTOP", "Versions", "HubUpdate", "Builtin", "Plugins", "PluginData", "Cache", "Registry", "logs", "launch", ".DS_Store"]);
+const HUB_TOP = new Set(["config.json", "settings.json", "journal.jsonl", "journal.jsonl.1", "journal-audit.jsonl", "journal-audit.jsonl.1", "app-pin.json", "jobs.json", "streams.json", "daemon.lock", "verified-code.json", "hook-seen.json", "push-state.json", "plugins.lock", "hub.sock", "ESTOP", "Versions", "HubUpdate", "Builtin", "Plugins", "PluginData", "Cache", "Registry", "logs", "launch", ".DS_Store"]);
+// What the hub keeps next to its own files (lib/statefile.mjs, lib/instance.mjs): the kept copy of a damaged file (<file>.bad),
+// the write lock (<file>.lock) and the short-lived names around a lock (<lock>.new-<pid>, <lock>.break).
+function hubSideFile(n) {
+  const lock = n.replace(/(\.new-\d+|\.break)$/, "");
+  return HUB_TOP.has(lock) || HUB_TOP.has(lock.replace(/(\.bad|\.lock)$/, ""));
+}
 // Signs of a hub directory: at least one of these.
 const HUB_SIGNS = ["config.json", "journal.jsonl", "Versions", "HubUpdate"];
 
@@ -1011,7 +1018,7 @@ export function purgeable(home, isLiveHome) {
     return e?.code === "ENOENT" ? { ok: true } : { ok: false, why: e.message };
   }
   if (!HUB_SIGNS.some((n) => names.includes(n))) return { ok: false, why: msg("cli.hub.purge.noSigns", { list: HUB_SIGNS.join(", ") }) };
-  const foreign = names.filter((n) => !HUB_TOP.has(n) && !/^[^/]+\.tmp-\d+$/.test(n));
+  const foreign = names.filter((n) => !HUB_TOP.has(n) && !/^[^/]+\.tmp-\d+$/.test(n) && !hubSideFile(n));
   if (foreign.length) return { ok: false, why: msg("cli.hub.purge.foreign", { list: foreign.slice(0, 5).join(", "), more: foreign.length > 5 ? foreign.length - 5 : 0 }) };
   return { ok: true };
 }
@@ -1038,7 +1045,7 @@ export function keychainServices(home) {
         const m = readPluginMeta(join(dir, id, f))?.meta;
         if (!m) continue;
         for (const e of m.secrets || []) {
-          const key = String(e).split(/\s+[—–-]{1,2}\s+/)[0].trim();
+          const key = splitWhy(e).what;
           const svc = key.split(".")[0];
           if (/^[a-z][\w-]{0,63}$/.test(svc)) out.add(`agent-hub.${svc}`);
         }
@@ -1157,13 +1164,14 @@ export async function uninstallCli({ config, isLiveHome, has, home }) {
     } catch {}
     // the copy of built-ins is gone — config.json must not point to it (the rest of it is the human's settings)
     try {
-      const cfg = readJsonFile(p.config);
-      if (cfg.builtinPluginsDir && samePath(cfg.builtinPluginsDir, copy)) {
-        delete cfg.builtinPluginsDir;
-        const tmp = `${p.config}.tmp-${process.pid}`;
-        writeFileSync(tmp, JSON.stringify(cfg, null, 2) + "\n", { mode: 0o600 });
-        renameSync(tmp, p.config);
-      }
+      updateConfig(
+        p.config,
+        (cfg) => {
+          if (!cfg.builtinPluginsDir || !samePath(cfg.builtinPluginsDir, copy)) return false;
+          delete cfg.builtinPluginsDir;
+        },
+        { missing: "throw" },
+      );
     } catch {}
     cliJournal(config, { op: "uninstall", labels: versions, under: process.stdin.isTTY ? "terminal" : "no-tty" });
     console.log(msg("cli.un.deleted", { list: versions.join(", ") || "—" }));

@@ -34,8 +34,8 @@ export const OPEN_EXT = new Set([
   ".mp3", ".wav", ".m4a", ".flac", ".ogg", ".aac", ".mp4", ".mov", ".mkv", ".webm", ".avi",
 ]);
 
-// → null | the refusal reason (not reveal) for an already resolved realpath.
-function typeProblem(real) {
+// → Promise<null | the refusal reason> (not reveal) for an already resolved realpath.
+async function typeProblem(real) {
   const st = statSync(real);
   const ext = extname(real).toLowerCase();
   if (st.isDirectory()) {
@@ -55,7 +55,7 @@ function resolvePath(p) {
   return p;
 }
 
-export function verifyFacts(args) {
+export async function verifyFacts(args) {
   const p = resolvePath(args.path);
   if (!isAbsolute(p)) return { ok: false, reason: "relative-path" };
   let real;
@@ -66,7 +66,7 @@ export function verifyFacts(args) {
     return { ok: false, reason: "not-found" };
   }
   if (args.reveal) return { ok: true };
-  const problem = typeProblem(real);
+  const problem = await typeProblem(real);
   return problem ? { ok: false, reason: problem } : { ok: true };
 }
 
@@ -78,7 +78,7 @@ export async function run(args, ctx) {
   const p = realpathSync(resolvePath(args.path));
   const reveal = Boolean(args.reveal);
   if (!reveal) {
-    const problem = typeProblem(p);
+    const problem = await typeProblem(p);
     if (problem) return { ok: false, reason: problem };
   }
   const [file, ...argv] = openCommand(p, { reveal });

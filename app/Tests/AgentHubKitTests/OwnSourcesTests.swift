@@ -85,7 +85,7 @@ final class ConsentRecorder: ConfirmPresenter {
         // not "only you": any process under your user can write to the folder, including an agent in the repository
         #expect(src.writableMine && src.writableNote.hasPrefix("Менять папку могут только процессы под вашим пользователем — в том числе агенты"))
         let m = try #require(c.migrate)
-        #expect(m.text(title: "Прогоны").hasPrefix("Заменит официальный «Прогоны» 0.5.2 из каталога на свой из этой папки"))
+        #expect(m.text(title: "Прогоны").hasPrefix("Заменит официальный плагин «Прогоны» 0.5.2 из каталога на свой из этой папки"))
         #expect(PluginMigration(from: "own", version: "0.6.0", pathShort: "~/old").text(title: "Прогоны").contains("~/old"))
         // registry window (older daemon: no source) — the previous signature line
         let reg = try JSONDecoder().decode(ConsentRequest.self, from: Data(#"{"token":"t","id":"x","tier":"official","permissions":[]}"#.utf8))
@@ -93,7 +93,7 @@ final class ConsentRecorder: ConfirmPresenter {
         #expect(ConsentSource(kind: "registry").line == "подпись реестра ✓ · sha256 совпадает ✓")
         L10n.shared.lang = .en
         #expect(src.line == "own folder · ~/nr/agenthub/my-runner · fingerprint 0123456789ab")
-        #expect(m.text(title: "Runs").hasPrefix("Replaces the official \"Runs\" 0.5.2 from the catalog"))
+        #expect(m.text(title: "Runs").hasPrefix("Replaces the official plugin \"Runs\" 0.5.2 from the catalog"))
         L10n.shared.lang = .ru
     }
 

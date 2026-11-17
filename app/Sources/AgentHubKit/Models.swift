@@ -131,15 +131,23 @@ public struct PluginJob: Codable, Sendable, Hashable, Identifiable {
 }
 
 /// ISO 8601 with or without fractional seconds (`2026-11-12T10:00:00.000Z`, `2026-11-12T13:00:00+03:00`).
+/// The two formatters are created once and shared: making one costs far more than a parse, and the log and the
+/// session list parse a date per row. They are only read after creation (`ISO8601DateFormatter` is thread-safe).
 public enum ISODate {
-    public static func parse(_ s: String) -> Date? {
-        let t = s.trimmingCharacters(in: .whitespaces)
+    private nonisolated(unsafe) static let fractional: ISO8601DateFormatter = {
         let f = ISO8601DateFormatter()
         f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        if let d = f.date(from: t) { return d }
-        f.formatOptions = [.withInternetDateTime]
-        return f.date(from: t)
+        return f
+    }()
+    private nonisolated(unsafe) static let plain = ISO8601DateFormatter()
+
+    public static func parse(_ s: String) -> Date? {
+        let t = s.trimmingCharacters(in: .whitespaces)
+        return fractional.date(from: t) ?? plain.date(from: t)
     }
+
+    /// `2026-11-12T10:00:00Z` — the form the daemon accepts and sends.
+    public static func string(_ d: Date) -> String { plain.string(from: d) }
 }
 
 /// Session mark in a plugin row: the core verifies the signature.
@@ -614,9 +622,7 @@ public struct AppPinInfo: Codable, Sendable, Hashable {
     /// Time of the last requirement change.
     public var changedDate: Date? {
         guard let changedAt else { return nil }
-        let f = ISO8601DateFormatter()
-        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        return f.date(from: changedAt) ?? ISO8601DateFormatter().date(from: changedAt)
+        return ISODate.parse(changedAt)
     }
 
     /// Changed recently (within a day by default): the panel line is shown prominently.
@@ -679,6 +685,16 @@ public struct HubState: Codable, Sendable, Hashable {
     /// External daemon extensions waiting for or holding a human's approval (`GET /state.extensions`, event
     /// `extensions.changed`; G4). nil — an older daemon.
     public var extensions: ExtensionsInfo?
+    /// State files the daemon could not read when it started and went on without (`GET /state.damagedFiles`). The fact
+    /// stays until the daemon restarts. Empty — all read fine, or an older daemon.
+    public var damagedFiles: [DamagedFile] = []
+    /// Registries whose key in `config.json` is not the one the hub accepted (`GET /state.registryKeys`, event
+    /// `plugins.registry-keys`; RegistryKeys.swift). Empty — nothing waits; nil — no plugins service or an older daemon.
+    public var registryKeys: [RegistryKeyChange]? = nil
+    /// Limits the shell shows next to what it starts (`GET /state.limits`). nil — an older daemon.
+    public var limits: HubLimits? = nil
+    /// The Claude Code hook as this hub sees it (`GET /state.hook`). nil — an older daemon: the shell says nothing.
+    public var hook: HookInfo? = nil
 
     public init(plugins: [PluginState] = [], sessions: [SessionInfo] = [], estop: Bool = false, seq: Int = 0) {
         self.version = nil; self.contract = nil; self.now = nil; self.pid = nil; self.seq = seq; self.estop = estop
@@ -719,6 +735,10 @@ public struct HubState: Codable, Sendable, Hashable {
         ownPlugins = try? c.decodeIfPresent(OwnPluginsInfo.self, forKey: .ownPlugins)
         externalSessions = c.lossyList(ExternalSession.self, forKey: .externalSessions) ?? []
         extensions = try? c.decodeIfPresent(ExtensionsInfo.self, forKey: .extensions)
+        damagedFiles = c.lossyList(DamagedFile.self, forKey: .damagedFiles) ?? []
+        registryKeys = c.lossyList(RegistryKeyChange.self, forKey: .registryKeys)
+        limits = try? c.decodeIfPresent(HubLimits.self, forKey: .limits)
+        hook = try? c.decodeIfPresent(HookInfo.self, forKey: .hook)
         status = (try? c.decode(HubStatus.self, forKey: .status)) ?? HubStatus.worst(plugins.map(\.status))
         waitingSessions = (try? c.decode(Int.self, forKey: .waitingSessions)) ?? sessions.filter(\.isWaiting).count
     }
@@ -731,6 +751,72 @@ public struct HubState: Codable, Sendable, Hashable {
             }
             .map(\.element)
     }
+}
+
+/// `/state.limits`: `actionTimeoutMs` — how long one plugin action may run before the hub kills it
+/// (`config.json` → `plugins.actionTimeoutMs`). A missing or non-positive number is no limit known.
+public struct HubLimits: Codable, Sendable, Hashable {
+    public var actionTimeoutMs: Double?
+
+    public init(actionTimeoutMs: Double? = nil) { self.actionTimeoutMs = actionTimeoutMs }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        actionTimeoutMs = ((try? c.decodeIfPresent(Double.self, forKey: .actionTimeoutMs)) ?? nil).flatMap { $0 > 0 ? $0 : nil }
+    }
+
+    enum CodingKeys: String, CodingKey { case actionTimeoutMs }
+}
+
+/// `/state.hook`: whether a verified Claude Code hook event has ever reached this hub (`installed`), the last one at
+/// `lastEventAt`; `reason` comes only with `installed: false` (`no-events`; new codes may be added). The hub does not
+/// read Claude Code's settings, so "not installed" means "never heard from".
+public struct HookInfo: Codable, Sendable, Hashable {
+    public var installed: Bool
+    public var lastEventAt: String?
+    public var reason: String?
+    /// The command that installs the hook, as the daemon gives it; nil — a daemon without the field.
+    public var installCommand: String?
+
+    public init(installed: Bool, lastEventAt: String? = nil, reason: String? = nil, installCommand: String? = nil) {
+        self.installed = installed; self.lastEventAt = lastEventAt; self.reason = reason; self.installCommand = installCommand
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        // without a readable `installed` there is no fact to show: the whole field is dropped (HubState: try?)
+        installed = try c.decode(Bool.self, forKey: .installed)
+        lastEventAt = try? c.decodeIfPresent(String.self, forKey: .lastEventAt)
+        reason = try? c.decodeIfPresent(String.self, forKey: .reason)
+        installCommand = try? c.decodeIfPresent(String.self, forKey: .installCommand)
+    }
+
+    enum CodingKeys: String, CodingKey { case installed, lastEventAt, reason, installCommand }
+}
+
+/// A state file the daemon found broken at start (`/state.damagedFiles[]`): `file` and `backup` are names inside the
+/// hub directory (`backup` — the kept copy of the broken bytes, `<file>.bad`; nil — no copy could be made), `detail` —
+/// what the parser said, `at` — when it was noticed.
+public struct DamagedFile: Codable, Sendable, Hashable, Identifiable {
+    public var file: String
+    public var backup: String?
+    public var detail: String?
+    public var at: String?
+    public var id: String { file }
+
+    public init(file: String, backup: String? = nil, detail: String? = nil, at: String? = nil) {
+        self.file = file; self.backup = backup; self.detail = detail; self.at = at
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        file = try c.decode(String.self, forKey: .file)
+        backup = (try? c.decodeIfPresent(String.self, forKey: .backup)).flatMap { $0.isEmpty ? nil : $0 }
+        detail = (try? c.decodeIfPresent(String.self, forKey: .detail)).flatMap { $0.isEmpty ? nil : $0 }
+        at = try? c.decodeIfPresent(String.self, forKey: .at)
+    }
+
+    enum CodingKeys: String, CodingKey { case file, backup, detail, at }
 }
 
 /// A non-Claude agent session (`/state.externalSessions[]`): a trusted plugin's `agentSession=<id> pid=<pid>` line. No
@@ -1328,6 +1414,19 @@ public struct JournalResponse: Decodable, Sendable {
 }
 
 /// A 428 response: confirmation is needed; the core writes the text and the cost.
+/// The parts of a confirmation the shell lays out itself (its own confirmations: hub update, rollback): what changes in
+/// one line, what's new as a list, warnings as separate blocks, how it will go. Never read from a core response.
+public struct ConfirmLayout: Sendable, Hashable {
+    public var subtitle: String?
+    public var heading: String?
+    public var points: [String]
+    public var warnings: [String]
+    public var note: String?
+    public init(subtitle: String? = nil, heading: String? = nil, points: [String] = [], warnings: [String] = [], note: String? = nil) {
+        self.subtitle = subtitle; self.heading = heading; self.points = points; self.warnings = warnings; self.note = note
+    }
+}
+
 public struct ConfirmRequest: Decodable, Sendable, Hashable {
     public var token: String
     public var level: ActionLevel
@@ -1339,6 +1438,8 @@ public struct ConfirmRequest: Decodable, Sendable, Hashable {
     public var title: String? = nil
     public var button: String? = nil
     public var details: String? = nil
+    /// The same confirmation by parts, for the shell's window; `text` stays the whole of it for a plain presenter.
+    public var layout: ConfirmLayout? = nil
     /// G10: the sanitized title of the row that carries the button (≤ 120 graphemes). The core also quotes it at the end of
     /// `text` when it says more than the action title — `extraRow` tells whether the sheet still has to show it.
     public var row: String? = nil
@@ -1356,7 +1457,7 @@ public struct ConfirmRequest: Decodable, Sendable, Hashable {
     enum CodingKeys: String, CodingKey { case token, level, text, cost, expiresInMs, row, input, background }
 
     /// The row to show under the text: nil when the core already quoted it in `text`, or when it only repeats the
-    /// button title (the core leaves it out of `text` then, and the alert already names the button).
+    /// button title (the core leaves it out of `text` then, and the window already names the button).
     public func extraRow(actionLabel: String) -> String? {
         guard let r = row?.trimmingCharacters(in: .whitespacesAndNewlines), !r.isEmpty else { return nil }
         if text.contains(r) || r == actionLabel { return nil }

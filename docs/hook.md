@@ -49,10 +49,17 @@ AgentHub.app ── GET /hook/cards ── POST /actions/session.respond ──�
      - `ctx.sessions.register(… interactive: true)` passed the signature check.
      After a daemon restart the registry is empty: the first `PermissionRequest` of a verified hook registers the
      session lazily with the same checks (`source: "lazy"`).
+     **No lazy registration after `SessionEnd`.** A session this daemon saw `SessionEnd` for is over, not forgotten:
+     a later `PermissionRequest` of the same Claude process with the same `session_id` gets `{}` right away
+     (`hook-skip` with reason `session-ended`) instead of bringing the session back — otherwise a card nobody expects
+     would hang until `waitMs`. Only an explicit `SessionStart` makes the session interactive again. The daemon
+     remembers the last 256 ended sessions (session id → Claude pid) in memory; after a daemon restart the list is
+     empty and the lazy rule above applies.
    - `SessionEnd`/`Stop`/`PermissionRequest` with a `session_id` bound to another pid — `{}` and a
      `hook-foreign-session` record: one session's hook neither removes nor replaces another session's cards.
    - `SessionEnd` → drop interactivity and cards. `Stop` → drop the session's cards.
-   - `PermissionRequest` → `{}` immediately if: paused by a limit; the session is not interactive (no SessionStart,
+   - `PermissionRequest` → `{}` immediately if: paused by a limit; the session has ended (`SessionEnd` from this
+     process, see above); the session is not interactive (no SessionStart,
      another pid, the process died, the pid was reused — the start time changed, the signature failed);
      the tool is in `skipTools` (`ExitPlanMode`); `tool_input` is not an object; more than `maxRequestsPerMinute`
      requests from the session within a minute; `maxPending` cards are already waiting; an unknown AskUserQuestion
@@ -159,6 +166,10 @@ everything except `answers` matches the original `tool_input` (deep comparison),
 `hook-session` (sessionId, claudePid, interactive, reason, kind, entrypoint, source), `hook-session-end`,
 `hook-card` (request — a **hash** of requestId, sessionId, **claudePid** of the verified ancestor, kind, tool),
 `hook-answer` (decision, appPid), `hook-cancel` (reason), `hook-skip` (reason), `hook-paused`, `hook-foreign-session`.
+`hook-skip` reasons — why a `PermissionRequest` got `{}` without a card: `paused`, `session-ended` (the session's
+`SessionEnd` was already seen from this process — no lazy registration), `not-interactive`, `skip-tool`, `bad-input`,
+`rate` (`maxRequestsPerMinute`), `bad-questions` (an unknown AskUserQuestion shape), `too-many` (`maxPending`),
+`hook-gone` (the hook closed the connection before the card was created).
 `GET /journal` is open to cli too, so requestId itself is never written to the journal. `tool_input`, paths, commands,
 questions — never.
 
@@ -170,3 +181,10 @@ questions — never.
 - `peer.hookPaths` includes `<repo>/claude-plugin/hook/agenthub-hook` by default, so `claude --plugin-dir
   <repo>/claude-plugin` works without editing `config.json`.
 - `GET /state` contains no cards; `GET /hook/cards` + SSE is enough for the app.
+- `GET /state` → `hook: {installed, lastEventAt, reason?, installCommand}` — whether a verified hook event has ever reached this hub
+  and when the last one did (`daemon/lib/hook/seen.mjs`, kept in `<home>/hook-seen.json`). The core records it for
+  every event that reaches `core.handleHook`, with or without the hook service and during a hub pause. It is the only
+  sign of an installed hook the hub has: it does not read Claude Code's settings. `installed: false` comes with
+  `reason: "no-events"` — see [`api.md`](api.md), `GET /state`. `installCommand` is the permanent install of
+  [`claude-plugin/README.md`](../claude-plugin/README.md) as one line (`HOOK_INSTALL_COMMAND`; a test keeps the two in
+  step), for a client to show.

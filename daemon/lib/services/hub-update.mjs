@@ -194,6 +194,8 @@ export async function start(ctx) {
     ctx.facts.provide("hub.update.expectsPin", (fp) => updater.expectsPin(fp));
     ctx.facts.provide("hub.update.startVerdict", () => startVerdict);
   } catch {}
+  // /state.hubUpdate — update of the hub itself (docs/hub-updates.md)
+  ctx.provideState("hubUpdate", () => ctx.facts.get("hub.update") ?? null);
   const onPeer = (ev) => {
     if (ev?.connected && ev.stream) updater.onAppStream();
   };

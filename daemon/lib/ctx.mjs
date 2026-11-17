@@ -4,6 +4,7 @@
 import { execFile } from "node:child_process";
 import { appendFileSync } from "node:fs";
 import { t } from "./i18n.mjs";
+import { sysAsync } from "./peer.mjs";
 
 // Runs an external program for primitives. In test mode (AGENTHUB_TEST_EXEC_LOG) it does not run it
 // but appends {file,args} as a JSON line to the file and returns code 0.
@@ -53,6 +54,9 @@ export function makeCtx(core, name) {
       // Whether the process is stopped and in its terminal's foreground group (typing into the tab, contract 3).
       // → { stopped, foreground } | null (cannot tell)
       procState: (pid) => core.peer.sys?.procState?.(pid) ?? null,
+      // The same answer without blocking the event loop (ps runs asynchronously) — for request handlers.
+      // → Promise<{ stopped, foreground } | null>; never rejects.
+      procStateAsync: (pid) => sysAsync(core.peer.sys, "procState", pid),
     }),
     facts: core.facts,
     sessions: core.sessions,
@@ -86,6 +90,11 @@ export function makeCtx(core, name) {
     // Name — AGENTHUB_<NAME> (not AGENTHUB_SECRET_* and not those taken by the core). The values are not secrets: plugins'
     // environment gets only what is fine to show under "Permissions".
     providePluginEnv: (name, value) => core.setPluginEnv(name, value),
+    // This service's part of GET /state: fn() → the section `section` (JSON-ready; null — nothing to show). For the two
+    // setting sections the core builds itself (launchAtLogin, notifications) fn() → extra fields of that setting, which
+    // GET /settings shows too. fn null — remove. A section belongs to the extension that provided it first; the core's own
+    // keys cannot be taken (docs/extension-points.md).
+    provideState: (section, fn) => core.provideState(section, fn, name),
     setPluginPolicy: (fn) => core.setPluginPolicy(fn),
     invoke: (req) => core.invoke(req),
     // Daemon lifecycle for the hub update service (lib/services/hub-update.mjs, docs/hub-updates.md): start

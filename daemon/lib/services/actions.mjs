@@ -15,6 +15,7 @@ import { readdirSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { randomBytes } from "node:crypto";
 import { actionsConfig, readCmuxSessions, UUID_RE } from "../primitives/_actions-support.mjs";
+import { liveStateDir, samePath } from "../platform.mjs";
 
 export const name = "actions";
 
@@ -340,6 +341,22 @@ export async function start(ctx) {
   ctx.facts.provide("actions.config", () => cfg);
   ctx.facts.provide("bridge.channel", () => channel);
   ctx.facts.provide("bridge.online", () => channel.online());
+  // /state.bridge — the cmux bridge: whether it is connected and how to start it. command — path to the bridge script (the
+  // first of peer.bridgePaths), home/defaultHome — for AGENTHUB_HOME in the command.
+  ctx.provideState("bridge", () => {
+    const ch = ctx.facts.get("bridge.channel");
+    if (!ch) return null;
+    const st = ch.status();
+    const home = ctx.config.paths?.home || null;
+    return {
+      online: Boolean(st.online),
+      since: st.online && st.since ? new Date(st.since).toISOString() : null,
+      version: st.online ? st.version || null : null,
+      command: (ctx.config.peer?.bridgePaths || [])[0] || null,
+      home,
+      defaultHome: samePath(home, liveStateDir()),
+    };
+  });
   sweepLaunchDir(ctx);
   // A bridge that stopped polling without bye (tab closed, process killed) goes offline after staleMs; the shell learns
   // about it via the bridge.disconnected event (reason: stale), to grey out "Go to tab" without polling /state.

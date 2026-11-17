@@ -4,129 +4,281 @@ import SwiftUI
 
 /// Confirmations and refusals. The confirmation text and cost are written by the **core** (428 reply, in the hub language); the shell
 /// doesn't change them, doesn't decide whether confirmation is needed, and only passes the human's consent via a token.
-/// The permissions window and plugin removal are custom modal windows following the prototype (Consent.dc.html), the rest is NSAlert.
+/// Every question is the hub's own window (`HubWindow`): confirmations, refusals, permissions, typed text, removal,
+/// rollback. None is modal — the answer is awaited, the main actor stays free, and the store keeps applying stream
+/// events while a window is open; a second window waits for the first to end (`WindowQueue`).
 @MainActor
 final class AlertPresenter: ConfirmPresenter {
-    /// The core's confirmation as an alert: title by level, the core text, the row the button is on (G10, only when the
-    /// core didn't already quote it), the cost and the token lifetime.
-    private func confirmAlert(_ request: ConfirmRequest, actionLabel: String) -> NSAlert {
-        let alert = NSAlert()
-        alert.alertStyle = request.level == .confirmCost ? .critical : .warning
-        alert.messageText = request.title
-            ?? (request.level == .confirmCost
-                ? tr("Подтвердите: действие тратит квоту или выходит в сеть", "Confirm: this uses quota or the network")
-                : tr("Подтвердите действие", "Confirm the action"))
-        var info = request.text
-        if let row = request.extraRow(actionLabel: actionLabel) { info += "\n\n" + tr("Кнопка в строке «\(row)».", "Button on the row \"\(row)\".") }
-        if let cost = request.cost, !cost.isEmpty { info += "\n\n" + tr("Чем это обойдётся: ", "Cost: ") + cost }
-        if let ms = request.expiresInMs { info += "\n\n" + tr("Подтверждение действует \(ms / 1000) с", "Valid for \(ms / 1000) s") }
-        alert.informativeText = info
-        return alert
-    }
+    /// When each core token stops being valid (a sheet reopened for the same token keeps its first deadline).
+    private let deadlines = TokenDeadlines()
 
     /// Typed text for an input action (G1): with `confirm` — the core's confirmation with a field (its token accepts any
     /// valid text); without — the field alone (an immediate action pressed where there is no room for a field). The checks
-    /// the core makes run here first; a failed one reopens the sheet with the reason and the typed text kept.
+    /// the core makes run in the window as the human types; the core's own refusal (`error`) is shown under the field
+    /// until the text changes.
     func prompt(_ request: InputPrompt) async -> String? {
-        NSApp.activate(ignoringOtherApps: true)
-        var text = request.text
-        var error = request.error
-        while true {
-            let alert: NSAlert
-            if let c = request.confirm {
-                alert = confirmAlert(c, actionLabel: request.actionLabel)
-                alert.addButton(withTitle: c.button ?? tr("Выполнить", "Run"))
-            } else {
-                alert = NSAlert()
-                alert.alertStyle = .informational
-                alert.messageText = request.actionLabel
-                alert.informativeText = tr("Текст уйдёт команде плагина.", "The text goes to the plugin's command.")
-                alert.addButton(withTitle: tr("Отправить", "Send"))
+        let box = InputBox(text: request.text, refusal: request.error)
+        let ok: Bool
+        if let c = request.confirm {
+            let until = deadlines.deadline(token: c.token, expiresInMs: c.expiresInMs)
+            ok = await HubWindow.ask(width: 480, until: until) { done in
+                ConfirmSheet(request: c, actionLabel: request.actionLabel, until: until, input: request.input, box: box, done: done)
             }
-            let cancel = alert.addButton(withTitle: tr("Отмена", "Cancel"))
-            cancel.keyEquivalent = "\u{1b}"
-            if request.confirm?.level == .confirmCost { alert.buttons.first?.keyEquivalent = "" }
-            let field = NSTextField(string: text)
-            field.placeholderString = request.input.placeholder
-            field.lineBreakMode = .byTruncatingTail
-            field.usesSingleLineMode = true
-            field.frame = NSRect(x: 0, y: 0, width: 320, height: 24)
-            let note = NSTextField(wrappingLabelWithString: error ?? tr("Одна строка, до \(request.input.maxLength) символов.", "One line, up to \(request.input.maxLength) characters."))
-            note.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
-            note.textColor = error == nil ? .secondaryLabelColor : .systemRed
-            note.preferredMaxLayoutWidth = 320
-            let stack = NSStackView(views: [field, note])
-            stack.orientation = .vertical
-            stack.alignment = .leading
-            stack.spacing = 6
-            field.widthAnchor.constraint(equalToConstant: 320).isActive = true
-            stack.frame = NSRect(origin: .zero, size: NSSize(width: 320, height: 24 + 6 + note.fittingSize.height))
-            alert.accessoryView = stack
-            alert.window.initialFirstResponder = field
-            guard alert.runModal() == .alertFirstButtonReturn else { return nil }
-            text = field.stringValue
-            if let code = InputCheck.code(text, maxLength: request.input.maxLength) {
-                error = InputCheck.message(code, maxLength: request.input.maxLength)
-                continue
+        } else {
+            let own = ConfirmRequest(token: "", level: .confirm, text: tr("Текст уйдёт команде плагина.", "The text goes to the plugin's command."),
+                                     title: request.actionLabel, button: tr("Отправить", "Send"))
+            ok = await HubWindow.ask(width: 480) { done in
+                ConfirmSheet(request: own, actionLabel: request.actionLabel, symbol: "character.cursor.ibeam", input: request.input, box: box, done: done)
             }
-            return text
         }
+        return ok ? box.text : nil
     }
 
+    /// A confirmation is the hub's own window: what is asked, the parts (what's new, warnings, the cost, how it goes), the
+    /// small print and two buttons. Return is the action only for a regular confirmation; for a cost there is no default.
+    /// A core confirmation lives as long as its token: the small print counts the time down and the window closes by
+    /// itself when it runs out — the answer is "no", and a short notice says the time ran out (`HubWindow.ask`).
     func confirm(_ request: ConfirmRequest, actionLabel: String) async -> Bool {
-        NSApp.activate(ignoringOtherApps: true)
-        let alert = confirmAlert(request, actionLabel: actionLabel)
-        // "Details" (tag, commit) — small grey text under the main text: visible, but not competing with it
-        if let d = request.details, !d.isEmpty {
-            let field = NSTextField(wrappingLabelWithString: tr("Подробности: ", "Details: ") + d)
-            field.font = .monospacedSystemFont(ofSize: NSFont.smallSystemFontSize, weight: .regular)
-            field.textColor = .secondaryLabelColor
-            field.isSelectable = true
-            field.preferredMaxLayoutWidth = 300
-            field.frame = NSRect(origin: .zero, size: field.fittingSize)
-            alert.accessoryView = field
-        }
-        // the button is the action itself ("Update") if the shell named it; for core confirmations — "Run"
-        alert.addButton(withTitle: request.button ?? tr("Выполнить", "Run"))
-        let cancel = alert.addButton(withTitle: tr("Отмена", "Cancel"))
-        cancel.keyEquivalent = "\u{1b}"
-        // default (Return) is "Run" only for a regular confirmation; for a cost — no default button
-        if request.level == .confirmCost { alert.buttons.first?.keyEquivalent = "" }
-        return alert.runModal() == .alertFirstButtonReturn
+        let until = deadlines.deadline(token: request.token, expiresInMs: request.expiresInMs)
+        return await HubWindow.ask(width: 480, until: until) { done in ConfirmSheet(request: request, actionLabel: actionLabel, until: until, done: done) }
     }
 
     /// Plugin permissions window: a list with "why"; "new" only on the increment during an update (the daemon decides).
+    /// It closes by itself when the consent token's lifetime runs out, like a confirmation.
     func consent(_ request: ConsentRequest) async -> Bool {
-        ModalWindow.run(width: 520) { done in ConsentSheet(request: request, done: done) }
+        let until = deadlines.deadline(token: request.token, expiresInMs: request.expiresInMs)
+        return await HubWindow.ask(width: 520, until: until) { done in ConsentSheet(request: request, until: until, done: done) }
     }
 
-    func report(title: String, detail: String) {
-        _ = report(Report(title: title, detail: detail))
+    /// The registry key window: both fingerprints whole, what accepting means; "Don't accept" is the default answer
+    /// (Return, Esc, closing the window, the token's lifetime running out).
+    func registryKey(_ request: RegistryKeyConsent) async -> Bool {
+        let until = deadlines.deadline(token: request.token, expiresInMs: request.expiresInMs)
+        return await HubWindow.ask(width: 540, until: until) { done in RegistryKeySheet(request: request, until: until, done: done) }
+    }
+
+    func report(title: String, detail: String) async {
+        _ = await report(Report(title: title, detail: detail))
     }
 
     /// The hub's own window instead of a system alert: the reason first, then what and where, the advice and the buttons.
-    func report(_ report: Report) -> ReportChoice {
-        let box = ReportChoiceBox()
-        _ = ModalWindow.run(width: 460) { done in
-            ReportSheet(report: report) { choice in
-                box.choice = choice
-                done(true)
-            }
-        }
-        return box.choice
+    /// Esc or closing it is "OK".
+    func report(_ report: Report) async -> ReportChoice {
+        let result: WindowResult<ReportChoice> = await HubWindow.present(width: 460) { answer in ReportSheet(report: report, pick: answer) }
+        return result.value ?? .ok
     }
 }
 
-@MainActor
-final class ReportChoiceBox {
-    var choice = ReportChoice.ok
+/// How loud a confirmation's action is and which button Return presses.
+enum ConfirmStyle {
+    /// A blue action, Return runs it.
+    case regular
+    /// Costs quota or goes to the network: an orange action, no default — a deliberate click.
+    case costly
+    /// Removes or goes back: a red action, Return is "Cancel".
+    case cautious
 }
 
-/// "It didn't work": a badge and the reason as the headline, rows (action, tab, the plugin's facts), the advice, then the
-/// small-print code on the left and the buttons on the right. Esc and Return close it as "OK".
+/// The text typed into a window's field. `refusal` — why the core refused the text the window opened with.
+@MainActor
+final class InputBox: ObservableObject {
+    @Published var text: String
+    private let refusedText: String?
+    private let refusal: String?
+
+    init(text: String = "", refusal: String? = nil) {
+        self.text = text
+        self.refusedText = refusal == nil ? nil : text
+        self.refusal = refusal
+    }
+
+    func problem(maxLength: Int) -> String? { InputCheck.problem(text, maxLength: maxLength, refusedText: refusedText, refusal: refusal) }
+    func canSend(maxLength: Int) -> Bool { InputCheck.canSend(text, maxLength: maxLength, refusedText: refusedText) }
+}
+
+/// The field of an input action inside a hub window: it has the keyboard from the start, the reason a text can't be
+/// sent is under it as the human types, and Return sends (where the window allows a default action).
+struct PromptField: View {
+    @ObservedObject var box: InputBox
+    let spec: OfferInput
+    let submit: () -> Void
+    private let focus = FocusState<Bool>()
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            TextField(spec.placeholder ?? "", text: $box.text)
+                .textFieldStyle(.roundedBorder)
+                .font(.system(size: 13))
+                .focused(focus.projectedValue)
+                .onSubmit(submit)
+                .onAppear { focus.wrappedValue = true }
+            if let p = box.problem(maxLength: spec.maxLength) {
+                Text(p).font(.system(size: 11.5)).foregroundStyle(hexColor(0xFF8A80)).fixedSize(horizontal: false, vertical: true)
+            } else {
+                Text(InputCheck.counter(box.text, maxLength: spec.maxLength) ?? tr("Одна строка, до \(spec.maxLength) символов.", "One line, up to \(spec.maxLength) characters."))
+                    .font(.system(size: 11.5)).foregroundStyle(.white.opacity(0.5)).monospacedDigit()
+            }
+        }
+    }
+}
+
+/// "Do it?": a badge, the question and what changes in one line; then either the parts the shell laid out (`layout`:
+/// what's new, warnings, how it goes) or the core's text as it is, the row the button is on and the cost; the small print
+/// (tag and commit, or a live countdown of how long the confirmation is still valid) on the left, "Cancel" and the action
+/// on the right. The same window asks the shell's own questions (rollback, removing a key, revoking an approval) and,
+/// with `input`, carries the field of an input action.
+struct ConfirmSheet: View {
+    let request: ConfirmRequest
+    let actionLabel: String
+    /// When the core's token stops being valid: the small print counts down to it (the window is closed by the queue).
+    var until: Date? = nil
+    /// nil — by the core's level (`confirm-cost` is costly, anything else regular).
+    var style: ConfirmStyle? = nil
+    /// The badge symbol; nil — by the style.
+    var symbol: String? = nil
+    /// An input action: the window has a field for this text, and the action waits for a text the core would accept.
+    var input: OfferInput? = nil
+    @ObservedObject var box = InputBox()
+    let done: (Bool) -> Void
+    private let orange = hexColor(0xFF9F0A)
+    private let blue = hexColor(0x0A84FF)
+
+    private var kind: ConfirmStyle { style ?? (request.level == .confirmCost ? .costly : .regular) }
+    private var costly: Bool { kind != .regular }
+    private var title: String {
+        request.title ?? (kind == .costly ? tr("Подтвердите: действие тратит квоту или выходит в сеть", "Confirm: this uses quota or the network")
+                                          : tr("Подтвердите действие", "Confirm the action"))
+    }
+    private var details: String? { request.details.flatMap { $0.isEmpty ? nil : $0 } }
+    private var canRun: Bool { input.map { box.canSend(maxLength: $0.maxLength) } ?? true }
+
+    var body: some View {
+        let tint = costly ? orange : hexColor(0x4C9DFF)
+        VStack(alignment: .leading, spacing: 16) {
+            HStack(alignment: .top, spacing: 12) {
+                Image(systemName: symbol ?? (request.layout != nil ? "arrow.down" : (costly ? "exclamationmark" : "questionmark")))
+                    .font(.system(size: 16, weight: .bold)).foregroundStyle(tint)
+                    .frame(width: 34, height: 34)
+                    .background(RoundedRectangle(cornerRadius: 10).fill(tint.opacity(0.16)))
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(title).font(.system(size: 16, weight: .bold)).fixedSize(horizontal: false, vertical: true)
+                    if let sub = request.layout?.subtitle {
+                        Text(sub).font(.system(size: 12.5, design: .monospaced)).foregroundStyle(.white.opacity(0.72))
+                    }
+                }
+                .frame(minHeight: 34, alignment: .center)
+                Spacer(minLength: 0)
+            }
+            if let layout = request.layout {
+                if layout.heading != nil || !layout.points.isEmpty {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text(tr("Что нового", "What's new").uppercased()).font(.system(size: 10.5, weight: .semibold)).kerning(0.6).foregroundStyle(.white.opacity(0.45))
+                        if let h = layout.heading {
+                            Text(h).font(.system(size: 13, weight: .semibold)).fixedSize(horizontal: false, vertical: true)
+                        }
+                        ForEach(Array(layout.points.enumerated()), id: \.offset) { _, point in
+                            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                                Circle().fill(.white.opacity(0.4)).frame(width: 4, height: 4).alignmentGuide(.firstTextBaseline) { $0[.bottom] + 3.5 }
+                                Text(point).font(.system(size: 12.5)).foregroundStyle(.white.opacity(0.86)).fixedSize(horizontal: false, vertical: true)
+                            }
+                        }
+                    }
+                    .padding(.horizontal, 14).padding(.vertical, 12)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(RoundedRectangle(cornerRadius: 14).fill(.white.opacity(0.06)))
+                }
+                ForEach(Array(layout.warnings.enumerated()), id: \.offset) { _, w in
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        Image(systemName: "exclamationmark.triangle.fill").font(.system(size: 11)).foregroundStyle(orange)
+                        Text(w).font(.system(size: 12.5)).fixedSize(horizontal: false, vertical: true)
+                    }
+                    .padding(.horizontal, 14).padding(.vertical, 10)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(RoundedRectangle(cornerRadius: 14).fill(orange.opacity(0.12)))
+                    .overlay(RoundedRectangle(cornerRadius: 14).stroke(orange.opacity(0.4), lineWidth: 0.5))
+                }
+                if let note = layout.note {
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        Image(systemName: "arrow.right").font(.system(size: 11, weight: .bold)).foregroundStyle(hexColor(0x4C9DFF))
+                        Text(note).font(.system(size: 12.5)).foregroundStyle(.white.opacity(0.86)).fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+            } else {
+                Text(request.text).font(.system(size: 12.5)).foregroundStyle(.white.opacity(0.86))
+                    .fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
+                let row = request.extraRow(actionLabel: actionLabel)
+                let cost = request.cost.flatMap { $0.isEmpty ? nil : $0 }
+                if row != nil || cost != nil {
+                    VStack(spacing: 0) {
+                        if let row { line(tr("Кнопка в строке", "Button on the row"), row) }
+                        if row != nil, cost != nil { Rectangle().fill(.white.opacity(0.09)).frame(height: 0.5) }
+                        if let cost { line(tr("Чем обойдётся", "Cost"), cost) }
+                    }
+                    .background(RoundedRectangle(cornerRadius: 14).fill(.white.opacity(0.06)))
+                }
+            }
+            if let input {
+                // Return in the field runs the action only where the window has a default action
+                PromptField(box: box, spec: input) { if kind == .regular, canRun { done(true) } }
+            }
+            HStack(spacing: 8) {
+                if let details {
+                    Text(details).font(.system(size: 10.5, design: .monospaced)).foregroundStyle(.white.opacity(0.38))
+                        .lineLimit(1).truncationMode(.middle).textSelection(.enabled).help(details)
+                } else if let until {
+                    // how long the core still accepts this confirmation; at zero the window closes by itself
+                    TimelineView(CountdownSchedule(end: until)) { ctx in
+                        Text(WindowExpiry.confirmText(until: until, now: ctx.date))
+                            .font(.system(size: 10.5, design: .monospaced)).monospacedDigit()
+                            .foregroundStyle(WindowExpiry.isLast(until: until, now: ctx.date) ? orange : .white.opacity(0.38))
+                            .lineLimit(1)
+                    }
+                }
+                Spacer(minLength: 8)
+                let action = request.button ?? tr("Выполнить", "Run")
+                switch kind {
+                case .regular:
+                    Button(tr("Отмена", "Cancel")) { done(false) }.buttonStyle(CapsuleStyle(height: 32, expand: false))
+                    Button(action) { done(true) }
+                        .buttonStyle(CapsuleStyle(fill: blue, stroke: .clear, height: 32, expand: false))
+                        .keyboardShortcut(.defaultAction)
+                        .disabled(!canRun)
+                case .costly:
+                    Button(tr("Отмена", "Cancel")) { done(false) }.buttonStyle(CapsuleStyle(height: 32, expand: false))
+                    Button(action) { done(true) }
+                        .buttonStyle(CapsuleStyle(fill: orange, stroke: .clear, text: .black, height: 32, expand: false))
+                        .disabled(!canRun)
+                case .cautious:
+                    Button(action) { done(true) }
+                        .buttonStyle(CapsuleStyle(fill: hexColor(0xFF453A, 0.2), stroke: hexColor(0xFF453A, 0.4), text: hexColor(0xFF8A80), height: 32, expand: false))
+                        .disabled(!canRun)
+                    Button(tr("Отмена", "Cancel")) { done(false) }
+                        .buttonStyle(CapsuleStyle(fill: blue, stroke: .clear, height: 32, expand: false))
+                        .keyboardShortcut(.defaultAction)
+                }
+            }
+        }
+        .padding(22)
+    }
+
+    private func line(_ label: String, _ value: String) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 10) {
+            Text(label).foregroundStyle(.white.opacity(0.45)).frame(width: 116, alignment: .leading).fixedSize(horizontal: false, vertical: true)
+            Text(value).fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
+            Spacer(minLength: 0)
+        }
+        .font(.system(size: 12.5))
+        .padding(.horizontal, 14).padding(.vertical, 9)
+    }
+}
+
+/// "It didn't work": a badge and the reason as the headline, rows (action, tab, the plugin's facts), the advice, the
+/// small-print code on a line of its own — whole, wrapped, selectable (it is what gets pasted into a bug report, so it
+/// is never cut) — and the buttons on the right. Esc and Return close it as "OK".
 struct ReportSheet: View {
     let report: Report
-    let pick: (ReportChoice) -> Void
+    /// nil — closed without a choice (the same as "OK").
+    let pick: (ReportChoice?) -> Void
     private let orange = hexColor(0xFF9F0A)
 
     var body: some View {
@@ -172,17 +324,18 @@ struct ReportSheet: View {
                     Text(hint).font(.system(size: 12.5)).fixedSize(horizontal: false, vertical: true)
                 }
             }
+            if let code = report.code, !code.isEmpty {
+                Text(code).font(.system(size: 10.5, design: .monospaced)).foregroundStyle(.white.opacity(0.45))
+                    .fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
             HStack(spacing: 8) {
-                if let code = report.code {
-                    Text(code).font(.system(size: 10.5, design: .monospaced)).foregroundStyle(.white.opacity(0.38))
-                        .lineLimit(1).truncationMode(.middle).textSelection(.enabled).help(code)
-                }
                 Spacer(minLength: 8)
                 if report.canFocus {
-                    Button(tr("Показать вкладку", "Show the tab")) { pick(.focus) }.buttonStyle(CapsuleStyle(height: 32, expand: false))
+                    Button(FocusText.action) { pick(.focus) }.buttonStyle(CapsuleStyle(height: 32, expand: false))
                 }
                 if report.canRetry {
-                    Button(tr("Повторить", "Try again")) { pick(.retry) }.buttonStyle(CapsuleStyle(height: 32, expand: false))
+                    Button(RetryText.button) { pick(.retry) }.buttonStyle(CapsuleStyle(height: 32, expand: false))
                 }
                 Button(tr("Понятно", "OK")) { pick(.ok) }
                     .buttonStyle(CapsuleStyle(fill: hexColor(0x0A84FF), stroke: .clear, height: 32, expand: false))
@@ -193,20 +346,95 @@ struct ReportSheet: View {
     }
 }
 
-/// A modal window with SwiftUI content and the prototype's glass. `done(true/false)` closes it.
+/// The hub's windows: a borderless glass panel with SwiftUI content that floats over everything, takes the keyboard and
+/// brings the app forward — and is **not modal**. The caller awaits the answer:
+///
+///     Button("Remove") { Task { if await HubWindow.confirm(…) { await store.remove(…) } } }
+///
+/// That is the one rule for every window, wherever it is asked from (a button handler, a store action, a menu item):
+/// start a task and await. Nothing here runs a nested event loop, so the main actor is free while a window is open —
+/// the store goes on applying stream events — and a SwiftUI button handler is as good a place to start from as any.
+/// One window is on screen at a time; the next one waits (`WindowQueue`). However a window ends — a button, Esc,
+/// being closed, its deadline, the app quitting (`closeAll`) — the awaiting side is resumed once.
 @MainActor
-enum ModalWindow {
-    static func run<V: View>(width: CGFloat, @ViewBuilder content: (@escaping (Bool) -> Void) -> V) -> Bool {
-        NSApp.activate(ignoringOtherApps: true)
-        var result = false
-        let panel = KeyPanel(contentRect: NSRect(x: 0, y: 0, width: width, height: 200), styleMask: [.borderless], backing: .buffered, defer: false)
-        let finish: (Bool) -> Void = { ok in
-            result = ok
-            NSApp.stopModal()
+enum HubWindow {
+    static let queue = WindowQueue()
+    /// The window on screen now (the snapshot keys draw it).
+    private(set) static var current: NSWindow?
+
+    /// Show `content` and wait for how the window ends. `answer(value)` — the human's answer, `answer(nil)` — cancelled.
+    /// `until` — when the window stops making sense (a token's lifetime): it is closed then, the result is `.expired`.
+    static func present<Value: Sendable, V: View>(width: CGFloat, until: Date? = nil,
+                                                  @ViewBuilder content: @escaping (_ answer: @escaping (Value?) -> Void) -> V) async -> WindowResult<Value> {
+        await queue.present(until: until) { answer in
+            let panel = make(width: width, content: content { answer($0) })
+            // Esc and any other way the window gets closed are "cancelled"
+            panel.onCancel = { answer(nil) }
+            panel.onClose = { answer(nil) }
+            NSApp.activate(ignoringOtherApps: true)
+            panel.makeKeyAndOrderFront(nil)
+            current = panel
+            return {
+                panel.onCancel = nil
+                panel.onClose = nil
+                panel.orderOut(nil)
+                if current === panel { current = nil }
+            }
         }
-        // Esc closes the window as "Cancel" (removal, permissions, install permissions window)
-        panel.onCancel = { finish(false) }
-        let root = content(finish)
+    }
+
+    /// A yes/no window: `done(true)` — agreed. Esc, closing, the deadline and quitting are all "no". The deadline also
+    /// leaves a short notice behind, so the human knows why the window went away; the caller does not wait for it.
+    static func ask<V: View>(width: CGFloat, until: Date? = nil, @ViewBuilder content: @escaping (_ done: @escaping (Bool) -> Void) -> V) async -> Bool {
+        let result: WindowResult<Bool> = await present(width: width, until: until) { answer in content { answer($0) } }
+        if result == .expired { Task { await expiredNotice() } }
+        return result == .answer(true)
+    }
+
+    /// "The request timed out": a refusal-style window that closes by itself after `ExpiryNotice.seconds`.
+    static func expiredNotice() async {
+        let report = ExpiryNotice.report
+        let _: WindowResult<ReportChoice> = await present(width: 460, until: Date().addingTimeInterval(ExpiryNotice.seconds)) { answer in
+            ReportSheet(report: report, pick: answer)
+        }
+    }
+
+    /// The shell's own question in the confirmation window (rollback, removing a key, revoking an approval).
+    static func confirm(title: String, text: String, button: String, style: ConfirmStyle = .regular) async -> Bool {
+        let request = ConfirmRequest(token: "", level: .confirm, text: text, title: title, button: button)
+        return await ask(width: 480) { done in ConfirmSheet(request: request, actionLabel: button, style: style, done: done) }
+    }
+
+    /// The system folder picker, in the same line as the hub's windows and just as non-modal. nil — cancelled.
+    static func chooseFolder(message: String? = nil, startAt: URL? = nil) async -> URL? {
+        let picked: WindowResult<URL> = await queue.present { answer in
+            let panel = NSOpenPanel()
+            panel.canChooseDirectories = true
+            panel.canChooseFiles = false
+            panel.allowsMultipleSelection = false
+            panel.prompt = tr("Выбрать", "Choose")
+            if let message { panel.message = message }
+            if let startAt { panel.directoryURL = startAt }
+            panel.level = .modalPanel
+            NSApp.activate(ignoringOtherApps: true)
+            panel.begin { response in answer(response == .OK ? panel.url : nil) }
+            current = panel
+            return {
+                // already gone when the human answered; still on screen when the app is quitting
+                if panel.isVisible { panel.cancel(nil) }
+                if current === panel { current = nil }
+            }
+        }
+        return picked.value
+    }
+
+    /// The app is quitting: end every window as cancelled, so nobody is left waiting.
+    static func closeAll() { queue.cancelAll() }
+
+    /// The panel itself — the one place a hub window is built (the snapshot keys go through `present` too).
+    static func make<V: View>(width: CGFloat, content: V) -> KeyPanel {
+        let panel = KeyPanel(contentRect: NSRect(x: 0, y: 0, width: width, height: 200), styleMask: [.borderless], backing: .buffered, defer: false)
+        let root = content
             .frame(width: width)
             .environment(\.colorScheme, .dark)
             .background(GlassBackground(tint: hexColor(0x282830, 0.84), radius: 26))
@@ -217,30 +445,46 @@ enum ModalWindow {
         panel.isOpaque = false
         panel.backgroundColor = .clear
         panel.hasShadow = true
+        // over the panel, the popover and other apps' windows, and it stays when the human switches to another app
+        // (to look something up before answering) — an NSPanel would hide then
         panel.level = .modalPanel
+        panel.isFloatingPanel = true
+        panel.hidesOnDeactivate = false
+        panel.isReleasedWhenClosed = false
         panel.isMovableByWindowBackground = true
         panel.center()
-        panel.makeKeyAndOrderFront(nil)
-        NSApp.runModal(for: panel)
-        panel.orderOut(nil)
-        return result
+        return panel
+    }
+
+    /// Size the window to its content again (content that settles after the first frame, before a snapshot).
+    static func refit(_ window: NSWindow) {
+        guard let host = window.contentView else { return }
+        window.setContentSize(host.fittingSize)
     }
 }
 
 /// A borderless window that accepts the keyboard (Esc, Return, text fields). `onCancel` — Esc (`cancelOperation`):
-/// in modal windows it's "Cancel", even if the cancel button has its own Return or the focus is on a checkbox.
+/// in the hub's windows it's "Cancel", even if the cancel button has its own Return or the focus is on a checkbox.
+/// `onClose` — the window was closed by something other than its own buttons.
 final class KeyPanel: NSPanel {
     var onCancel: (() -> Void)?
+    var onClose: (() -> Void)?
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { true }
     override func cancelOperation(_ sender: Any?) {
         if let onCancel { onCancel() } else { super.cancelOperation(sender) }
+    }
+    override func close() {
+        super.close()
+        onClose?()
     }
 }
 
 /// Permissions window: "Install "X"?", signature and sha256, permissions, a warning for community, "Cancel" / "Install".
 struct ConsentSheet: View {
     let request: ConsentRequest
+    /// When the consent token stops being valid: the note counts down to it (the window is closed by the queue).
+    var until: Date? = nil
     let done: (Bool) -> Void
     /// The permissions list was scrolled to the end (or fit entirely): only then can the human agree.
     private let seenStore = State(initialValue: false)
@@ -322,7 +566,15 @@ struct ConsentSheet: View {
                 .accessibilityHidden(seenAll)
                 .allowsHitTesting(false)
             }
-            Text(note).font(.system(size: 11.5)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            if let until {
+                // how long the daemon still accepts this consent; at zero the window closes by itself
+                TimelineView(CountdownSchedule(end: until)) { ctx in
+                    Text(note + " " + WindowExpiry.consentText(until: until, now: ctx.date))
+                        .font(.system(size: 11.5)).monospacedDigit().foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                }
+            } else {
+                Text(note).font(.system(size: 11.5)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            }
             if request.tier == .community {
                 HStack(alignment: .top, spacing: 8) {
                     Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(hexColor(0xFF9F0A))
@@ -366,7 +618,6 @@ struct ConsentSheet: View {
     private var note: String {
         var s = tr("Плагин получит только эти права — хаб не даст ему больше.", "The plugin gets only these permissions — the hub won't grant more.")
         if grows { s += " " + tr("Новых прав: \(request.addedCount) — они отмечены.", "New permissions: \(request.addedCount) — they're marked.") }
-        if let ms = request.expiresInMs { s += " " + tr("Согласие действует \(ms / 1000) с.", "Consent is valid for \(ms / 1000) s.") }
         return s
     }
 }
@@ -395,28 +646,23 @@ struct OwnNoticeBox: View {
 @MainActor
 enum RemoveWindow {
     /// → nil — cancel; otherwise purge.
-    static func ask(title: String, id: String = "") -> Bool? {
+    static func ask(title: String, id: String = "") async -> Bool? {
         let box = PurgeBox()
-        let ok = ModalWindow.run(width: 420) { done in RemoveSheet(title: title, id: id, box: box, done: done) }
+        let ok = await HubWindow.ask(width: 420) { done in RemoveSheet(title: title, id: id, box: box, done: done) }
         return ok ? box.purge : nil
     }
 }
 
 /// Plugin rollback: the catalog version is older than the installed one (the daemon flags an update by the archive sha256, and the registry
-/// may have reissued an old release). "Roll back" is not the default.
+/// may have reissued an old release). "Roll back" is not the default: Return is "Cancel".
 @MainActor
-enum RollbackAlert {
-    static func ask(title: String, from: String, to: String) -> Bool {
-        NSApp.activate(ignoringOtherApps: true)
-        let alert = NSAlert()
-        alert.alertStyle = .warning
-        alert.messageText = tr("Откатить «\(title)» до \(to)?", "Roll \"\(title)\" back to \(to)?")
-        alert.informativeText = tr("Установлена версия \(from), а в каталоге реестра — более старая \(to). Так бывает, когда реестр отзывает выпуск. Плагин будет заменён версией \(to); его данные сохранятся.",
-                                   "Version \(from) is installed, and the registry catalog has an older \(to). This happens when the registry withdraws a release. The plugin will be replaced with \(to); its data is kept.")
-        alert.addButton(withTitle: tr("Откатить", "Roll back")).keyEquivalent = ""
-        let cancel = alert.addButton(withTitle: tr("Отмена", "Cancel"))
-        cancel.keyEquivalent = "\r"
-        return alert.runModal() == .alertFirstButtonReturn
+enum RollbackWindow {
+    static func ask(title: String, from: String, to: String) async -> Bool {
+        await HubWindow.confirm(
+            title: tr("Откатить «\(title)» до \(to)?", "Roll \"\(title)\" back to \(to)?"),
+            text: tr("Установлена версия \(from), а в каталоге реестра — более старая \(to). Так бывает, когда реестр отзывает выпуск. Плагин будет заменён версией \(to); его данные сохранятся.",
+                     "Version \(from) is installed, and the registry catalog has an older \(to). This happens when the registry withdraws a release. The plugin will be replaced with \(to); its data is kept."),
+            button: tr("Откатить", "Roll back"), style: .cautious)
     }
 }
 
@@ -457,8 +703,8 @@ struct RemoveSheet: View {
 /// "Permissions" of an installed plugin: what was granted (view only).
 @MainActor
 enum PermissionsWindow {
-    static func show(title: String, id: String, tier: PluginTier, permissions: [PluginPermission]) {
-        _ = ModalWindow.run(width: 520) { done in
+    static func show(title: String, id: String, tier: PluginTier, permissions: [PluginPermission]) async {
+        _ = await HubWindow.ask(width: 520) { done in
             VStack(alignment: .leading, spacing: 14) {
                 HStack(spacing: 12) {
                     PluginTile(id: id, size: 44, radius: 12)

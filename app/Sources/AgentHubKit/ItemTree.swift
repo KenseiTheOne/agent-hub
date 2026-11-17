@@ -396,3 +396,24 @@ public struct PluginShareChart: Sendable, Hashable {
         parts = kids.enumerated().map { i, n in Part(id: n.id, item: n.item, value: values[i], fraction: values[i] / total) }
     }
 }
+
+// MARK: - details memory
+
+/// Which `details=true` blocks are open, for the app's lifetime: survives page rebuilds and switching pages. The key
+/// carries the plugin id, so two plugins with the same details title at the same depth keep separate state.
+@MainActor
+public enum DetailsMemory {
+    public private(set) static var open: Set<String> = []
+
+    /// The unit separator keeps the three parts apart whatever a title contains.
+    public static func key(plugin: String, depth: Int, title: String) -> String { "\(plugin)\u{1F}\(depth)\u{1F}\(title)" }
+
+    public static func isOpen(plugin: String, depth: Int, title: String) -> Bool {
+        open.contains(key(plugin: plugin, depth: depth, title: title))
+    }
+
+    public static func set(_ isOpen: Bool, plugin: String, depth: Int, title: String) {
+        let k = key(plugin: plugin, depth: depth, title: title)
+        if isOpen { open.insert(k) } else { open.remove(k) }
+    }
+}

@@ -94,6 +94,10 @@ public struct DaemonStarter: Sendable {
         (home as NSString).standardizingPath == (defaultHome as NSString).standardizingPath
     }
 
+    /// The command a human runs to restart the daemon by hand (the live hub only — `agenthub restart` restarts the
+    /// launchd job, and a test directory has none): for the cases where the app cannot do it itself.
+    public var restartCommand: String? { enabled ? "agenthub restart" : nil }
+
     public func start() async -> DaemonStartOutcome {
         guard enabled else { return .skipped }
         // print: is the job loaded (no — code 113 "Could not find service")
@@ -143,10 +147,13 @@ public enum QuitShutdown: Sendable, Equatable {
 
 /// When quitting the app asks the daemon to exit, and when startup brings the daemon up.
 public enum QuitPolicy {
-    /// Keys of diagnostic launches (snapshots, self-checks, icon output). The same list as APP_DIAGNOSTIC_ARGS in
-    /// daemon/lib/peer.mjs: the daemon does not treat such a process as the app for supervision (its exit is not a crash).
+    /// Keys of diagnostic launches (snapshots, self-checks, icon output) — the one list of them in the app: the shell reads
+    /// these keys only through `DiagnosticLaunch` below, and LifecycleTests holds the two together. The same list as
+    /// APP_DIAGNOSTIC_ARGS in daemon/lib/peer.mjs (daemon/test/peer.test.mjs reads this declaration and compares): the
+    /// daemon does not treat such a process as the app for supervision (its exit is not a crash). A new key goes here,
+    /// into `DiagnosticLaunch` and into peer.mjs.
     public static let diagnosticArguments: Set<String> = [
-        "--quit-after-snapshot", "--snapshot-panel", "--snapshot-menubar", "--print-status-item", "--show-popover", "--snapshot-popover", "--snapshot-consent", "--snapshot-report",
+        "--quit-after-snapshot", "--snapshot-panel", "--snapshot-menubar", "--print-status-item", "--show-popover", "--snapshot-popover", "--snapshot-consent", "--snapshot-report", "--snapshot-confirm",
         "--self-test-popover", "--self-test-status-menu",
     ]
 
@@ -170,6 +177,77 @@ public enum QuitPolicy {
     /// Whether to ask for `/shutdown`: class app (or not yet known — the daemon decides) and not a diagnostic launch.
     public static func shouldStopDaemon(peer: PeerInfo?, arguments: [String]) -> Bool {
         !isDiagnostic(arguments: arguments) && peer?.isApp != false
+    }
+}
+
+/// What a diagnostic launch asks for, read from the arguments. The shell's `LaunchOptions` takes these fields instead of
+/// looking the keys up itself, so a key the shell acts on cannot be missing from `QuitPolicy.diagnosticArguments`:
+/// LifecycleTests checks both directions — every listed key is read here, and nothing outside the list is.
+public struct DiagnosticLaunch: Equatable, Sendable {
+    /// `--snapshot-panel <png>`
+    public var snapshotPanel: String?
+    /// `--quit-after-snapshot`
+    public var quitAfterSnapshot: Bool
+    /// `--snapshot-menubar <png>`
+    public var snapshotMenubar: String?
+    /// `--print-status-item`
+    public var printStatusItem: Bool
+    /// `--show-popover`
+    public var showPopover: Bool
+    /// `--snapshot-popover <png>`
+    public var snapshotPopover: String?
+    /// `--snapshot-consent <png>`
+    public var snapshotConsent: String?
+    /// `--snapshot-report <png>`
+    public var snapshotReport: String?
+    /// `--snapshot-confirm <png>`
+    public var snapshotConfirm: String?
+    /// `--self-test-popover` (acted on by the debug build only)
+    public var selfTestPopover: Bool
+    /// `--self-test-status-menu` (acted on by the debug build only)
+    public var selfTestStatusMenu: Bool
+
+    public init(arguments: [String]) {
+        var reader = Reader(arguments: arguments)
+        self.init(&reader)
+    }
+
+    private init(_ r: inout Reader) {
+        snapshotPanel = r.path("--snapshot-panel")
+        quitAfterSnapshot = r.flag("--quit-after-snapshot")
+        snapshotMenubar = r.path("--snapshot-menubar")
+        printStatusItem = r.flag("--print-status-item")
+        showPopover = r.flag("--show-popover")
+        snapshotPopover = r.path("--snapshot-popover")
+        snapshotConsent = r.path("--snapshot-consent")
+        snapshotReport = r.path("--snapshot-report")
+        snapshotConfirm = r.path("--snapshot-confirm")
+        selfTestPopover = r.flag("--self-test-popover")
+        selfTestStatusMenu = r.flag("--self-test-status-menu")
+    }
+
+    /// The keys this reads — exactly `QuitPolicy.diagnosticArguments` (LifecycleTests).
+    public static let keys: Set<String> = {
+        var reader = Reader(arguments: [])
+        _ = DiagnosticLaunch(&reader)
+        return reader.asked
+    }()
+
+    private struct Reader {
+        let arguments: [String]
+        var asked: Set<String> = []
+
+        mutating func flag(_ key: String) -> Bool {
+            asked.insert(key)
+            return arguments.contains(key)
+        }
+
+        /// The file path after the key (`~` expanded); nil — no key or nothing after it.
+        mutating func path(_ key: String) -> String? {
+            asked.insert(key)
+            guard let i = arguments.firstIndex(of: key), i + 1 < arguments.count else { return nil }
+            return (arguments[i + 1] as NSString).expandingTildeInPath
+        }
     }
 }
 

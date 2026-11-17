@@ -304,6 +304,26 @@ public final class HubClient: Sendable {
         }
     }
 
+    /// `POST /registry/key/accept` (app only): without a token the daemon answers with the key window (428,
+    /// `kind: "registry-key"` — both fingerprints), with the token it accepts the key that stands in `config.json` and
+    /// fetches the catalog signed with it. The token is single-use and bound to the registry and the new fingerprint.
+    public func registryKeyAccept(_ registry: String, consentToken: String? = nil) async throws -> RegistryKeyOutcome {
+        var body: [String: JSONValue] = ["registry": .string(registry)]
+        if let consentToken { body["consentToken"] = .string(consentToken) }
+        let r = try await request(.POST, "/registry/key/accept", json: .object(body), timeout: .seconds(120))
+        switch r.status {
+        case 200:
+            let v = try? JSONDecoder().decode(JSONValue.self, from: r.body)
+            return .accepted(fetched: v?["fetched"]?.boolValue ?? true, fetchError: v?["fetchError"]?.stringValue)
+        case 428:
+            do { return .needsConsent(try JSONDecoder().decode(RegistryKeyConsent.self, from: r.body)) } catch {
+                throw HubError.decode("428 without the registry keys")
+            }
+        default:
+            return .denied(status: r.status, code: Self.errorCode(r.body) ?? "http-\(r.status)")
+        }
+    }
+
     // MARK: own plugins from folders (docs/plugins-registry.md "Own sources")
 
     /// `POST /registry/own/request` — a request for an own plugin from a folder (cli or app); only approve installs it.

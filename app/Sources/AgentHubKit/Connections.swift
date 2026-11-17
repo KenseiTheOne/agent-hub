@@ -293,14 +293,14 @@ extension HubStore {
                 ? tr("Подключать сервисы может только закреплённая сборка приложения.", "Only the pinned app build can connect services.") + Self.codeNote(e.code ?? "")
                 : ConnectionsText.error(e.code, title: title, reason: e.reason) ?? "HTTP \(e.status)"
             if let r = e.reason, e.code?.hasPrefix("peer:") != true { detail += " (\(r))" }
-            presenter?.report(title: tr("Подключение не начато", "Couldn't start connecting"), detail: detail)
+            await presenter?.report(title: tr("Подключение не начато", "Couldn't start connecting"), detail: detail)
         } catch let e as HubError {
-            presenter?.report(title: tr("Подключение не начато", "Couldn't start connecting"),
+            await presenter?.report(title: tr("Подключение не начато", "Couldn't start connecting"),
                               detail: e.code?.hasPrefix("peer:") == true
                                   ? tr("Подключать сервисы может только закреплённая сборка приложения.", "Only the pinned app build can connect services.") + Self.codeNote(e.code ?? "")
                                   : ConnectionsText.error(e.code) ?? (e.errorDescription ?? ""))
         } catch {
-            presenter?.report(title: tr("Подключение не начато", "Couldn't start connecting"), detail: (error as? LocalizedError)?.errorDescription ?? String(describing: error))
+            await presenter?.report(title: tr("Подключение не начато", "Couldn't start connecting"), detail: (error as? LocalizedError)?.errorDescription ?? String(describing: error))
         }
         return nil
     }
@@ -310,12 +310,12 @@ extension HubStore {
         do {
             put(try await client.connectionCall(id, op))
         } catch let e as HubError {
-            presenter?.report(title: op == "disconnect" ? tr("Не отключено", "Not disconnected") : tr("Не отменено", "Not cancelled"),
+            await presenter?.report(title: op == "disconnect" ? tr("Не отключено", "Not disconnected") : tr("Не отменено", "Not cancelled"),
                               detail: e.code?.hasPrefix("peer:") == true
                                   ? tr("Это может только закреплённая сборка приложения.", "Only the pinned app build can do this.") + Self.codeNote(e.code ?? "")
                                   : ConnectionsText.error(e.code) ?? (e.errorDescription ?? ""))
         } catch {
-            presenter?.report(title: tr("Нет связи с хабом", "Can't reach the hub"), detail: (error as? LocalizedError)?.errorDescription ?? String(describing: error))
+            await presenter?.report(title: tr("Нет связи с хабом", "Can't reach the hub"), detail: (error as? LocalizedError)?.errorDescription ?? String(describing: error))
         }
     }
 }

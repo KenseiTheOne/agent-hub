@@ -56,6 +56,19 @@ public enum InputCheck {
         }
     }
 
+    /// What to say under a window's field. `refusedText` / `refusal` — the text the core refused (its own pattern, for
+    /// example) and why: shown until the human changes the text. An empty field is just not ready — no red text for it.
+    public static func problem(_ text: String, maxLength: Int, refusedText: String? = nil, refusal: String? = nil) -> String? {
+        if let refusal, text == refusedText { return refusal }
+        guard !text.isEmpty, let c = code(text, maxLength: maxLength) else { return nil }
+        return message(c, maxLength: maxLength)
+    }
+
+    /// Whether a window's field may be sent: the core's checks pass and it is not the very text the core just refused.
+    public static func canSend(_ text: String, maxLength: Int, refusedText: String? = nil) -> Bool {
+        code(text, maxLength: maxLength) == nil && text != refusedText
+    }
+
     /// The character counter under a field: shown only near the limit.
     public static func counter(_ text: String, maxLength: Int) -> String? {
         let n = length(text)
@@ -164,7 +177,7 @@ public struct PluginSecret: Codable, Sendable, Hashable, Identifiable {
         switch state {
         case .set: return tr("задан", "set")
         case .unset: return tr("не задан", "not set")
-        case .denied: return tr("недоступен", "not allowed")
+        case .denied: return tr("нет доступа", "no access")
         case .error: return tr("связка ключей не ответила", "keychain didn't answer")
         case .unavailable: return tr("нет связки ключей", "no keychain")
         case .unknown: return "?"

@@ -63,9 +63,9 @@ import Testing
         #expect(o.primitive == "cmux.focus" && o.args == ["surfaceId": .string("S1"), "workspaceId": .string("W1")])
         // permission label in the consent window
         L10n.shared.lang = .ru
-        #expect(PluginPermission(kind: "effects", what: "session.focus").plainText == "переводить во вкладку сессии")
+        #expect(PluginPermission(kind: "effects", what: "session.focus").plainText == "переходить во вкладку сессии")
         L10n.shared.lang = .en
-        #expect(PluginPermission(kind: "effects", what: "session.focus").plainText == "switch to a session's tab")
+        #expect(PluginPermission(kind: "effects", what: "session.focus").plainText == "go to a session's tab")
         L10n.shared.lang = .ru
     }
 

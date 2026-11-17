@@ -128,7 +128,8 @@ async function makeHub({ terminal = {}, plugin = {} } = {}) {
     entries: (type) => h.journal().trim().split("\n").filter(Boolean).map((l) => JSON.parse(l)).filter((e) => e.type === type),
     hook(entries) {
       const sessions = {};
-      for (const e of entries) sessions[e.sessionId] = { lastBody: "СЕКРЕТ", ...e };
+      // pidStartSeconds: cmux writes the process start time into every entry — the hub types only into a tab bound by it
+      for (const e of entries) sessions[e.sessionId] = { lastBody: "СЕКРЕТ", pidStartSeconds: START, ...e };
       writeFileSync(cmuxFile, JSON.stringify({ version: 1, sessions }));
     },
     // bridge double: the bridge's real runOp over the cmux double
@@ -400,7 +401,7 @@ test("send-text: a trusted plugin with the permission types into a free tab; the
     await ready(h);
     let r = await h.svc.readScreen(PEER, { sessionId: SID });
     assert.equal(r.status, 200, JSON.stringify(r.body));
-    assert.deepEqual(r.body, { ok: true, sessionId: SID, terminal: "cmux", idle: true, foreground: true, promptFound: true, promptEmpty: true, busy: false, ready: true });
+    assert.deepEqual(r.body, { ok: true, sessionId: SID, terminal: "cmux", idle: true, foreground: true, promptFound: true, promptEmpty: true, busy: false, bound: true, ready: true });
     assert.ok(!JSON.stringify(r.body).includes("секретный"), "screen text does not leave the bridge");
     r = await h.svc.sendText(PEER, { sessionId: SID, text: "/model claude-opus-5-5" });
     assert.equal(r.status, 200, JSON.stringify(r.body));
@@ -417,8 +418,8 @@ test("send-text: a trusted plugin with the permission types into a free tab; the
       { ...sent[0], ts: undefined, source: undefined, plugin: "tabs", sessionId: SID, surfaceId: SURF, workspaceId: WS, terminal: "cmux", len: 22, head: "/model", ok: true, error: null },
     );
     assert.match(sent[0].sha, /^[0-9a-f]{12}$/);
-    // sends also go to the audit journal: a flood of bridge-op from screen reads will not push them out
-    assert.equal(h.core.journal.auditTail(50).filter((e) => e.type === "terminal-send").length, 1);
+    // sends stay in the main journal only: the audit journal (one 1 MB generation) is for rare events
+    assert.equal(h.core.journal.auditTail(50).filter((e) => e.type === "terminal-send").length, 0);
     assert.ok(!h.journal().includes("claude-opus-5-5"), "the line is not in the journal");
     assert.ok(!h.journal().includes("секретный"), "the screen is not in the journal");
   } finally {
@@ -635,7 +636,7 @@ test("end to end: a plugin process calls /terminal/* via AGENTHUB_HUB_SOCKET; cu
     procState: (pid) => (pid === FAKE ? { stopped: false, foreground: true } : real.procState(pid)),
   };
   const hookFile = join(plugins, "claude-hook-sessions.json");
-  writeFileSync(hookFile, JSON.stringify({ version: 1, sessions: { [SID]: { sessionId: SID, pid: FAKE, surfaceId: SURF, workspaceId: WS, agentLifecycle: "idle" } } }));
+  writeFileSync(hookFile, JSON.stringify({ version: 1, sessions: { [SID]: { sessionId: SID, pid: FAKE, pidStartSeconds: START, surfaceId: SURF, workspaceId: WS, agentLifecycle: "idle" } } }));
   // plugin: on a go file in its data it calls the hub from its own process and writes the replies to result.json
   const src = `#!/usr/bin/env node
 // <agenthub.title>Вкладки</agenthub.title>

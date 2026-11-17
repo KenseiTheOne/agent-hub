@@ -52,7 +52,7 @@ struct HubUpdatePopoverLine: View {
                               : line.kind == .ready ? tr("Перезапустить хаб в собранную версию сейчас: карточки ответа, если есть, уйдут в терминал", "Restart the hub into the built version now: answer cards, if any, fall back to the terminal")
                               : tr("Собрать новую версию отдельно и перезапустить хаб в неё; при ошибке хаб останется на текущей", "Build the new version separately and restart the hub into it; on error the hub stays on the current one"))
                 } else if line.kind == .failed {
-                    Button(tr("Подробнее", "Details"), action: openSettings).buttonStyle(PillStyle(fill: Color.white.opacity(0.14))).fixedSize()
+                    Button(tr("Подробности", "Details"), action: openSettings).buttonStyle(PillStyle(fill: Color.white.opacity(0.14))).fixedSize()
                 } else if line.kind == .done {
                     Button(tr("Понятно", "OK")) { doneAck.wrappedValue = HubUpdateText.doneKey(info) }
                         .buttonStyle(PillStyle(fill: Color.white.opacity(0.14))).fixedSize()
@@ -137,7 +137,7 @@ struct HubUpdateSettings: View {
             }
             let lines = HubUpdateText.detailLines(info)
             if !lines.isEmpty {
-                DisclosureGroup(isExpanded: detailsOpen.projectedValue) {
+                RowDisclosure(isExpanded: detailsOpen.projectedValue) {
                     VStack(alignment: .leading, spacing: 3) {
                         ForEach(lines, id: \.self) { l in
                             Text(verbatim: l).font(.system(size: 11, design: .monospaced)).foregroundStyle(.white.opacity(0.6))

@@ -138,6 +138,39 @@ export async function terminalInstall({ config, id, ask, out = console.log, isTT
   return r;
 }
 
+// `agenthub plugins trust-key [<registry>]`: the key of a registry in config.json differs from the one the hub accepted
+// (PluginManager.withKeyPins) — the human accepts the new one here, as in the app window (POST /registry/key/accept). Both
+// fingerprints are printed; consent is typing the first 8 characters of the NEW fingerprint, so it is looked at.
+export async function terminalTrustKey({ config, registry = "default", ask, out = console.log, isTTY = Boolean(process.stdin.isTTY && process.stdout.isTTY), sys = null, pid = process.pid, env = process.env }) {
+  await terminalGuard({ config, isTTY, sys, pid, env });
+  const journal = new Journal(config.paths.journal, { maxBytes: config.journal?.maxBytes });
+  const mgr = new PluginManager({ config, journal, estop: () => existsSync(config.paths.estop) });
+  await mgr.init({ cleanTemp: "stale" });
+  const src = mgr.source(registry);
+  if (!src) throw new RegistryError(404, "registry:unknown-registry");
+  const ch = src.keyChanged;
+  if (!ch) throw new RegistryError(409, "registry:key-unchanged", { registry });
+  if (!ch.now) throw new RegistryError(422, "registry:key-format", { registry });
+  const lang = currentLang();
+  out(t(lang, "cli.term.key", { registry, tier: t(lang, src.trust === "official" ? "cli.term.tier.official" : "cli.term.tier.community"), wasId: ch.was.keyId, was: ch.was.fingerprint, nowId: ch.now.keyId, now: ch.now.fingerprint, since: ch.since }));
+  const word = ch.now.fingerprint.slice(0, 8);
+  const answer = String(await ask(t(lang, "cli.term.askKey", { word }))).trim().toLowerCase();
+  if (answer !== word) {
+    journal.write({ type: "registry-key-declined", registry, now: ch.now.fingerprint, via: "terminal" });
+    return { ok: false, registry, declined: true };
+  }
+  const r = mgr.acceptRegistryKey(registry, { confirmed: true, via: "terminal", peer: { pid: process.pid } });
+  // the catalog on disk was signed with the previous key: take the one the new key signs
+  let fetchError = null;
+  try {
+    const f = await mgr.fetchCatalog();
+    fetchError = f.registries.find((x) => x.name === registry)?.error ?? null;
+  } catch (e) {
+    fetchError = e.code || e.message;
+  }
+  return { ...r, fetched: !fetchError, fetchError };
+}
+
 // `agenthub plugins remove <id>`: the same removal as POST /registry/remove (files, lock entry, cache).
 export async function terminalRemove({ config, id, ask, purge = false, out = console.log, isTTY = Boolean(process.stdin.isTTY && process.stdout.isTTY), sys = null, pid = process.pid, env = process.env }) {
   await terminalGuard({ config, isTTY, sys, pid, env });

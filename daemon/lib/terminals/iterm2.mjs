@@ -13,7 +13,7 @@
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { hostOf, ttyOf } from "./_proc.mjs";
+import { hostOf, ttyOfAsync } from "./_proc.mjs";
 import { execError, execOf, LAUNCH_SH, shQuote } from "./_exec.mjs";
 
 export const id = "iterm2";
@@ -87,7 +87,7 @@ export async function focusTty(tty, facts) {
 }
 
 export async function focus(target, facts) {
-  const tty = ttyOf(target.pid, facts);
+  const tty = await ttyOfAsync(target.pid, facts);
   if (!tty) return { ok: false, error: "no-tab" };
   return focusTty(tty, facts);
 }

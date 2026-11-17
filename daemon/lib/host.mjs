@@ -7,7 +7,7 @@
 
 import { existsSync, readdirSync, statSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
-import { readPluginMeta, parseFileName } from "./meta.mjs";
+import { readPluginMeta, parseFileName, splitWhy } from "./meta.mjs";
 import { groupAlive, isAbsolutePath } from "./platform.mjs";
 import { msg } from "./i18n.mjs";
 import { cleanPhrase } from "./output.mjs";
@@ -78,7 +78,7 @@ export function watchPaths(entries, vars, { platform = process.platform, recursi
   const skipped = [];
   const deep = new Set(recursive);
   for (const e of entries || []) {
-    const path0 = String(e).split(/\s+[—–-]{1,2}\s+/)[0].trim();
+    const path0 = splitWhy(e).what;
     const add = (p) => paths.push(deep.has(e) ? { path: p, recursive: true } : p);
     const m = /^\$(?:\{([A-Z][A-Z0-9_]*)\}|([A-Z][A-Z0-9_]*))(.*)$/.exec(path0);
     if (!m) {
@@ -173,11 +173,14 @@ class PluginInstance {
       envFn: () => this.env(reason),
       cwd: this.plugin.dir,
       maxBytes: cfg.maxOutputBytes,
-      onFrame: (text, overflow) => this.core.applyFrame(this.id, text, { overflow }),
+      // through the per-plugin frame-rate limit (core.streamFrame)
+      onFrame: (text, overflow) => this.core.streamFrame(this.id, text, { overflow }),
       onExit: ({ code, signal, error }) => {
         if (!this.stopped && !sp.stopped) this.core.pluginExited(this.id, { code, signal, error });
       },
       onStart: (pid) => this.core.pluginStarted(this.id, pid),
+      // the process group is gone (also after a stop): no longer something the next daemon would have to clean up
+      onGone: (pid) => this.core.streamGone?.(pid),
       // the process doesn't read stdin and over 1 MB waits in the pipe: messages are dropped, the journal hears once (B6)
       onBacklog: () => this.core.stdinBacklog?.(this.id),
     });

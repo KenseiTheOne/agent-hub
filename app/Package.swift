@@ -25,7 +25,7 @@ let package = Package(
                 .product(name: "NIOHTTP1", package: "swift-nio"),
             ]
         ),
-        // UI: MenuBarExtra, panel, NSAlert.
+        // UI: MenuBarExtra, panel, the hub's own windows.
         .executableTarget(
             name: "AgentHub",
             dependencies: ["AgentHubKit"]

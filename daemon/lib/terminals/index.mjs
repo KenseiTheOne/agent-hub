@@ -11,7 +11,12 @@
 //   locate(session, facts)                   → { target } | { error } | null (the session is not in this terminal); session —
 //                                              a registry entry with the pid and startSec of the verified process: the tab must
 //                                              belong to the same process (pid-mismatch). Cheap: called for every /state;
-//     target: { terminal, tab, … }           — tab is a stable key of the tab for rates and the journal; the rest is the adapter's;
+//     target: { terminal, tab, bound?, … }   — tab is a stable key of the tab for rates and the journal; the rest is the adapter's.
+//                                              bound: false — the adapter found the tab in a stored record but could not confirm
+//                                              that the record belongs to this very process (no start time on one side): the tab
+//                                              is shown and can be switched to, but send-text is refused (terminal:binding-unknown).
+//                                              An adapter that derives the tab from the live process itself (its ancestors, its
+//                                              tty) leaves the field out;
 //   idle(target)                             → the session is free according to the terminal — a hint when the registry has no
 //                                              Claude Code status of its own;
 //   running?(target)                         → a turn is running according to the terminal (no such method: the registry status);

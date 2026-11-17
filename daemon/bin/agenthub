@@ -8,6 +8,10 @@
 //                                     are off; resume with the "Resume hub" button in the app or by deleting
 //                                     <AGENTHUB_HOME>/ESTOP (the old command name is `agenthub estop on`)
 //   agenthub lang                     hub language: the setting and the effective one (change it only in the app)
+//   agenthub restart                  restart the hub daemon: the launchd job (launchctl kickstart -k; a job that is not
+//                                     loaded is loaded from ~/Library/LaunchAgents), then wait for the new daemon to answer.
+//                                     Works with a config.json the CLI cannot parse (the file is not read). A test directory
+//                                     (AGENTHUB_HOME) is refused: its daemon is started by hand, launchd runs only the live hub
 //   agenthub pin-app <AgentHub.app> [--dry-run]
 //                                     pin this build: requirements.app = identifier + the build's cdhash (ad hoc
 //                                     signature by default; scripts/bundle.sh calls this itself). The daemon picks it up
@@ -39,6 +43,11 @@
 //                                     also works): a request to the running daemon. The CLI does not install: a human approves
 //                                     the install in the pinned app (consent window); without it, refused
 //   agenthub plugins remove <id> [--purge]
+//   agenthub plugins trust-key [<registry>]
+//                                     the registry's public key in config.json differs from the one the hub accepted
+//                                     (/state.registryKeys): accept the new key. Both fingerprints are shown, consent is
+//                                     typing the start of the new one; TTY only, not from a Claude session. The registry
+//                                     is "default" unless named
 //   agenthub version [--json]         this code's version (the VERSION file) and where it runs from
 //   agenthub hub [status]             the separate hub install (docs/hub-updates.md): current and previous versions
 //   agenthub hub migrate [--apply] [--from <repo>] [--allow-dirty] [--no-launchd] [--under-estop]
@@ -58,9 +67,9 @@
 import { request } from "node:http";
 import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync, openSync, readSync, closeSync } from "node:fs";
 import { dirname, resolve } from "node:path";
-import { execFileSync } from "node:child_process";
-import { defaultHome, loadConfig, pathsFor, readJsonFile, REPO_DIR } from "../lib/config.mjs";
-import { bootstrapJob, hasLaunchd, installPlan, localAppRequirement, plistXml, stateDirs, LABEL } from "../lib/launchd.mjs";
+import { execFileSync, spawnSync } from "node:child_process";
+import { defaultHome, loadConfig, pathsFor, REPO_DIR } from "../lib/config.mjs";
+import { bootstrapJob, hasLaunchd, installPlan, localAppRequirement, plistXml, restartLaunchctl, stateDirs, LABEL } from "../lib/launchd.mjs";
 import { cdhashRequirement, pinFingerprint, requirementSha, writeAppPinPath, writeAppRequirement } from "../lib/app-pin.mjs";
 import { readBundleCode } from "../lib/app-sign.mjs";
 import { parsePublicKey } from "../lib/registry/minisign.mjs";
@@ -76,6 +85,7 @@ import { brewDirOf } from "../lib/hub-update/brew.mjs";
 import { currentLabel, versionPlugins } from "../lib/hub-update/layout.mjs";
 import { LANGS, currentLang, errText, has as hasMsg, msg, setLangSource } from "../lib/i18n.mjs";
 import { writeRiskText } from "../lib/registry/perms.mjs";
+import { updateConfig } from "../lib/statefile.mjs";
 import { langForHome } from "../lib/settings.mjs";
 
 const args = process.argv.slice(2);
@@ -93,9 +103,11 @@ let cliLang = null;
 setLangSource(() => (cliLang ??= LANGS.includes(process.env.AGENTHUB_LANG) ? process.env.AGENTHUB_LANG : langForHome(opt("--home") || defaultHome())));
 
 // A corrupt config.json gives one clear line and exit code 1, not an unhandled exception with a stack.
+// `restart` needs only the paths and must work exactly when config.json cannot be parsed (the daemon then runs with the
+// app class closed, lib/config.mjs failClosed) — it does not read the file.
 let config;
 try {
-  config = loadConfig();
+  config = cmd === "restart" ? { paths: pathsFor(defaultHome()) } : loadConfig();
 } catch (e) {
   console.error(`agenthub: ${e.message}`);
   process.exit(1);
@@ -244,6 +256,93 @@ async function waitHealthy(socket, ms) {
   return false;
 }
 
+// GET /health → the answering daemon's pid, or null (nothing listens, a timeout, not a 200).
+function healthPid(socket) {
+  if (!existsSync(socket)) return Promise.resolve(null);
+  return new Promise((resolve) => {
+    const r = request({ socketPath: socket, path: "/health", agent: false, timeout: 1000 }, (res) => {
+      let s = "";
+      res.setEncoding("utf8");
+      res.on("data", (c) => (s += c));
+      res.on("end", () => {
+        try {
+          const pid = JSON.parse(s).pid;
+          resolve(res.statusCode === 200 && Number.isInteger(pid) ? pid : null);
+        } catch {
+          resolve(null);
+        }
+      });
+    });
+    r.on("error", () => resolve(null));
+    r.on("timeout", () => {
+      r.destroy();
+      resolve(null);
+    });
+    r.end();
+  });
+}
+
+// agenthub restart. The hub daemon is a launchd job, so the supported restart is `launchctl kickstart -k` on it: launchd
+// kills the running instance and starts a new one (the daemon cleans up after a killed predecessor itself — orphan jobs
+// and streamable processes, the stale daemon.lock). A job that is not loaded (after `launchctl bootout`, a failed update)
+// is loaded from the installed plist instead. Then the command waits until a daemon with ANOTHER pid answers /health.
+// Only the live hub has a job: a test directory is refused (launchctl would restart the live hub, not this daemon) unless
+// a launchctl double is given (AGENTHUB_TEST_LAUNCHCTL, tests). A fake HOME without the double is refused too: the job
+// label is per user, not per HOME.
+async function restart() {
+  const home = config.paths.home;
+  const socket = config.paths.socket;
+  const lc = restartLaunchctl(home);
+  if (lc.refuse === "no-launchd") {
+    console.error(msg("cli.restart.noLaunchd", { home }));
+    process.exit(1);
+  }
+  if (!lc.launchctl) {
+    console.error(msg("cli.restart.testHome"));
+    console.error(msg("cli.restart.test", { home, live: LIVE_HOME }));
+    process.exit(1);
+  }
+  const plan = installPlan({ launchctl: lc.launchctl });
+  const was = await healthPid(socket);
+  const run = (argv) => {
+    const r = spawnSync(argv[0], argv.slice(1), { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+    return { status: r.status ?? 1, why: (r.stderr || "").trim() || (r.error ? String(r.error.message) : `exit ${r.status}`) };
+  };
+  const kick = run(plan.kickstart);
+  if (kick.status !== 0) {
+    // the job is not loaded: load it from the installed plist (RunAtLoad starts the daemon)
+    if (!existsSync(plan.target)) {
+      console.error(msg("cli.restart.notLoaded", { label: LABEL, target: plan.target, why: kick.why }));
+      process.exit(1);
+    }
+    const b = await bootstrapJob(plan, { tries: 4 });
+    if (!b.ok) {
+      console.error(msg("cli.restart.kickFailed", { cmd: plan.kickstart.join(" "), why: kick.why }));
+      console.error(msg("cli.hub.ld.bootstrapFailed", { cmd: plan.bootstrap.join(" "), why: b.why, print: plan.print.join(" ") }));
+      process.exit(1);
+    }
+  }
+  const waitMs = parseInt(process.env.AGENTHUB_INSTALL_WAIT_MS || "", 10) || 15_000;
+  const until = Date.now() + waitMs;
+  let pid = null;
+  for (;;) {
+    pid = await healthPid(socket);
+    if (pid && pid !== was) break;
+    if (Date.now() >= until) {
+      console.error(msg("cli.install.noAnswer", { label: LABEL, socket, secs: Math.round(waitMs / 1000), print: plan.print.join(" "), logs: config.paths.logs }));
+      process.exit(1);
+    }
+    await new Promise((r) => setTimeout(r, 200));
+  }
+  console.log(msg("cli.restart.done", { pid, was }));
+  // a daemon that could not read one of its state files says so in /state: the restart worked, the file still needs a human
+  try {
+    const st = await call("GET", "/state");
+    const bad = Array.isArray(st.body?.damagedFiles) ? st.body.damagedFiles.map((d) => d.file) : [];
+    if (bad.length) console.log(msg("cli.restart.damaged", { files: bad.join(", "), home }));
+  } catch {}
+}
+
 // Where to copy the live hub's built-in plugins from: the current version of the separate install, if there is one
 // (docs/hub-updates.md), otherwise, as before, this repository.
 function builtinSource(home) {
@@ -319,20 +418,27 @@ async function install() {
     return;
   }
   if (patchConfig) {
-    let cfg = {};
-    if (existsSync(config.paths.config)) cfg = readJsonFile(config.paths.config);
-    if (req) {
-      cfg.requirements = { ...(cfg.requirements || {}), app: req };
-      // pin details for the daemon journal (app-requirement-changed: who)
-      cfg.appPin = { pinnedAt: new Date().toISOString(), requirementSha: requirementSha(req), by: "agenthub install --app-cert-sha1", under: await pinnerUnder() };
-    }
-    if (pubKey || indexUrl) {
-      cfg.services = cfg.services || {};
-      cfg.services.plugins = { ...(cfg.services.plugins || {}), ...(pubKey ? { publicKey: pubKey } : {}), ...(indexUrl ? { indexUrl } : {}) };
-    }
-    mkdirSync(config.paths.home, { recursive: true, mode: 0o700 });
-    writeFileSync(config.paths.config, JSON.stringify(cfg, null, 2) + "\n", { mode: 0o600 });
+    const under = req ? await pinnerUnder() : null;
+    // read-modify-write under the config lock, atomic (lib/statefile.mjs): the daemon and the updater write this file too
+    updateConfig(config.paths.config, (cfg) => {
+      if (req) {
+        cfg.requirements = { ...(cfg.requirements || {}), app: req };
+        // pin details for the daemon journal (app-requirement-changed: who)
+        cfg.appPin = { pinnedAt: new Date().toISOString(), requirementSha: requirementSha(req), by: "agenthub install --app-cert-sha1", under };
+      }
+      if (pubKey || indexUrl) {
+        cfg.services = cfg.services || {};
+        cfg.services.plugins = { ...(cfg.services.plugins || {}), ...(pubKey ? { publicKey: pubKey } : {}), ...(indexUrl ? { indexUrl } : {}) };
+      }
+    });
     console.log(msg("cli.install.written", { path: config.paths.config }));
+    // the hub already accepted another key for this registry: the one just written waits for a human
+    if (pubKey) {
+      const { acceptedRegistryKey, registryKeyIdentity } = await import("../lib/plugins.mjs");
+      const was = acceptedRegistryKey(config.paths.home);
+      const now = registryKeyIdentity(pubKey);
+      if (was && now && was.fingerprint !== now.fingerprint) console.log(msg("cli.install.keyWaits", { was: was.fingerprint, now: now.fingerprint }));
+    }
   }
   if (!launchd) return;
   // launchd does not create the StandardOutPath/StandardErrorPath directory itself, and without it the job does not start (78).
@@ -619,11 +725,11 @@ async function plugins() {
   const sub = args[1];
   const id = args[2];
   if (sub === "install" && has("--from")) return pluginsFrom(opt("--from"));
-  if (!["install", "remove"].includes(sub) || !id) {
+  if (!(sub === "trust-key" || (["install", "remove"].includes(sub) && id))) {
     console.error(msg("cli.plugins.usage"));
     process.exit(64);
   }
-  const { terminalInstall, terminalRemove } = await import("../lib/registry/terminal.mjs");
+  const { terminalInstall, terminalRemove, terminalTrustKey } = await import("../lib/registry/terminal.mjs");
   // readline only for the duration of the question: otherwise input that arrived before the question would go to the line event past it
   let rl = null;
   const ask = async (q) => {
@@ -636,10 +742,15 @@ async function plugins() {
     }
   };
   try {
-    const r = sub === "install" ? await terminalInstall({ config, id, ask }) : await terminalRemove({ config, id, ask, purge: has("--purge") });
+    const r = sub === "trust-key" ? await terminalTrustKey({ config, registry: id || "default", ask }) : sub === "install" ? await terminalInstall({ config, id, ask }) : await terminalRemove({ config, id, ask, purge: has("--purge") });
     if (r.declined) {
       console.log(msg("cli.plugins.cancelled"));
       process.exit(1);
+    }
+    if (sub === "trust-key") {
+      console.log(msg("cli.plugins.keyAccepted", { registry: r.registry, fingerprint: r.key.fingerprint }));
+      if (!r.fetched) console.log(msg("cli.plugins.keyNoCatalog", { why: r.fetchError }));
+      return;
     }
     console.log(sub === "install" ? msg("cli.plugins.installed", { id: r.id, version: r.version }) : msg("cli.plugins.removed", { id: r.id }));
   } catch (e) {
@@ -700,6 +811,9 @@ switch (cmd) {
     console.log(msg("cli.lang", l));
     break;
   }
+  case "restart":
+    await restart();
+    break;
   case "install":
     await install();
     break;

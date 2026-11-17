@@ -13,7 +13,10 @@
 //   3. the line (send-text): printable ASCII without "\", no leading or trailing space, 1…200 chars (cmux send treats
 //      \n, \r, \t as Enter and Tab — so no backslash at all; the bridge presses Enter itself, as a single key);
 //   4. the session is in the core registry, the Claude Code signature was verified just now and the process start time is the same (pid not reused
-//      by another); the terminal knows the tab, under the same pid and start time; the terminal supports the operation;
+//      by another); the terminal knows the tab, under the same pid and start time; the terminal supports the operation.
+//      send-text needs the binding session → process → tab confirmed, not merely "not contradicted": a start time missing
+//      in the registry, in the verification or in the terminal's record of the tab is 409 terminal:binding-unknown
+//      {part: "process" | "tab"} (read-screen still answers, with bound: false and ready: false);
 //   5. send-text: the Claude Code process isn't stopped (Ctrl+Z) and is in its terminal's foreground group (otherwise the line
 //      would go to the shell); the session is free — per the registry (Claude Code's own status: idle; no status — per the terminal),
 //      whether a turn is running or not, the bridge looks at the screen once more; send rate — per plugin (sendPerMin) and per tab
@@ -24,10 +27,13 @@
 // Journal: every send is terminal-send {plugin, sessionId, surfaceId, workspaceId, terminal, tab, len, sha, head, ok,
 // error} (surfaceId and workspaceId — cmux only, tab — the adapter's tab key): head is the declared slash command at the start of the line (shown in the consent sheet), sha is the first 12 chars of the line's sha256,
 // only together with head (a line sent under "*" isn't hashed: a short one could be brute-forced), otherwise both null. The line
-// itself never reaches the journal, the bus or responses. terminal-send is duplicated to the audit journal (AUDIT_TYPES): the bridge-op stream
-// from read-screen won't push it out. Denials are terminal-denied {plugin, op, sessionId, error}; screen reads are bridge-op.
+// itself never reaches the journal, the bus or responses. terminal-send lives in the main journal only (it is not an audit
+// type: lib/journal.mjs AUDIT_TYPES). Denials are terminal-denied {plugin, op, sessionId, error, part?}: the first of a kind is
+// written at once, repeats within deniedWindowMs are counted and written as one line {…, repeats: N}; screen reads are bridge-op.
+// part — only with terminal:binding-unknown, the same value as in the reply ("process" | "tab"): which half of the binding
+// could not be confirmed.
 //
-// Settings (config.json → services.terminal): requestsPerMin (60), sendPerMin (12), sendPerTabPerMin (4).
+// Settings (config.json → services.terminal): requestsPerMin (60), sendPerMin (12), sendPerTabPerMin (4), deniedWindowMs (60000).
 
 import { createHash } from "node:crypto";
 import { terminalGrants, terminalTextAllowed } from "../registry/perms.mjs";
@@ -43,6 +49,7 @@ const UUID_RE = /^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0
 const EXTERNAL_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 const DEFAULTS = Object.freeze({ requestsPerMin: 60, sendPerMin: 12, sendPerTabPerMin: 4 });
 const MINUTE = 60_000;
+const DENIED_KEYS_MAX = 500;
 
 // Adapter error → HTTP. A denial due to the tab state — 409, an older bridge — 501, a bridge or cmux failure — 502/504.
 const ADAPTER_STATUS = {
@@ -96,17 +103,57 @@ export class TerminalService {
     this.adapters = opts.adapters; // tests: their own set of adapters
     this.requests = new Window();
     this.sends = new Window();
-    this.deniedNoted = new Map(); // plugin → ts: a request-rate denial is logged at most once a minute
+    // Refusals in the journal, collapsed: key → { at, repeats, entry }. A plugin that keeps asking for what it is refused
+    // (every poll of a screen it has no right to read) would otherwise write a line per request.
+    this.denied = new Map();
+    this.deniedWindowMs = Number.isInteger(cfg.deniedWindowMs) && cfg.deniedWindowMs >= 1 ? cfg.deniedWindowMs : MINUTE;
+    this.deniedTimer = null;
   }
 
+  // A refusal: the reply, and the journal line. The first refusal of a kind — (plugin, op, session, reason); for a request-rate
+  // refusal the plugin alone — is written at once. The same one again within the window (a minute) is only counted, and the
+  // count goes out as one line when the window ends: {…the same fields, repeats: N}. part (which half of a session's
+  // binding is unknown) is part of the line and of the kind: the shell reads refusals from the journal, not from the reply.
   deny(pl, op, sessionId, status, code, extra = {}) {
-    if (code === "terminal:rate-limited" && extra.scope === "requests") {
-      const at = this.deniedNoted.get(pl?.id) || 0;
-      if (Date.now() - at < MINUTE) return err(status, code, extra);
-      this.deniedNoted.set(pl?.id, Date.now());
+    const part = typeof extra.part === "string" ? extra.part : null;
+    const entry = { type: "terminal-denied", plugin: pl?.id || null, op, sessionId: sessionId || null, error: code, ...(part ? { part } : {}) };
+    const key = code === "terminal:rate-limited" && extra.scope === "requests" ? `${entry.plugin}\0requests` : [entry.plugin, op, entry.sessionId, code, ...(part ? [part] : [])].join("\0");
+    const now = Date.now();
+    this.flushDenied(now);
+    const seen = this.denied.get(key);
+    if (seen) seen.repeats++;
+    else if (this.denied.size >= DENIED_KEYS_MAX) this.ctx.journal.write(entry); // too many different refusals to track: not collapsed
+    else {
+      this.denied.set(key, { at: now, repeats: 0, entry });
+      this.ctx.journal.write(entry);
+      this.armDeniedTimer();
     }
-    this.ctx.journal.write({ type: "terminal-denied", plugin: pl?.id || null, op, sessionId: sessionId || null, error: code });
     return err(status, code, extra);
+  }
+  // Windows that ended: one counted line for each that had repeats.
+  flushDenied(now = Date.now(), { all = false } = {}) {
+    for (const [key, d] of this.denied) {
+      if (!all && now - d.at < this.deniedWindowMs) continue;
+      this.denied.delete(key);
+      if (d.repeats > 0) this.ctx.journal.write({ ...d.entry, repeats: d.repeats });
+    }
+  }
+  armDeniedTimer() {
+    if (this.deniedTimer) return;
+    this.deniedTimer = setTimeout(() => {
+      this.deniedTimer = null;
+      this.flushDenied();
+      if (this.denied.size) this.armDeniedTimer();
+    }, this.deniedWindowMs + 5);
+    this.deniedTimer.unref?.();
+  }
+  // The service stops: the counts collected so far are written.
+  dispose() {
+    clearTimeout(this.deniedTimer);
+    this.deniedTimer = null;
+    try {
+      this.flushDenied(Date.now(), { all: true });
+    } catch {}
   }
 
   // Steps 1–2 and 4: peer, permission, rate, pause, session, tab. → { pl, grants, s, adapter, target } | { res }
@@ -142,11 +189,19 @@ export class TerminalService {
     } catch {}
     const same = v?.ok && (s.startSec == null || v.startSec == null || v.startSec === s.startSec);
     if (!same) return { res: this.deny(pl, op, sid, 409, "terminal:unverified") };
+    // The session ↔ process half of the binding: the registry entry and the process verified just now are the same process
+    // only when both start times are known and equal. Unknown is not "the same" for typing (the pid may have been reused).
+    const known = Number.isFinite(s.startSec) && Number.isFinite(v.startSec);
+    if (op === "send-text" && !known) return { res: this.deny(pl, op, sid, 409, "terminal:binding-unknown", { part: "process" }) };
     // start time — from the registry or just verified: the adapter will match it against the terminal's record
     const loc = locate({ ...s, startSec: s.startSec ?? v.startSec ?? null }, this.ctx.facts, this.adapters);
     if (loc.error) return { res: this.deny(pl, op, sid, 409, `terminal:${loc.error}`) };
     if (cap && !supports(loc.adapter, cap)) return { res: this.deny(pl, op, sid, 409, "terminal:unsupported", { terminal: loc.adapter.id, capability: cap }) };
-    return { s, adapter: loc.adapter, target: loc.target };
+    // The process ↔ tab half: the adapter could not confirm that its record of the tab belongs to this very process
+    // (target.bound === false, lib/terminals/index.mjs). A line is never typed into a tab the hub is not sure about.
+    const bound = known && loc.target.bound !== false;
+    if (op === "send-text" && !bound) return { res: this.deny(pl, op, sid, 409, "terminal:binding-unknown", { part: "tab", terminal: loc.adapter.id }) };
+    return { s, adapter: loc.adapter, target: loc.target, bound };
   }
 
   // Whether the session is free. The registry status is Claude Code's own status (claude agents, ~/.claude/sessions): idle — free,
@@ -159,11 +214,13 @@ export class TerminalService {
     return q.adapter.idle(q.target);
   }
 
-  // The session process isn't stopped and is in its terminal's foreground group. → true | false | null (can't tell).
-  foreground(pid) {
+  // The session process isn't stopped and is in its terminal's foreground group. → Promise<true | false | null (can't tell)>.
+  // ps runs asynchronously (ctx.peer.procStateAsync): this is a request path.
+  async foreground(pid) {
     let st = null;
     try {
-      st = this.ctx.peer?.procState?.(pid) ?? null;
+      const peer = this.ctx.peer;
+      st = (typeof peer?.procStateAsync === "function" ? await peer.procStateAsync(pid) : peer?.procState?.(pid)) ?? null;
     } catch {}
     if (!st) return null;
     return !st.stopped && st.foreground === true;
@@ -180,7 +237,7 @@ export class TerminalService {
     const r = await q.adapter.readScreen(q.target, this.ctx.facts, { sessionId: q.s.sessionId, lines: body.lines });
     if (!r.ok) return this.deny(p.pl, "read-screen", p.sid, ADAPTER_STATUS[r.error] || 502, `terminal:${r.error}`);
     const idle = this.idle(q);
-    const foreground = this.foreground(q.s.pid) === true;
+    const foreground = (await this.foreground(q.s.pid)) === true;
     return ok({
       sessionId: q.s.sessionId,
       terminal: q.target.terminal,
@@ -189,8 +246,10 @@ export class TerminalService {
       promptFound: r.promptFound,
       promptEmpty: r.promptEmpty,
       busy: r.busy,
+      // the tab is confirmed to belong to this very session process; false — send-text would answer terminal:binding-unknown
+      bound: q.bound,
       // can type right now (send-text will check again anyway)
-      ready: idle && foreground && r.promptFound && r.promptEmpty === true && !r.busy,
+      ready: q.bound && idle && foreground && r.promptFound && r.promptEmpty === true && !r.busy,
     });
   }
 
@@ -208,7 +267,7 @@ export class TerminalService {
     if (q.res) return q.res;
     if (!this.idle(q)) return this.deny(p.pl, "send-text", p.sid, 409, "terminal:session-busy");
     // a stopped (Ctrl+Z) or background process: the screen shows an old input field, and the line would go to the shell
-    const fg = this.foreground(q.s.pid);
+    const fg = await this.foreground(q.s.pid);
     if (fg !== true) return this.deny(p.pl, "send-text", p.sid, 409, fg === false ? "terminal:not-foreground" : "terminal:process-unknown");
     const tab = `${q.target.terminal}:${q.target.tab ?? q.target.surfaceId}`;
     const wPl = this.sends.wait(p.pl.id, this.sendPerMin);
@@ -245,8 +304,9 @@ export async function start(ctx, opts = {}) {
 }
 
 export async function stop(ctx) {
-  for (const [c] of [...running]) {
+  for (const [c, svc] of [...running]) {
     if (ctx && c !== ctx) continue;
+    svc.dispose();
     running.delete(c);
   }
 }

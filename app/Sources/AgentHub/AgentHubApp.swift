@@ -34,12 +34,20 @@ import SwiftUI
 ///   --idle-expanded           the "Can I shut down" card in the popover starts expanded (snapshots)
 ///   --open-tile <plugin id>   the popover starts with that plugin's tile expanded (its detail card; snapshots)
 ///   --snapshot-report <png>   draw the "It didn't work" window with sample content and quit (synthetic; nothing is run)
+///   --snapshot-confirm <png>  draw the "Update the hub?" confirmation with sample content and quit (synthetic); with
+///                             --confirm-sample <cost|input|prompt|rollback|registry-key|expired> another window of the same kind instead:
+///                             a core confirmation with a cost and a live countdown, the same with a text field, the
+///                             text field alone, a plugin rollback, the "accept the new registry key?" window with
+///                             two sample keys (--confirm-cost is the old spelling of `cost`)
 ///   --snapshot-consent <png>  capture the consent window and quit (own window, no screen recording permission): from the
 ///                             first request for an own plugin (`POST /registry/own/approve` without a token installs
 ///                             nothing) or, with --consent-install <id>, from `POST /registry/install` (an update with
 ///                             permission growth); needs the pinned build (class app). The daemon treats such a launch as
 ///                             diagnostic (peer.diagnostic): it installs or changes nothing; without permission growth it
 ///                             is 409 consent:nothing, not an install; a human's window is not reset
+///
+/// The keys that make a launch diagnostic (snapshots, self-checks) are read in one place, `DiagnosticLaunch` in the Kit,
+/// next to their list `QuitPolicy.diagnosticArguments` — this file takes them from there and never spells them in code.
 struct LaunchOptions {
     var openPanel = false
     var section: PanelSection?
@@ -59,34 +67,37 @@ struct LaunchOptions {
     var settingsFocus: String?
     var consentSnapshot: String?
     var reportSnapshot: String?
+    var confirmSnapshot: String?
     var consentInstall: String?
+    var confirmSample: String?
+    var selfTestPopover = false
+    var selfTestStatusMenu = false
     var tooltip: String?
     var reopenPanel = false
 
     static let current: LaunchOptions = {
         let a = CommandLine.arguments
         var o = LaunchOptions()
-        o.openPanel = a.contains("--open-panel")
-        if let i = a.firstIndex(of: "--snapshot-panel"), i + 1 < a.count {
-            o.snapshotPath = (a[i + 1] as NSString).expandingTildeInPath
-            o.openPanel = true
-        }
-        o.quitAfterSnapshot = a.contains("--quit-after-snapshot")
+        let d = DiagnosticLaunch(arguments: a)
+        o.snapshotPath = d.snapshotPanel
+        o.openPanel = a.contains("--open-panel") || d.snapshotPanel != nil
+        o.quitAfterSnapshot = d.quitAfterSnapshot
         o.reopenPanel = a.contains("--reopen-panel")
-        o.showPopover = a.contains("--show-popover")
+        o.popoverSnapshot = d.snapshotPopover
+        o.showPopover = d.showPopover || d.snapshotPopover != nil
         o.demoCards = a.contains("--demo-cards")
         o.demoSessions = a.contains("--demo-sessions")
         if let i = a.firstIndex(of: "--manager-tab"), i + 1 < a.count { o.managerCatalog = a[i + 1] == "catalog" }
-        if let i = a.firstIndex(of: "--snapshot-menubar"), i + 1 < a.count { o.menubarSnapshot = (a[i + 1] as NSString).expandingTildeInPath }
-        o.printStatusItem = a.contains("--print-status-item")
-        if let i = a.firstIndex(of: "--snapshot-popover"), i + 1 < a.count {
-            o.popoverSnapshot = (a[i + 1] as NSString).expandingTildeInPath
-            o.showPopover = true
-        }
+        o.menubarSnapshot = d.snapshotMenubar
+        o.printStatusItem = d.printStatusItem
         o.idleExpanded = a.contains("--idle-expanded")
         if let i = a.firstIndex(of: "--open-tile"), i + 1 < a.count { o.openTile = a[i + 1] }
-        if let i = a.firstIndex(of: "--snapshot-report"), i + 1 < a.count { o.reportSnapshot = (a[i + 1] as NSString).expandingTildeInPath }
-        if let i = a.firstIndex(of: "--snapshot-consent"), i + 1 < a.count { o.consentSnapshot = (a[i + 1] as NSString).expandingTildeInPath }
+        o.confirmSnapshot = d.snapshotConfirm
+        o.reportSnapshot = d.snapshotReport
+        o.consentSnapshot = d.snapshotConsent
+        o.selfTestPopover = d.selfTestPopover
+        o.selfTestStatusMenu = d.selfTestStatusMenu
+        if let i = a.firstIndex(of: "--confirm-sample"), i + 1 < a.count { o.confirmSample = a[i + 1] } else if a.contains("--confirm-cost") { o.confirmSample = "cost" }
         if let i = a.firstIndex(of: "--consent-install"), i + 1 < a.count { o.consentInstall = a[i + 1] }
         if let i = a.firstIndex(of: "--tooltip"), i + 1 < a.count { o.tooltip = a[i + 1] }
         if let i = a.firstIndex(of: "--settings-focus"), i + 1 < a.count, a[i + 1] == "hub-update" { o.settingsFocus = SettingsView.Anchor.hubUpdate }
@@ -133,7 +144,7 @@ final class PanelRouter {
     }
 }
 
-/// Shared app objects: socket client, store, NSAlert, notifications, panel router.
+/// Shared app objects: socket client, store, the hub's windows (presenter), notifications, panel router.
 @MainActor
 final class AppModel {
     static let shared = AppModel()
@@ -195,6 +206,7 @@ final class AppModel {
         if LaunchOptions.current.openPanel { Task { await reportPanelWindow() } }
         if LaunchOptions.current.showPopover { Task { await showPopoverWindow() } }
         if let path = LaunchOptions.current.consentSnapshot { Task { await snapshotConsent(to: path) } }
+        if let path = LaunchOptions.current.confirmSnapshot { Task { await snapshotConfirm(to: path) } }
         if let path = LaunchOptions.current.reportSnapshot { Task { await snapshotReport(to: path) } }
         if let path = LaunchOptions.current.menubarSnapshot { Task { MenuBarSnapshot.write(to: path); NSApp.terminate(nil) } }
         if LaunchOptions.current.printStatusItem { Task { await printStatusItem() } }
@@ -203,10 +215,10 @@ final class AppModel {
         // Popover close self-check (debug build only): click the icon → popover open → Settings from the router →
         // popover closed, panel open → click again → popover open. The clicks happen in-process
         // (performClick on our own button), without the Accessibility permission.
-        if CommandLine.arguments.contains("--self-test-popover") { Task { await selfTestPopover() } }
+        if LaunchOptions.current.selfTestPopover { Task { await selfTestPopover() } }
         // Icon context menu self-check: right click (and ⌃-click) → menu, popover closed → a left click opens the
         // popover again. The clicks are events posted to our own process queue, without the Accessibility permission.
-        if CommandLine.arguments.contains("--self-test-status-menu") { Task { await selfTestStatusMenu() } }
+        if LaunchOptions.current.selfTestStatusMenu { Task { await selfTestStatusMenu() } }
         #endif
     }
 
@@ -383,8 +395,8 @@ final class AppModel {
         }
     }
 
-    /// Consent window snapshot (`--snapshot-consent`): the same ConsentSheet as in the modal dialog, but in a window without
-    /// a modal loop. The window comes from the daemon: to a diagnostic launch it answers only with the window (428) and never
+    /// Consent window snapshot (`--snapshot-consent`): the window the presenter shows, by the same path as for a human.
+    /// The request comes from the daemon: to a diagnostic launch it answers only with the window (428) and never
     /// installs, not even an update without permission growth (then 409 consent:nothing and snapshot-error=no-consent).
     private func snapshotConsent(to path: String) async {
         for _ in 0..<100 where !(store.connection.isLive && store.state != nil) { try? await Task.sleep(for: .milliseconds(100)) }
@@ -401,19 +413,8 @@ final class AppModel {
             NSApp.terminate(nil)
             return
         }
-        let host = NSHostingView(rootView: ConsentSheet(request: req, done: { _ in })
-            .frame(width: 520).environment(\.colorScheme, .dark)
-            .background(GlassBackground(tint: hexColor(0x282830, 0.84), radius: 26)))
-        let w = KeyPanel(contentRect: NSRect(origin: .zero, size: host.fittingSize), styleMask: [.borderless], backing: .buffered, defer: false)
-        w.isOpaque = false
-        w.backgroundColor = .clear
-        w.contentView = host
-        w.setContentSize(host.fittingSize)
-        w.center()
-        w.makeKeyAndOrderFront(nil)
-        try? await Task.sleep(for: .milliseconds(600))
-        w.setContentSize(host.fittingSize)
-        await snapshot(w, to: path, quit: true)
+        // the list settles after the first frame (the "scrolled to the end" mark), so the window is sized again
+        await snapshotWindow(to: path, settle: .milliseconds(600)) { [presenter] in _ = await presenter.consent(req) }
     }
 
     /// `--snapshot-report`: the refusal window with every part filled in — for looking at the layout without a real refusal.
@@ -428,16 +429,76 @@ final class AppModel {
             ],
             hint: tr("Сотрите или отправьте текст во вкладке и нажмите «Повторить».", "Clear or send the text in the tab and press \"Try again\"."),
             code: "prompt-not-empty · 3f0f76ea-b6e4-4e45-97f0-aed028912915", canFocus: true, canRetry: true)
-        let host = NSHostingView(rootView: ReportSheet(report: sample, pick: { _ in })
-            .frame(width: 460).environment(\.colorScheme, .dark)
-            .background(GlassBackground(tint: hexColor(0x282830, 0.84), radius: 26)))
-        let w = KeyPanel(contentRect: NSRect(origin: .zero, size: host.fittingSize), styleMask: [.borderless], backing: .buffered, defer: false)
-        w.isOpaque = false
-        w.backgroundColor = .clear
-        w.contentView = host
-        w.setContentSize(host.fittingSize)
-        w.center()
-        w.makeKeyAndOrderFront(nil)
+        await snapshotWindow(to: path) { [presenter] in _ = await presenter.report(sample) }
+    }
+
+    /// `--snapshot-confirm`: the confirmation window with every part filled in (a hub update), or — `--confirm-sample` —
+    /// another window of the same kind: a core confirmation with a cost and its countdown, the same with a text field,
+    /// the text field alone, a plugin rollback, the "timed out" notice, the registry key window (sample keys: a diagnostic launch is refused
+    /// `POST /registry/key/accept`, so there is no real answer to draw). For looking at the layout without asking
+    /// anything for real.
+    private func snapshotConfirm(to path: String) async {
+        let action = tr("Запустить прогон", "Start a run")
+        let cost = ConfirmRequest(token: "", level: .confirmCost,
+                                  text: tr("Пример окна: «Запустить прогон» для задачи T-1. Ничего не запускается.", "A sample window: \"Start a run\" for task T-1. Nothing is run."),
+                                  cost: tr("тратит квоту Claude", "uses Claude quota"), expiresInMs: 60_000, row: tr("T-1 · починить вход", "T-1 · fix sign-in"))
+        let field = OfferInput(placeholder: tr("Что сделать", "What to do"), maxLength: 80)
+        switch LaunchOptions.current.confirmSample {
+        case "cost":
+            await snapshotWindow(to: path) { [presenter] in _ = await presenter.confirm(cost, actionLabel: action) }
+        case "input":
+            await snapshotWindow(to: path) { [presenter] in
+                _ = await presenter.prompt(InputPrompt(actionLabel: action, input: field, confirm: cost, text: tr("починить вход", "fix sign-in")))
+            }
+        case "prompt":
+            // the text the core has just refused, with its reason under the field
+            await snapshotWindow(to: path) { [presenter] in
+                _ = await presenter.prompt(InputPrompt(actionLabel: action, input: field, text: "T 1", error: InputCheck.message("input:pattern")))
+            }
+        case "expired":
+            await snapshotWindow(to: path) { await HubWindow.expiredNotice() }
+        case "rollback":
+            await snapshotWindow(to: path) { _ = await RollbackWindow.ask(title: tr("Пример", "Sample"), from: "1.4.0", to: "1.3.2") }
+        case "registry-key":
+            // the key window as the daemon's 428 fills it (a diagnostic launch may not ask for the real one: 403 peer:diagnostic)
+            let sample = RegistryKeyConsent(token: "", expiresInMs: 120_000, change: RegistryKeyChange(
+                registry: "default", trust: "official",
+                was: RegistryKeyRef(keyId: "9F3A61C2D05B7E44", fingerprint: "5d1c0a7f3b9e42618ac4f0d27be19a63"),
+                now: RegistryKeyRef(keyId: "C41E08B7A2F6D935", fingerprint: "e8a27b40c96f1d53b07a4e92d1c85f3e"),
+                since: ISO8601DateFormatter().string(from: Date().addingTimeInterval(-900))))
+            await snapshotWindow(to: path) { [presenter] in _ = await presenter.registryKey(sample) }
+        default:
+            var req = ConfirmRequest(token: "", level: .confirm, text: "", title: tr("Обновить хаб до 0.2.0?", "Update the hub to 0.2.0?"), button: tr("Обновить", "Update"),
+                                     details: tr("тег v0.2.0 · коммит 1a2b3c4", "tag v0.2.0 · commit 1a2b3c4"))
+            req.layout = ConfirmLayout(
+                subtitle: "0.1.9 → 0.2.0",
+                heading: tr("Пример окна: ничего не устанавливается", "A sample window: nothing is installed"),
+                points: [tr("Первая строка описания выпуска: что изменилось для человека.", "The first line of the release description: what changed for the human."),
+                         tr("Вторая строка — подлиннее, чтобы было видно, как переносится текст в списке и где встаёт точка.", "The second line is longer, to show how text wraps in the list and where the dot goes."),
+                         tr("Третья строка.", "The third line.")],
+                warnings: [tr("Это смена старшей версии (0.1.9 → 0.2.0).", "This is a major version change (0.1.9 → 0.2.0).")],
+                note: tr("Хаб соберёт версию отдельно (несколько минут), проверит её и перезапустится в неё. При ошибке останется на 0.1.9.",
+                         "The hub builds this version separately (a few minutes), checks it and restarts into it. On error it stays on 0.1.9."))
+            let update = req
+            await snapshotWindow(to: path) { [presenter] in _ = await presenter.confirm(update, actionLabel: action) }
+        }
+    }
+
+    /// Draw a hub window for a snapshot key: `ask` opens it exactly as for a human (the presenter, `HubWindow`), and the
+    /// window that came up on screen is what gets captured — no second way to build one.
+    private func snapshotWindow(to path: String, settle: Duration = .zero, _ ask: @escaping @MainActor () async -> Void) async {
+        Task { await ask() }
+        for _ in 0..<100 where HubWindow.current == nil { try? await Task.sleep(for: .milliseconds(20)) }
+        guard let w = HubWindow.current else {
+            print("snapshot-error=no-window")
+            fflush(stdout)
+            NSApp.terminate(nil)
+            return
+        }
+        if settle > .zero {
+            try? await Task.sleep(for: settle)
+            HubWindow.refit(w)
+        }
         await snapshot(w, to: path, quit: true)
     }
 
@@ -520,6 +581,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// launches (snapshots, self-checks) and an unpinned copy leave the daemon alone.
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         MainActor.assumeIsolated {
+            // a hub window still open is answered "cancelled": whoever awaits it goes on (and stops) instead of hanging
+            HubWindow.closeAll()
             if QuitPolicy.isDiagnostic(arguments: CommandLine.arguments) { return .terminateNow }
             let store = AppModel.shared.store
             // quitting for a hub update (`hub-update.restarting`): no /shutdown needed (the daemon restarts itself, code 75),

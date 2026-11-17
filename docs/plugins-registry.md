@@ -1,7 +1,8 @@
 # Plugin registry and manager (stage 8)
 
 The registry is a separate monorepo, [`agent-hub-plugins`](https://github.com/KenseiTheOne/agent-hub-plugins) (CI, a signed `index.json`). This document
-covers the daemon side: `daemon/lib/plugins.mjs` (the manager), `daemon/lib/services/plugins.mjs` (the service),
+covers the daemon side: `daemon/lib/plugins.mjs` (the manager; its methods are spread over `daemon/lib/plugins/`, one
+file per area — the header of `plugins.mjs` lists them), `daemon/lib/services/plugins.mjs` (the service),
 `daemon/lib/routes/plugins.mjs` (HTTP), `daemon/lib/registry/{minisign,tarball,perms}.mjs` (shared with the registry,
 which keeps byte-for-byte copies of them in `scripts/vendor/`; after editing them here, run
 `node scripts/sync-vendor.mjs` there).
@@ -17,9 +18,17 @@ which keeps byte-for-byte copies of them in `scripts/vendor/`; after editing the
 } } }
 ```
 
-Without `indexUrl` and `publicKey` the catalog is empty (`configured: false`, `missing: ["index-url","public-key"]`).
+**The built-in registry.** A hub whose `services.plugins` has neither `indexUrl` nor `publicKey` (and no entry of
+`registries[]` named `default`) uses the official catalog and the key it is signed with
+(`daemon/lib/registry/default-registry.mjs`), so a fresh install has a catalog without editing files. Either key present
+in the file — even `null` or `""` — is the human's word and switches the built-in registry off, as does
+`"defaultRegistry": false`; then, without `indexUrl` and `publicKey`, the catalog is empty (`configured: false`,
+`missing: ["index-url","public-key"]`). The built-in key is remembered on first use like any other: a hub release that
+carries a different key does not switch by itself, the human is asked to accept it. A test hub (`AGENTHUB_HOME`) gets the
+built-in registry only with `"defaultRegistry": true`.
 The daemon re-reads `services.plugins` from `config.json` when it changes, without a restart (journal
-`registry-config-changed`; if the key changed, the saved catalog is re-verified with the new one). The
+`registry-config-changed`). A changed `publicKey` is the exception: it does **not** take effect by itself — the hub
+keeps verifying with the key it accepted until a human accepts the new one (below, "The registry key is remembered"). The
 `GET /registry/catalog` response carries `connect: {cli, home, defaultHome}` — the full path to the CLI and the hub
 directory: the shell builds the connect command from them
 (`[AGENTHUB_HOME=…] <cli> install --registry-url … --registry-pubkey … --apply --no-launchd`). The catalog is downloaded
@@ -36,6 +45,84 @@ the shell setting "Check for plugin updates" (`PUT /settings/plugin-updates`, ap
 `services.plugins.updateCheck` (`firstDelayMs`, `intervalMs`, `jitterMs`, `backoffMs`; outside test mode at most once an
 hour, at the top end no longer than 90 days; delays longer than the `setTimeout` limit are waited out in parts).
 `indexUrl` may be a path or `file://` (a mirror, tests); network access is `https://` only.
+
+### The registry key is remembered
+
+The key a catalog is verified with is the root of trust for everything installed from that registry, and it sits in
+`config.json` — a file any process of this user can write (`agenthub install --registry-pubkey` does). So the key is
+not re-read as the truth on every use. The hub remembers the key that was in force when the registry was first used
+(`Registry/registry-keys.json`, 0600: registry name → the key, its minisign key id, its fingerprint, when and how it was
+accepted) and from then on verifies with **that** key. The fingerprint is the first 32 hex digits of sha256 over the
+key id and the key bytes; the key id alone is a label its owner chose and anyone can copy.
+
+When `config.json` holds a different key for a registry:
+
+- nothing is demoted: the catalog on disk and whatever the registry still signs with the accepted key keep working —
+  tiers, the blocklist, installs and updates;
+- a catalog signed with the **new** key is refused — `409 registry:key-changed {registry, was, now}` (the two
+  fingerprints) — on fetch and when read from disk, so no update signed by the new key is installed;
+- the change is journaled once per new key (`registry-key-changed {registry, was, now, wasKeyId, nowKeyId}`, also in
+  the audit journal) and stays visible: `/state.registryKeys: [{registry, registryLabel, trust, was: {keyId, fingerprint},
+  now: {keyId, fingerprint} | null, since}]` (`registryLabel` — as in the window below: `null` with only the default
+  registry; `now: null` — what `config.json` holds is not a key at all), the bus event
+  `plugins.registry-keys`, and `GET /registry/catalog → registries[].keyChanged` (`registries[].key` is the accepted
+  key);
+- the new key takes over only after a human accepts it — the same single-use window the hub uses for plugin
+  permissions:
+  - **app:** `POST /registry/key/accept {registry}` → `428 consent-required` with `{kind: "registry-key", needsConsent,
+    token, expiresInMs: 120000, registry, registryLabel, trust, was, now, since}`; the app shows both fingerprints and
+    repeats the request with `consentToken` → `200 {ok, registry, key: {keyId, fingerprint}, fetched, fetchError?}`. The
+    token is bound to the registry, the new fingerprint and the app pid; anything else — `403 consent:invalid`. Other
+    answers: `400 args:registry:required`, `404 registry:unknown-registry`, `409 registry:key-unchanged`,
+    `422 registry:key-format` (not a key), `423 estop`. A diagnostic shell run (`peer.diagnostic`, `--snapshot-consent`)
+    gets the window only, as for `/registry/install`: the same `428` body (or the refusals above), but its token is not
+    recorded — nothing accepts it (`403 consent:invalid`) — the human's open window is not reset, and a diagnostic
+    request that carries a `consentToken` is `403 peer:diagnostic`. The journal line of the window
+    (`registry-key-consent-requested`) has `preview: true` for it;
+  - **terminal:** `agenthub plugins trust-key [<registry>]` (default `default`) prints both fingerprints; consent is
+    typing the first 8 characters of the **new** fingerprint. The same guard as for `plugins install` (a TTY, not under
+    Claude Code — below, "Installing from a terminal");
+- after acceptance the catalog on disk (signed with the previous key) no longer verifies, so a new one is fetched at
+  once (`fetched: false` + `fetchError` when that fails — the catalog is empty until the next successful fetch).
+  Accepting a key does not
+  reset rollback protection: the new key's catalog must not be older than the last accepted one;
+- putting the accepted key back into `config.json` clears the state (`registry-key-restored`).
+
+A registry name seen for the first time is remembered without a window (`registry-key-pinned {registry, keyId,
+fingerprint, by: "first-use"}`, audit): there is nothing to compare with yet — adding a registry is the act of trusting
+its key. `agenthub install --registry-pubkey` over an already accepted key writes the new key to `config.json` and says
+that it waits for `plugins trust-key`.
+
+**What this does not prove.** As with the app pin (`app-pin.json`), a process running as the same user can rewrite
+`Registry/registry-keys.json` as well as `config.json` and the daemon's own code. This is a tripwire with a loud trace
+— an audit line on every first use, every change and every acceptance — not a wall.
+
+Journal: `registry-key-pinned`, `registry-key-changed`, `registry-key-accepted {registry, was, now, via: "app" |
+"terminal", pid}` (these three are audit types), `registry-key-restored`, `registry-key-consent-requested`,
+`registry-key-declined`, `registry-key-pin-error {detail}` (the pin file could not be written).
+
+### Catalog freshness: `expiresAt` and rollback
+
+A signature says who made a catalog, not that it is the current one: an old signed pair replayed by a mirror or put
+back on disk hides a newer release or a blocklist entry. Two checks:
+
+- **Never older than the last accepted one** (per registry, by `generatedAt`, kept in `Registry/state.json`): on fetch —
+  `409 registry:rollback {have, got}`; and for the pair on disk — an older signed `index.json` put back into `Registry/`
+  is not loaded at start or on a re-read (`registry-cache-rejected {error: "registry:rollback"}`; the catalog stays
+  empty or, on a re-read, the newer one in memory stays).
+- **Signed expiry, when the index carries it.** `index.json` may have a top-level `expiresAt` (ISO 8601, next to
+  `generatedAt`, covered by the same signature) — the moment after which the registry owner no longer vouches that this
+  is the current list. A catalog past it is still accepted when it is not older than the one in hand, and still gives
+  tiers and the blocklist (a blocklist must not stop working because a mirror froze), but **nothing is installed or
+  updated from it**: `409 registry:expired {registry, expiresAt}`. Fields: `POST /registry/fetch` →
+  `expiresAt`, `expired`; `GET /registry/catalog → registries[].expiresAt`, `expired`. Journal: `registry-expired
+  {registry, generatedAt, expiresAt}` once per catalog. A value that is not a date — `422 registry:index-expiresAt`.
+- **An index without `expiresAt`** is read as before (the field is optional — hubs older than this ignore it, so adding
+  it needs no format version): the hub journals `registry-no-expiry {registry, generatedAt}` once per registry per
+  start, and only the "not older" check applies — a registry frozen at its latest catalog cannot be told from a quiet
+  one. **For the registry's signing script:** write `"expiresAt": "<ISO 8601 UTC>"` at the top level of `index.json`
+  before signing and re-sign on a schedule shorter than that window (for example a 14-day window re-signed daily or
+  weekly), so that a live registry never serves an expired catalog.
 
 ### Several registries
 
@@ -68,7 +155,7 @@ hour, at the top end no longer than 90 days; delays longer than the `setTimeout`
 - **Blocklists:** a registry's blocklist applies to its own plugins; the blocklist of a registry with trust `official`
   applies to every plugin (and to `Plugins/local`) — the hub's kill switch.
 - **Fields for the shell:** `GET /registry/catalog` → `registries: [{name, trust, label, configured, missing, generatedAt,
-  fetchedAt, plugins, error, tierLabel}]`, `shadowed`; every catalog plugin, installed entry, update item and consent
+  fetchedAt, expiresAt, expired, key, keyChanged, plugins, error, tierLabel}]`, `shadowed`; every catalog plugin, installed entry, update item and consent
   window carries `registry`, `registryLabel` and (except updates) `tierLabel` — e.g. "official plugin · corp" in the hub
   language. `registryLabel` is `null` while only the `default` registry is configured, so a single-registry hub looks
   exactly as before. `/state.plugins[]` of an installed registry plugin — `registry`, `registryLabel`.
@@ -81,7 +168,8 @@ hour, at the top end no longer than 90 days; delays longer than the `setTimeout`
 | `Plugins/local/` | development: "unverified", effects only `open.*` (the core enforces the ceiling) |
 | `plugins.lock` (0600) | `{version:1, plugins:{<id>:{version, sha256, archive, tier, official, installedAt, updatedAt, granted, files, disabled}}}`; an own plugin also has `own: {path}` (the folder realpath), `title`, `i18n`, `tier: "own"`, `archive: null`, and `sha256` is the content fingerprint |
 | `Registry/index.json(.minisig)` | the last accepted catalog (re-verified at startup) |
-| `Registry/state.json` | `generatedAt` of the accepted catalog — rollback protection |
+| `Registry/state.json` | `generatedAt` of the accepted catalog — rollback protection, on fetch and for the pair on disk |
+| `Registry/registry-keys.json` (0600) | `{version:1, registries:{<name>:{key, keyId, fingerprint, acceptedAt, by: "first-use" \| "app" \| "terminal", previous?, changed: {fingerprint, keyId, seenAt} \| null}}}` — the accepted key of every registry (above, "The registry key is remembered") |
 | `Registry/disabled/<id>` | plugins disabled by the blocklist (the core does not see them; removal from the blocklist brings them back) |
 | `Registry/quarantine/<id>-…` | whatever ended up in `Plugins/` bypassing the manager (not in lock, files changed, not a folder) |
 | `Registry/archives/<id>.tar.gz` | the archive of the installed version: the policy uses it to verify that the files on disk are exactly the archive with the sha256 from the index |
@@ -97,7 +185,8 @@ hour, at the top end no longer than 90 days; delays longer than the `setTimeout`
 |---|---|---|
 | `GET /registry/catalog` | app, cli | `{configured, missing, connect, generatedAt, fetchedAt, error, plugins:[{id, version, title, desc, author:{name?, github?}, platforms, tier, official, label, sha256, size, permissions:[{kind,what,why}] (why is in the hub language, from the index i18n), installed, updateAvailable, growth, blocked, builtin, platformOk, icon, contract, needsHub?}]}` — `icon` is the icon from the index (`{symbol, color?}`, an invalid one is `null`), `contract` is the plugin's minimum contract version (1 if not declared), `needsHub: {need, have}` — the plugin needs a newer contract than this hub has: "Requires a newer hub", installation refuses |
 | `GET /registry/installed` | app, cli | `{installed:[{…from lock…, tier, official, removable:true}], local:[{id, version, tier:"local", label:"unverified" (in the hub language: "непроверенный"), effectsCeiling:["open.*"], blocked, permissions}]}` |
-| `POST /registry/fetch` | app | download `index.json` and `.minisig`, verify the signature and rollback → `{ok, generatedAt, plugins, blocklist}` |
+| `POST /registry/fetch` | app | download `index.json` and `.minisig`, verify the signature and rollback → `{ok, generatedAt, expiresAt, expired, plugins, blocklist}` |
+| `POST /registry/key/accept` | app | `{registry}` → `428` with both key fingerprints; `{registry, consentToken}` → the key now in `config.json` becomes the registry's accepted key and the catalog is fetched again (above, "The registry key is remembered"). A diagnostic run gets only the window (`428`), and `403 peer:diagnostic` with a token |
 | `POST /registry/install` | app | `{id, source?}` → `428 consent-required` with a permissions window, or `200` (an update without permission growth); `{id, consentToken}` → `200`. A diagnostic shell run (`peer.diagnostic`, `--snapshot-consent`) gets only the window: `428` or `409 consent:nothing`, it never installs |
 | `POST /registry/remove` | app | `{id, purge?}` — files, the lock entry, `Cache/<id>`; `PluginData/<id>` only with `purge: true` (for an own plugin the source folder is never touched) |
 | `POST /registry/own/request` | app, cli | `{path}` — a request for an own plugin from a folder (below, "Own sources") |
@@ -120,7 +209,9 @@ A new installation always shows the permissions window. An update shows it only 
 the whole line, are parsed the same way); without consent, the old version stays on disk and in lock.
 
 Errors: `registry:no-index-url`, `registry:no-public-key`, `registry:foreign-key` (signed with a different key),
-`registry:signature`, `registry:global-signature`, `registry:rollback`, `registry:no-catalog`, `registry:sha256`,
+`registry:key-changed` (409: signed with the key now in `config.json`, which nobody has accepted yet),
+`registry:signature`, `registry:global-signature`, `registry:rollback`, `registry:expired` (409: the catalog is past
+its signed `expiresAt` — install and update only), `registry:index-expiresAt`, `registry:no-catalog`, `registry:sha256`,
 `registry:archive` (+`detail`), `registry:archive-main`, `registry:archive-version`, `registry:archive-permissions`
 (the permissions in the archive differ from the index), `registry:lint` (+`errors`: the same linter as in CI; official
 status comes from the `tier` of the signed index), `registry:blocklist`, `registry:platform`, `registry:id-taken` (a
@@ -376,15 +467,19 @@ way; only what is signed with the registry key gets installed. The daemon picks 
 directory (up to 60 s) and re-reads the updated catalog from disk itself when checking the tier. Journal:
 `plugin-installed-terminal`, `plugin-consent-declined`.
 
+`agenthub plugins trust-key [<registry>]` — accept a changed registry key from the terminal, under the same guard
+("The registry key is remembered").
+
 Own-source journal: `plugin-own-requested`, `plugin-own-rejected`, `plugin-own-declined`, `plugin-own-updated`,
 `plugin-own-source`, `plugin-own-unexpected`, `plugin-own-risk` (installed from a group-writable folder); bus: `plugins.own-request`, `plugins.own`, `plugins.own-updated`,
 `plugins.own-unexpected`.
 
-Journal: `registry-fetched`, `registry-rejected`, `registry-cache-rejected`, `plugin-consent-requested`,
+Journal: `registry-fetched`, `registry-rejected`, `registry-cache-rejected`, `registry-no-expiry`, `registry-expired`,
+`registry-key-*` (above), `plugin-consent-requested`,
 `plugin-installed`, `plugin-removed-by-user`, `plugin-blocked`, `plugin-unblocked`, `plugin-quarantined`,
 `registry-update-check`, `plugin-update-available`.
 Bus: `plugins.catalog`, `plugins.installed`, `plugins.removed`, `plugins.blocked`, `plugins.quarantined`,
-`plugins.updates`, `plugins.update-available`.
+`plugins.updates`, `plugins.update-available`, `plugins.registry-keys`.
 
 Watching a service file in permissions: `<agenthub.watch>$AGENTHUB_USAGE_FILE — why</agenthub.watch>` — the core
 substitutes the path (only for trusted plugins: `builtin`, `official`, `own`); the permissions window shows the variable name. Adding such a
@@ -423,8 +518,8 @@ and `input=` on `<agenthub.action>`, actions of community plugins, `<agenthub.su
 type="http">`, `<agenthub.watch recursive="true">`. Hub 0.1.2 does not know them. Depending on the attribute it either
 refuses the archive with an opaque error (`type="http"` changes the connection permission →
 `registry:archive-permissions`; community actions → `registry:lint`) or installs the plugin and runs it wrongly (a
-background job killed after 30 s, an input action with no way to get its text, no events, no subdirectories watched,
-confirm-cost instead of `net="none"`).
+background job killed by the action timeout (30 s by default), an input action with no way to get its text, no events,
+no subdirectories watched, confirm-cost instead of `net="none"`).
 
 **What hub 0.1.2 can be made to say.** It ignores unknown fields of an index entry (a `minHub` field would change
 nothing), and it reads `contract` strictly: an integer above 3 → "Requires a newer hub" with the number; anything that is

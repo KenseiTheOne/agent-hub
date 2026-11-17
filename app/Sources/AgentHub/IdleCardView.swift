@@ -136,7 +136,7 @@ struct IdleVerdictCard: View {
         }
     }
 
-    /// How much space the expanded card's rows get: the screen minus the rest of the popover (header, tiles, "Waiting for you", capsules).
+    /// How much space the expanded card's rows get: the screen minus the rest of the popover (header, tiles, "Needs you", capsules).
     static var rowsLimit: CGFloat {
         let screen = NSScreen.main?.visibleFrame.height ?? 800
         return max(140, screen - 560)

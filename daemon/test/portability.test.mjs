@@ -20,12 +20,12 @@ import { cleanup, onlyDarwin, tempHome, withRepoPlist } from "./helpers.mjs";
 const BIN = join(DAEMON_DIR, "bin");
 const BOM = "\uFEFF";
 
-function run(args, env) {
+function run(args, env, { timeout = 15_000 } = {}) {
   // the CLI speaks the hub language, and test mode makes the "system" language ru: these checks read the English CLI
   const e = { ...process.env, AGENTHUB_SERVICES: "none", ...(/[\\/]agenthub$/.test(args[0] || "") ? { AGENTHUB_SYSTEM_LANG: "en" } : {}), ...env };
   delete e.NODE_OPTIONS;
   return new Promise((resolve) => {
-    execFile(process.execPath, args, { env: e, timeout: 15_000 }, (err, stdout, stderr) => resolve({ code: err ? err.code : 0, stdout, stderr }));
+    execFile(process.execPath, args, { env: e, timeout }, (err, stdout, stderr) => resolve({ code: err ? err.code : 0, stdout, stderr }));
   });
 }
 
@@ -99,7 +99,7 @@ test("BOM: config.json and settings.json with a BOM are read (loadConfig, Settin
   }
 });
 
-test("corrupt config.json: agenthub and agenthubd print one line and exit 1, no stack; with a BOM they work", async () => {
+test("corrupt config.json: agenthub prints one line and exits 1, no stack; agenthubd starts on the defaults; with a BOM they work", async () => {
   const home = tempHome("ah-badcfg-");
   try {
     writeFileSync(join(home, "config.json"), "{ не json");
@@ -111,9 +111,11 @@ test("corrupt config.json: agenthub and agenthubd print one line and exit 1, no 
     const cliEn = await run([join(BIN, "agenthub"), "version"], { AGENTHUB_HOME: home });
     assert.equal(cliEn.code, 1, cliEn.stderr);
     assert.match(cliEn.stderr, /^agenthub: config\.json couldn't be parsed: /);
-    const d = await run([join(BIN, "agenthubd")], { AGENTHUB_HOME: home });
-    assert.equal(d.code, 1, d.stderr);
-    assert.match(d.stderr, /^\[agenthubd [^\]]+\] config\.json не разобран: /);
+    // the daemon does not exit on it (launchd would restart it every 10 s forever): it runs on the defaults, names the damaged
+    // file and keeps a copy — test/state-files.test.mjs. Here it is stopped after 3 s.
+    const d = await run([join(BIN, "agenthubd")], { AGENTHUB_HOME: home }, { timeout: 3000 });
+    assert.match(d.stderr, /^\[agenthubd [^\]]+\] WARNING: config\.json is damaged /);
+    assert.ok(existsSync(join(home, "config.json.bad")));
     assert.doesNotMatch(d.stderr, /\n\s+at /, "no stack");
     writeFileSync(join(home, "config.json"), BOM + "{}");
     const ok = await run([join(BIN, "agenthub"), "version"], { AGENTHUB_HOME: home });
@@ -156,7 +158,7 @@ test("install/uninstall without launchd (Linux, Windows): refuse with a --no-lau
   }
 });
 
-test("open.file: only document types open; executables and unknown types are reveal-only; a bundle directory gives bundle", () => {
+test("open.file: only document types open; executables and unknown types are reveal-only; a bundle directory gives bundle", async () => {
   const dir = tempHome("ah-open-");
   try {
     const f = (name, mode = 0o644) => {
@@ -165,17 +167,17 @@ test("open.file: only document types open; executables and unknown types are rev
       chmodSync(p, mode);
       return p;
     };
-    for (const name of ["a.md", "b.pdf", "c.png", "d.json", "e.MOV"]) assert.deepEqual(openFile.verifyFacts({ path: f(name) }), { ok: true }, name);
+    for (const name of ["a.md", "b.pdf", "c.png", "d.json", "e.MOV"]) assert.deepEqual(await openFile.verifyFacts({ path: f(name) }), { ok: true }, name);
     // on macOS `open` runs or mounts these, and they were missing from the old deny list
     for (const name of ["a.pyw", "b.jnlp", "c.afploc", "d.smbloc", "e.term", "f.wflow", "g.zip", "noext", "h.command", "i.webloc"]) {
-      assert.deepEqual(openFile.verifyFacts({ path: f(name) }), { ok: false, reason: "risky-type" }, name);
-      assert.deepEqual(openFile.verifyFacts({ path: join(dir, name), reveal: true }), { ok: true }, `${name}: reveal is allowed`);
+      assert.deepEqual(await openFile.verifyFacts({ path: f(name) }), { ok: false, reason: "risky-type" }, name);
+      assert.deepEqual(await openFile.verifyFacts({ path: join(dir, name), reveal: true }), { ok: true }, `${name}: reveal is allowed`);
     }
-    assert.deepEqual(openFile.verifyFacts({ path: f("run.md", 0o755) }), { ok: false, reason: "executable" });
+    assert.deepEqual(await openFile.verifyFacts({ path: f("run.md", 0o755) }), { ok: false, reason: "executable" });
     mkdirSync(join(dir, "X.xpc"));
     mkdirSync(join(dir, "plain"));
-    assert.deepEqual(openFile.verifyFacts({ path: join(dir, "X.xpc") }), { ok: false, reason: "bundle" });
-    assert.deepEqual(openFile.verifyFacts({ path: join(dir, "plain") }), { ok: true });
+    assert.deepEqual(await openFile.verifyFacts({ path: join(dir, "X.xpc") }), { ok: false, reason: "bundle" });
+    assert.deepEqual(await openFile.verifyFacts({ path: join(dir, "plain") }), { ok: true });
   } finally {
     cleanup(dir);
   }
@@ -190,7 +192,7 @@ test("open.file run: the type is rechecked via realpath; a symlink swapped after
     symlinkSync(join(dir, "doc.md"), link);
     const calls = [];
     const ctx = { exec: async (file, argv) => (calls.push([file, ...argv]), { code: 0 }) };
-    assert.deepEqual(openFile.verifyFacts({ path: link }), { ok: true });
+    assert.deepEqual(await openFile.verifyFacts({ path: link }), { ok: true });
     assert.deepEqual(await openFile.run({ path: link }, ctx), { ok: true, code: 0 });
     assert.equal(calls.length, 1);
     assert.equal(calls[0].at(-1), join(dir, "doc.md"), "open receives the realpath");
@@ -234,29 +236,29 @@ test("open.file: a directory with an extension (.sparsebundle, .playground) is r
   try {
     for (const name of ["Disk.sparsebundle", "P.playground", "Tool.swiftpm"]) {
       mkdirSync(join(dir, name));
-      assert.deepEqual(openFile.verifyFacts({ path: join(dir, name) }), { ok: false, reason: "bundle" }, name);
-      assert.deepEqual(openFile.verifyFacts({ path: join(dir, name), reveal: true }), { ok: true }, name);
+      assert.deepEqual(await openFile.verifyFacts({ path: join(dir, name) }), { ok: false, reason: "bundle" }, name);
+      assert.deepEqual(await openFile.verifyFacts({ path: join(dir, name), reveal: true }), { ok: true }, name);
     }
     // a directory without an extension but with the package flag (kHasBundle) in FinderInfo
     mkdirSync(join(dir, "pkg"));
     xattr("-wx", "com.apple.FinderInfo", hex("2000"), join(dir, "pkg"));
-    assert.deepEqual(openFile.verifyFacts({ path: join(dir, "pkg") }), { ok: false, reason: "bundle" });
+    assert.deepEqual(await openFile.verifyFacts({ path: join(dir, "pkg") }), { ok: false, reason: "bundle" });
     // a Finder alias under a document name: bookmark data "book\0\0\0\0mark" …
     writeFileSync(join(dir, "alias.txt"), Buffer.concat([Buffer.from("book\0\0\0\0mark", "latin1"), Buffer.alloc(64)]));
-    assert.deepEqual(openFile.verifyFacts({ path: join(dir, "alias.txt") }), { ok: false, reason: "alias" });
+    assert.deepEqual(await openFile.verifyFacts({ path: join(dir, "alias.txt") }), { ok: false, reason: "alias" });
     // … and the kIsAlias flag with any data
     writeFileSync(join(dir, "flag.md"), "x");
     xattr("-wx", "com.apple.FinderInfo", hex("8000", "616C69734D414353"), join(dir, "flag.md"));
-    assert.deepEqual(openFile.verifyFacts({ path: join(dir, "flag.md") }), { ok: false, reason: "alias" });
+    assert.deepEqual(await openFile.verifyFacts({ path: join(dir, "flag.md") }), { ok: false, reason: "alias" });
     // a custom app for the file
     writeFileSync(join(dir, "doc.txt"), "x");
     xattr("-w", "com.apple.LaunchServices.OpenWith", "x", join(dir, "doc.txt"));
-    assert.deepEqual(openFile.verifyFacts({ path: join(dir, "doc.txt") }), { ok: false, reason: "open-with" });
-    assert.deepEqual(openFile.verifyFacts({ path: join(dir, "doc.txt"), reveal: true }), { ok: true });
+    assert.deepEqual(await openFile.verifyFacts({ path: join(dir, "doc.txt") }), { ok: false, reason: "open-with" });
+    assert.deepEqual(await openFile.verifyFacts({ path: join(dir, "doc.txt"), reveal: true }), { ok: true });
     // a regular document with harmless FinderInfo (a color label) opens
     writeFileSync(join(dir, "ok.md"), "x");
     xattr("-wx", "com.apple.FinderInfo", hex("000C"), join(dir, "ok.md"));
-    assert.deepEqual(openFile.verifyFacts({ path: join(dir, "ok.md") }), { ok: true });
+    assert.deepEqual(await openFile.verifyFacts({ path: join(dir, "ok.md") }), { ok: true });
     // run() checks the same thing: open is not called
     const calls = [];
     const ctx = { exec: async (file, argv) => (calls.push([file, ...argv]), { code: 0 }) };

@@ -6,7 +6,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { DAEMON_DIR, REPO_DIR, pathsFor, standardPath } from "./config.mjs";
-import { liveStateDir, myUid } from "./platform.mjs";
+import { accountHome, liveStateDir, myUid, samePath } from "./platform.mjs";
 import { msg } from "./i18n.mjs";
 
 export const LABEL = "com.kensei.agenthub";
@@ -159,8 +159,21 @@ export function installPlan({ uid = myUid(), home = homedir(), launchctl = proce
     target,
     bootstrap: [launchctl, "bootstrap", `gui/${uid}`, target],
     bootout: [launchctl, "bootout", `gui/${uid}/${LABEL}`],
+    // restart the running job (agenthub restart): -k kills the running instance first
+    kickstart: [launchctl, "kickstart", "-k", `gui/${uid}/${LABEL}`],
     print: [launchctl, "print", `gui/${uid}/${LABEL}`],
   };
+}
+
+// Which launchctl `agenthub restart` may run for the daemon of the state directory `home`. The job label is one per user,
+// so the real launchctl is allowed only for the directory that job's daemon uses — the live one by $HOME AND by the
+// account's real home (HOME=/tmp/x must not send a kickstart to the user's live hub). A test directory gets launchctl only
+// as a double (AGENTHUB_TEST_LAUNCHCTL). → { launchctl } | { refuse: "no-launchd" | "test-home" }
+export function restartLaunchctl(home, { env = process.env, platform = process.platform, userHome = homedir(), account = accountHome() } = {}) {
+  if (!hasLaunchd(platform, env)) return { refuse: "no-launchd" };
+  if (env.AGENTHUB_TEST_LAUNCHCTL) return { launchctl: env.AGENTHUB_TEST_LAUNCHCTL };
+  const live = samePath(home, liveStateDir({ env, home: userHome, platform })) && (!account || samePath(home, liveStateDir({ env, home: account, platform })));
+  return live ? { launchctl: "/bin/launchctl" } : { refuse: "test-home" };
 }
 
 // `launchctl bootstrap` right after `bootout`: bootout returns before launchd has finished removing the job, and a

@@ -235,7 +235,7 @@ function builtinRoutes(core) {
         const v = body?.enabled;
         if (typeof v !== "boolean") return { status: 400, body: { error: "args:enabled:type" } };
         core.setCheckHubUpdates(v, peer);
-        return { status: 200, body: { checkHubUpdates: core.hubUpdatesSetting(), hubUpdate: core.facts.get("hub.update") ?? null } };
+        return { status: 200, body: { checkHubUpdates: core.hubUpdatesSetting(), hubUpdate: core.statePart("hubUpdate") } };
       },
     },
     {
@@ -248,7 +248,7 @@ function builtinRoutes(core) {
         const v = body?.enabled;
         if (typeof v !== "boolean") return { status: 400, body: { error: "args:enabled:type" } };
         core.setCheckPluginUpdates(v, peer);
-        return { status: 200, body: { checkPluginUpdates: core.pluginUpdatesSetting(), pluginUpdates: core.facts.get("plugins.updates") ?? null } };
+        return { status: 200, body: { checkPluginUpdates: core.pluginUpdatesSetting(), pluginUpdates: core.statePart("pluginUpdates") } };
       },
     },
     {
@@ -386,6 +386,8 @@ function sse(core, req, res, peer, { maxBuffer = SSE_MAX_BUFFER, maxStallMs = SS
 export function denyCode(peer) {
   if (peer.class === "foreign") return "peer:uid";
   if (peer.reason === "peer:no-claude-ancestor") return peer.reason;
+  // a process that runs the bridge script but is not taken for the bridge (lib/peer.mjs bridgeCandidate): say why
+  if (typeof peer.reason === "string" && peer.reason.startsWith("peer:bridge-")) return peer.reason;
   return `peer:${peer.class}`;
 }
 
@@ -440,6 +442,9 @@ export function addExtensionRoutes(core, routes, name, mod) {
 }
 
 // Prepares the 0700 directory and removes a stale socket. A live foreign socket is an error.
+// Between "nobody answers" and the unlink another starting daemon could have bound the socket — and would lose it here. The
+// daemon rules that out before it gets this far: it holds <home>/daemon.lock (lib/instance.mjs, bin/agenthubd), so only one
+// process per home ever reaches this function.
 // On Windows (named pipe) there are no file modes: the directory is created, access to the pipe is decided by its ACL.
 async function prepareSocket(path, home) {
   mkdirSync(home, { recursive: true, mode: 0o700 });
@@ -538,7 +543,7 @@ export async function startServer(core) {
         return json(res, 403, { error: peer.reason, peer: peer.class });
       }
       if (!route.peers.includes(peer.class)) {
-        core.journal.write({ type: "denied", route: `${route.method} ${route.path}`, peer: peer.class, pid: peer.pid, error: denyCode(peer) });
+        core.journal.write({ type: "denied", route: `${route.method} ${route.path}`, peer: peer.class, pid: peer.pid, error: denyCode(peer), ...(peer.detail ? { detail: peer.detail } : {}) });
         return json(res, 403, { error: denyCode(peer), peer: peer.class });
       }
       // A diagnostic shell launch (snapshots, self-checks — peer.diagnostic) only reads: any process with the pinned

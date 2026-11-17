@@ -343,9 +343,9 @@ test("hub language change: a plugins.updates event with the title in the new lan
     const last = () => h.core.recent.filter((e) => e.type === "plugins.updates").at(-1)?.pluginUpdates?.items?.[0]?.title;
     assert.equal(last(), "Hello");
     assert.equal((await h.call("PUT", "/settings/lang", { lang: "en" })).status, 200);
-    await waitFor(() => last() === "Hi", { timeoutMs: 2000 });
+    await waitFor(() => last() === "Hi", { timeoutMs: 15_000 });
     assert.equal((await h.call("PUT", "/settings/lang", { lang: "ru" })).status, 200);
-    await waitFor(() => last() === "Hello", { timeoutMs: 2000 });
+    await waitFor(() => last() === "Hello", { timeoutMs: 15_000 });
   } finally {
     await h?.stop();
     cleanup(home);

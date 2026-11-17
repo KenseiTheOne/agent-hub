@@ -57,7 +57,9 @@ import Testing
         #expect(bare.rows == [Report.Row(label: "Действие", value: "X")])
         #expect(bare.hint == nil && bare.code == "код выхода 2" && !bare.canFocus && !bare.canRetry)
         #expect(Explain.report(result: .object(["reason": .string("zzz")]), label: "X").title == "Плагин отказал")
-        #expect(Explain.report(result: .object(["timedOut": .bool(true)]), label: "X").title.contains("30 с"))
+        // the time limit is the hub's own setting: the figure is how long this run took, never a hard-coded "30 s"
+        #expect(Explain.report(result: .object(["timedOut": .bool(true), "durationMs": .number(45_020)]), label: "X").title == "Команда не уложилась в 45 с и остановлена")
+        #expect(Explain.report(result: .object(["timedOut": .bool(true)]), label: "X").title == "Команда не уложилась в отведённое время и остановлена")
     }
 
     @MainActor @Test func tryAgainInTheRefusalWindowRunsTheActionOnceMore() async throws {

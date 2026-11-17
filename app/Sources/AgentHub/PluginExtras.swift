@@ -223,29 +223,27 @@ struct PluginSecretsCard: View {
 
     private func enter(_ s: PluginSecret) {
         let plugin = store.plugin(pluginId)?.title ?? pluginId
-        var value = ""
-        let ok = ModalWindow.run(width: 460) { done in
-            SecretEntrySheet(plugin: plugin, secret: s, done: { v in value = v ?? ""; done(v != nil) })
+        Task {
+            let typed: WindowResult<String> = await HubWindow.present(width: 460) { answer in
+                SecretEntrySheet(plugin: plugin, secret: s, done: answer)
+            }
+            guard let value = typed.value, !value.isEmpty else { return }
+            await store.writeSecret(plugin: pluginId, key: s.key, value: value)
         }
-        guard ok, !value.isEmpty else { return }
-        Task { await store.writeSecret(plugin: pluginId, key: s.key, value: value) }
     }
 
     private func remove(_ s: PluginSecret) {
-        NSApp.activate(ignoringOtherApps: true)
-        let alert = NSAlert()
-        alert.alertStyle = .warning
-        alert.messageText = tr("Удалить ключ \(s.key)?", "Remove the key \(s.key)?")
-        alert.informativeText = tr("Запись удалится из связки ключей macOS, плагин перезапустится без неё.",
-                                   "The entry is removed from the macOS keychain, and the plugin restarts without it.")
-        alert.addButton(withTitle: tr("Удалить", "Remove"))
-        let cancel = alert.addButton(withTitle: tr("Отмена", "Cancel"))
-        cancel.keyEquivalent = "\u{1b}"
-        alert.buttons.first?.keyEquivalent = ""
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
-        Task { await store.writeSecret(plugin: pluginId, key: s.key, value: nil) }
+        Task {
+            guard await HubWindow.confirm(
+                title: tr("Удалить ключ \(s.key)?", "Remove the key \(s.key)?"),
+                text: tr("Запись удалится из связки ключей macOS, плагин перезапустится без неё.",
+                         "The entry is removed from the macOS keychain, and the plugin restarts without it."),
+                button: tr("Удалить", "Remove"), style: .cautious) else { return }
+            await store.writeSecret(plugin: pluginId, key: s.key, value: nil)
+        }
     }
 }
+
 
 /// "Set key…": a secure field with the documented restrictions checked as you type. `done(nil)` — cancelled.
 struct SecretEntrySheet: View {
@@ -383,23 +381,21 @@ struct ExtensionsSection: View {
     }
 
     private func review(_ item: ExtensionItem, consent: String?) {
-        let ok = ModalWindow.run(width: 520) { done in ExtensionApprovalSheet(item: item, consent: consent, done: done) }
-        guard ok else { return }
-        Task { await store.approveExtension(item) }
+        Task {
+            guard await HubWindow.ask(width: 520, content: { done in ExtensionApprovalSheet(item: item, consent: consent, done: done) }) else { return }
+            await store.approveExtension(item)
+        }
     }
 
     private func revoke(_ item: ExtensionItem) {
-        NSApp.activate(ignoringOtherApps: true)
-        let alert = NSAlert()
-        alert.alertStyle = .warning
-        alert.messageText = tr("Отозвать одобрение \(item.path)?", "Revoke the approval of \(item.path)?")
-        alert.informativeText = tr("Со следующего запуска хаб его не загрузит; уже загруженный код работает до перезапуска хаба.",
-                                   "The hub won't load it from the next start; code already loaded keeps running until the hub restarts.")
-        alert.addButton(withTitle: tr("Отозвать", "Revoke"))
-        let cancel = alert.addButton(withTitle: tr("Отмена", "Cancel"))
-        cancel.keyEquivalent = "\u{1b}"
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
-        Task { await store.revokeExtension(item) }
+        Task {
+            guard await HubWindow.confirm(
+                title: tr("Отозвать одобрение \(item.path)?", "Revoke the approval of \(item.path)?"),
+                text: tr("Со следующего запуска хаб его не загрузит; уже загруженный код работает до перезапуска хаба.",
+                         "The hub won't load it from the next start; code already loaded keeps running until the hub restarts."),
+                button: tr("Отозвать", "Revoke")) else { return }
+            await store.revokeExtension(item)
+        }
     }
 }
 

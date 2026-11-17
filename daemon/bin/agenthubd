@@ -4,7 +4,9 @@
 
 import { existsSync } from "node:fs";
 import { defaultHome, loadConfig } from "../lib/config.mjs";
-import { setLangSource } from "../lib/i18n.mjs";
+import { msg, setLangSource } from "../lib/i18n.mjs";
+import { claimHome } from "../lib/instance.mjs";
+import { transportPath } from "../lib/platform.mjs";
 import { langForHome } from "../lib/settings.mjs";
 import { Core } from "../lib/core.mjs";
 import { createPeer } from "../lib/peer.mjs";
@@ -36,21 +38,34 @@ if (process.argv.includes("--self-test")) {
 // AGENTHUB_LANG (the builder passes the hub language) or English.
 setLangSource(() => (process.env.AGENTHUB_LANG === "ru" || process.env.AGENTHUB_LANG === "en" ? process.env.AGENTHUB_LANG : langForHome(defaultHome())));
 
-// A corrupted config.json — one log line and code 1, not the stack of an unhandled exception (launchd restarts
-// a crashed daemon, and the stack would repeat in the log on every round).
-let config;
+function log(text) {
+  process.stderr.write(`[agenthubd ${new Date().toISOString()}] ${text}\n`);
+}
+
+// One daemon per state directory (lib/instance.mjs): claimed before anything in it is read or written. A second daemon would
+// otherwise take the live one's background jobs for orphans and kill them, rewrite jobs.json and "finish" a hub update that is
+// still running. It exits with code 1 and one line; nothing in the directory is touched.
+const home = defaultHome();
+let instance;
 try {
-  config = loadConfig();
+  instance = await claimHome(home);
 } catch (e) {
-  process.stderr.write(`[agenthubd ${new Date().toISOString()}] ${e.message}\n`);
+  log(`startup failed: ${e.message}`);
   process.exit(1);
 }
+if (!instance.ok) {
+  log(instance.reason === "socket" ? msg("err.socket.busy", { path: transportPath(home) }) : msg("err.instance.busy", { pid: instance.pid ?? "?", home }));
+  process.exit(1);
+}
+process.on("exit", () => instance.release());
+
+// A config.json that cannot be parsed does not stop the daemon (launchd would restart it every 10 s forever, with nothing in
+// the journal): it starts on the defaults, keeps a copy of the file (config.json.bad) and reports it in the journal and in
+// /state.damagedFiles (lib/config.mjs loadConfig tolerant).
+const config = loadConfig({ tolerant: true });
 const peer = createPeer({ config });
 const core = new Core({ config, peer });
-
-function log(msg) {
-  process.stderr.write(`[agenthubd ${new Date().toISOString()}] ${msg}\n`);
-}
+for (const d of config.damagedFiles || []) log(`WARNING: ${d.file} is damaged (${d.detail}) — running on the defaults${d.backup ? `, a copy is kept as ${d.backup}` : ""}`);
 
 if (!loadNative()) log("WARNING: no peercred addon (scripts/build-native.sh) — every client counts as cli");
 if (!existsSync(config.builtinPluginsDir)) log(`WARNING: no built-in plugins directory ${config.builtinPluginsDir} — restore the copy: agenthub builtin update`);
@@ -106,6 +121,10 @@ process.on("uncaughtException", (e) => {
   // one that ignores it is killed by the next daemon from <home>/jobs.json
   try {
     core.killJobsSync("SIGTERM");
+  } catch {}
+  // streamable plugin processes too (their own groups as well); the next daemon stops the rest from <home>/streams.json
+  try {
+    core.killStreamsSync("SIGTERM");
   } catch {}
   process.exit(1);
 });

@@ -8,6 +8,7 @@ import { basename } from "node:path";
 import { execFileSync } from "node:child_process";
 import { loadNative } from "./native.mjs";
 import { parseMsg as msg } from "./messages/parse.mjs";
+import { splitWhy } from "./registry/perms.mjs";
 
 export const XATTR_NAME = "com.kensei.agenthub.meta";
 export const LEVELS = ["immediate", "confirm", "confirm-cost"];
@@ -571,11 +572,10 @@ export function parseMetaText(text) {
   return { meta, warnings };
 }
 
-// Entries of the form "what — why": separate the object from the explanation.
-export function splitWhy(entry) {
-  const m = /^(.*?)\s+[—–-]{1,2}\s+(.*)$/.exec(entry);
-  return m ? { what: m[1].trim(), why: m[2].trim() } : { what: entry.trim(), why: null };
-}
+// Entries of the form "what — why": separate the object from the explanation. The one implementation lives in
+// lib/registry/perms.mjs (that module is self-contained: the plugin registry copies it); everything else imports it from
+// here or from there.
+export { splitWhy };
 
 const HEAD_BYTES = 64 * 1024;
 

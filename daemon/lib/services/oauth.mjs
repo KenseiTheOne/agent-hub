@@ -65,12 +65,13 @@
 // endpoints) and <id>.api (the loopback origin every declared API host is sent to), <id>.port (a fixed redirect port).
 
 import { createHash } from "node:crypto";
-import { mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
+import { writeFileAtomic } from "../statefile.mjs";
 import { authorizeUrl, discover, exchangeCode, normalizeHttpRequest, OAuthError, pkcePair, proxyFetch, randomState, refreshAccess, registerClient, startLoopback, staticMeta, urlAllowed } from "../oauth.mjs";
 import { McpError, McpSession, retryAfterMs } from "../mcp-client.mjs";
 import { VERSION } from "../version.mjs";
-import { CONNECTION_ID_RE } from "../meta.mjs";
+import { CONNECTION_ID_RE, splitWhy } from "../meta.mjs";
 
 export const name = "oauth";
 export const ENV_SOCKET = "AGENTHUB_HUB_SOCKET";
@@ -226,10 +227,8 @@ class Connector {
   savePersist() {
     try {
       mkdirSync(this.ctx.config.paths.pluginCache, { recursive: true, mode: 0o700 });
-      const tmp = `${this.file}.tmp`;
       // who declared it and what it was called — to show an "orphaned" login after the plugin is removed (no tokens)
-      writeFileSync(tmp, JSON.stringify({ ...this.persist, plugin: this.def.plugin, title: this.def.title }), { mode: 0o600 });
-      renameSync(tmp, this.file);
+      writeFileAtomic(this.file, JSON.stringify({ ...this.persist, plugin: this.def.plugin, title: this.def.title }), { mode: 0o600 });
     } catch {}
   }
   setState(state, { error, reason } = {}) {
@@ -777,7 +776,7 @@ class Connector {
       return { status: st, body: { error: rq.error, ...(rq.header ? { header: rq.header } : {}), ...(rq.key ? { key: rq.key } : {}) } };
     }
     // the plugin's own network permission covers the host it asks for (the core checked it at declaration; checked again here)
-    const net = (plugin.net || []).map((e) => String(e).split(/\s+[—–-]{1,2}\s+/)[0].trim().toLowerCase());
+    const net = (plugin.net || []).map((e) => splitWhy(e).what.toLowerCase());
     if (!net.includes(rq.host)) return { status: 403, body: { error: "http:net-not-declared" } };
     const read = rq.method === "GET" || rq.method === "HEAD";
     const key = `${plugin.id}|${rq.method}|${rq.host}|${rq.path}|${stable(rq.query)}|${stable(rq.headers)}${read ? "" : `|${createHash("sha256").update(rq.body || "").digest("hex").slice(0, 16)}`}`;
@@ -1118,7 +1117,7 @@ export function pluginAllowed(pl, conn) {
   if (!pl) return "mcp:not-a-plugin";
   if (!pl.trusted) return "mcp:untrusted";
   if (pl.id !== conn.def.plugin) return "mcp:not-owner";
-  const hosts = (pl.net || []).map((e) => String(e).split(/\s+[—–-]{1,2}\s+/)[0].trim().toLowerCase());
+  const hosts = (pl.net || []).map((e) => splitWhy(e).what.toLowerCase());
   // the real service host (not a test-mode double): this is the permission the plugin agreed to at install
   if (!conn.def.hosts.some((h) => hosts.includes(h.toLowerCase()))) return "mcp:net-not-declared";
   return null;
@@ -1127,8 +1126,9 @@ export function pluginAllowed(pl, conn) {
 export async function start(ctx, opts = {}) {
   const svc = new Service(ctx, opts);
   running.set(ctx, svc);
-  ctx.facts.provide("oauth.connections", () => svc.list());
   ctx.facts.provide("oauth.api", () => svc);
+  // /state.connections — connections to external services (docs/api.md "Connections"): state without tokens
+  ctx.provideState("connections", () => svc.list());
   // For plugins — the path to the hub socket (not a secret): this is how a trusted plugin calls POST /connections/:id/mcp.
   ctx.providePluginEnv(ENV_SOCKET, ctx.config.paths.socket);
   // Storage is provided by the secrets service — it starts later (alphabetically): we read the keychain once all services have started.

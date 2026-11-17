@@ -11,7 +11,7 @@
 //
 // platform — a parameter for tests (process.platform by default).
 
-import { execFile, execFileSync, spawn } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { closeSync, lstatSync, openSync, readFileSync, readSync, realpathSync } from "node:fs";
 import { homedir, userInfo } from "node:os";
 import { dirname, isAbsolute, join, posix, resolve, sep, win32 } from "node:path";
@@ -190,17 +190,23 @@ export function killTree(child, signal = "SIGKILL", { platform = PLATFORM } = {}
   }
 }
 
-// Process descendants (children, grandchildren, …) from the ps table: `ps -A -o pid=,ppid=`. psOutput — for tests. Windows — [].
-export function descendantPids(pid, { platform = PLATFORM, psOutput = null } = {}) {
-  if (isWindows(platform) || !Number.isInteger(pid) || pid <= 0) return [];
-  let text = psOutput;
-  if (text === null) {
+// The process table as "pid ppid" lines (`ps -A -o pid=,ppid=`), read without blocking the event loop.
+// → Promise<text | ""> (no ps, failed); never rejects.
+export function readPsTable() {
+  return new Promise((resolve) => {
     try {
-      text = execFileSync("/bin/ps", ["-A", "-o", "pid=,ppid="], { encoding: "utf8", timeout: 5000, stdio: ["ignore", "pipe", "ignore"] });
+      execFile("/bin/ps", ["-A", "-o", "pid=,ppid="], { encoding: "utf8", timeout: 5000 }, (e, out) => resolve(e ? "" : String(out || "")));
     } catch {
-      return [];
+      resolve("");
     }
-  }
+  });
+}
+
+// Process descendants (children, grandchildren, …) from the ps table text (readPsTable; psOutput — "pid ppid" lines).
+// Windows — [].
+export function descendantPids(pid, { platform = PLATFORM, psOutput = "" } = {}) {
+  if (isWindows(platform) || !Number.isInteger(pid) || pid <= 0) return [];
+  const text = psOutput ?? "";
   const kids = new Map();
   for (const line of String(text).split("\n")) {
     const m = /^\s*(\d+)\s+(\d+)\s*$/.exec(line);
@@ -226,8 +232,10 @@ export function descendantPids(pid, { platform = PLATFORM, psOutput = null } = {
 // Kill a process with all descendants WITHOUT moving it into its own process group: the hub build (git, swift) stays in
 // the parent's group — Ctrl-C from the installer's terminal and launchd on daemon exit reach it as before — and on
 // timeout it's removed as a whole: descendants are found from the ps table (snapshotted before the first signal, while
-// "parent — child" links are intact). Windows — taskkill /T. → how many processes got the signal.
-export function killProcessTree(pid, signal = "SIGKILL", { platform = PLATFORM, psOutput = null, kill = process.kill.bind(process) } = {}) {
+// "parent — child" links are intact). Windows — taskkill /T. The table is read asynchronously (the callers are timeout
+// handlers of the daemon and of the builder: a ps run must not stop the event loop); psOutput — the table for tests.
+// → Promise<how many processes got the signal>; never rejects.
+export async function killProcessTree(pid, signal = "SIGKILL", { platform = PLATFORM, psOutput = null, kill = process.kill.bind(process) } = {}) {
   if (!Number.isInteger(pid) || pid <= 0) return 0;
   if (isWindows(platform)) {
     try {
@@ -237,8 +245,9 @@ export function killProcessTree(pid, signal = "SIGKILL", { platform = PLATFORM, 
       return 0;
     }
   }
+  const table = psOutput === null ? await readPsTable() : psOutput;
   let n = 0;
-  for (const p of [pid, ...descendantPids(pid, { platform, psOutput })]) {
+  for (const p of [pid, ...descendantPids(pid, { platform, psOutput: table })]) {
     try {
       kill(p, signal);
       n++;
@@ -259,10 +268,10 @@ export function openCommand(target, { reveal = false, platform = PLATFORM } = {}
 //               `open` would open the target — be it a .app or a .command;
 //   open-with — the file has its own assigned program (xattr com.apple.LaunchServices.OpenWith);
 //   bundle    — the directory has the kHasBundle flag (0x2000): LaunchServices treats it as a package.
-// → null | reason. Attributes couldn't be read — throws (the caller refuses). On other OSes — null (Windows has
-// its own check — docs/windows.md, A3b).
+// → Promise<null | reason>. Attributes couldn't be read — rejects (the caller refuses). On other OSes — null (Windows has
+// its own check — docs/windows.md, A3b). xattr runs asynchronously: this is the request path of an action.
 const ALIAS_MAGIC = Buffer.from("book\0\0\0\0mark", "latin1");
-export function launchRedirect(real, { isDir = false, platform = PLATFORM, xattr = "/usr/bin/xattr" } = {}) {
+export async function launchRedirect(real, { isDir = false, platform = PLATFORM, xattr = "/usr/bin/xattr" } = {}) {
   if (platform !== "darwin") return null;
   if (!isDir) {
     let head = Buffer.alloc(0);
@@ -275,11 +284,11 @@ export function launchRedirect(real, { isDir = false, platform = PLATFORM, xattr
     }
     if (head.equals(ALIAS_MAGIC)) return "alias";
   }
-  const opts = { encoding: "utf8", timeout: 5000, stdio: ["ignore", "pipe", "ignore"] };
-  const names = new Set(execFileSync(xattr, [real], opts).split("\n").map((l) => l.trim()).filter(Boolean));
+  const run = (args) => new Promise((resolve, reject) => execFile(xattr, args, { encoding: "utf8", timeout: 5000 }, (e, out) => (e ? reject(e) : resolve(String(out || "")))));
+  const names = new Set((await run([real])).split("\n").map((l) => l.trim()).filter(Boolean));
   if (!isDir && names.has("com.apple.LaunchServices.OpenWith")) return "open-with";
   if (names.has("com.apple.FinderInfo")) {
-    const hex = execFileSync(xattr, ["-px", "com.apple.FinderInfo", real], opts).replace(/\s+/g, "");
+    const hex = (await run(["-px", "com.apple.FinderInfo", real])).replace(/\s+/g, "");
     const flags = parseInt(hex.slice(16, 20), 16) || 0; // bytes 8–9: finderFlags (for both files and directories)
     if (!isDir && flags & 0x8000) return "alias";
     if (isDir && flags & 0x2000) return "bundle";
@@ -301,6 +310,14 @@ export function osInfoCommands({ platform = PLATFORM } = {}) {
 // Process table without the peercred addon: ps (POSIX). null — the platform doesn't provide it (Windows).
 export function psCommand({ platform = PLATFORM } = {}) {
   return isWindows(platform) ? null : "/bin/ps";
+}
+
+// When a process started, as text that stays the same for the life of the process (lib/instance.mjs: is the pid in the
+// daemon lock still the same process?). → [file, ...args]; the output is compared as a string.
+export function processStartCommand(pid, { platform = PLATFORM } = {}) {
+  const n = Number(pid);
+  if (isWindows(platform)) return ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", `(Get-Process -Id ${n}).StartTime.ToFileTimeUtc()`];
+  return ["/bin/ps", "-o", "lstart=", "-p", String(n)];
 }
 
 // Listing with ACLs (`ls -le`): who else can write to an own plugin's folder (lib/registry/own-source.mjs). null — the

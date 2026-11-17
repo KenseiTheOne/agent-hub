@@ -242,6 +242,45 @@ public enum HubUpdateText {
         return (tr("Обновить хаб до \(a.version)?", "Update the hub to \(a.version)?"), parts.joined(separator: "\n\n"), details, tr("Обновить", "Update"))
     }
 
+    /// The same confirmation by parts for the shell's window: "now → new", what's new as a list (the tag message: the
+    /// subject and up to `maxPoints` body lines without their list marks), warnings apart, then how the update goes.
+    public static func installLayout(_ info: HubUpdateInfo, maxPoints: Int = 6, lineLength: Int = 220) -> ConfirmLayout? {
+        guard let a = info.available else { return nil }
+        let cur = currentDisplay(info)
+        func cut(_ s: String) -> String { s.count > lineLength ? String(s.prefix(lineLength - 1)) + "…" : s }
+        var layout = ConfirmLayout(subtitle: "\(cur) → \(a.version)")
+        if let n = releaseNotes(a.notes, version: a.version) {
+            layout.heading = cut(n.subject)
+            let body = (n.body ?? "").split(separator: "\n", omittingEmptySubsequences: true)
+                .map { $0.trimmingCharacters(in: .whitespaces) }
+                .map { l in ["- ", "* ", "• ", "– ", "— "].first(where: l.hasPrefix).map { String(l.dropFirst($0.count)) } ?? l }
+                .filter { !$0.isEmpty }
+            layout.points = body.prefix(maxPoints).map(cut)
+            if body.count > maxPoints { layout.points.append(tr("и ещё \(body.count - maxPoints)", "and \(body.count - maxPoints) more")) }
+        }
+        if let m = a.moved {
+            layout.warnings.append(tr("Тег перенесли с коммита \(m.old.prefix(7)) на \(m.new.prefix(7)) после того, как хаб его видел. Ставьте, только если перенос сделали вы.",
+                                      "The tag was moved from commit \(m.old.prefix(7)) to \(m.new.prefix(7)) after the hub saw it. Install only if you moved it."))
+        }
+        if majorJump(from: currentLabel(info), to: a.version) {
+            layout.warnings.append(tr("Это смена старшей версии (\(currentLabel(info)) → \(a.version)).", "This is a major version change (\(currentLabel(info)) → \(a.version))."))
+        }
+        let brew = a.brew == true || info.isBrew
+        layout.note = brew
+            ? tr("Хаб соберёт версию из пакета Homebrew отдельно (несколько минут), проверит её и перезапустится в неё. При ошибке останется на \(cur).",
+                 "The hub builds this version from the Homebrew package separately (a few minutes), checks it and restarts into it. On error it stays on \(cur).")
+            : tr("Хаб соберёт версию отдельно (несколько минут), проверит её и перезапустится в неё. При ошибке останется на \(cur).",
+                 "The hub builds this version separately (a few minutes), checks it and restarts into it. On error it stays on \(cur).")
+        return layout
+    }
+
+    /// The rollback confirmation by parts: "now → previous" and how it goes.
+    public static func rollbackLayout(_ info: HubUpdateInfo) -> ConfirmLayout? {
+        guard let p = info.previous?.label, previousButton(info) != nil else { return nil }
+        return ConfirmLayout(subtitle: "\(currentDisplay(info)) → \(displayLabel(p))",
+                             note: tr("Эта версия уже собрана: перезапуск займёт несколько секунд.", "This version is already built: the restart takes a few seconds."))
+    }
+
     /// Confirmation of a rollback to the previous version. nil — nowhere to go.
     public static func rollbackConfirm(_ info: HubUpdateInfo) -> (title: String, text: String, details: String?, button: String)? {
         guard let p = info.previous?.label, let title = previousButton(info) else { return nil }

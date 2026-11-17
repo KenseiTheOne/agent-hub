@@ -312,8 +312,24 @@ test("SessionEnd removes cards and interactivity; the next request → {}", asyn
     assert.deepEqual((await p).json, {});
     assert.equal(h.st().interactive.has(SID), false);
     assert.equal(h.core.sessions.get(SID), null);
-    assert.deepEqual((await h.hook(bash())).json, {});
+    // the Claude process is still there (terminal, session file), but its session is over: {} right away, with no card
+    // and no lazy registration (which is for a daemon restart only) — not a card that hangs until waitMs
+    const r = await h.hook(bash());
+    assert.deepEqual(r.json, {});
+    assert.ok(r.ms < 10_000, `answered right away, not after waitMs (${r.ms} ms)`);
     assert.equal(h.st().cards.size, 0);
+    assert.equal(h.st().interactive.has(SID), false);
+    const types = () => h.journal().trim().split("\n").map((l) => JSON.parse(l));
+    assert.equal(types().filter((e) => e.type === "hook-card").length, 1, "the request after SessionEnd made no card");
+    assert.ok(types().some((e) => e.type === "hook-skip" && e.reason === "session-ended"));
+    assert.ok(!types().some((e) => e.type === "hook-session" && e.source === "lazy"));
+    // an explicit SessionStart brings the same session back
+    await h.start();
+    const p2 = h.hook(bash());
+    const c2 = await pendingCard(h);
+    assert.equal(c2.sessionId, SID);
+    assert.equal((await h.respond({ requestId: c2.requestId, decision: "once" })).status, 200);
+    assert.equal((await p2).json.hookSpecificOutput.decision.behavior, "allow");
   } finally {
     await h.stop();
   }

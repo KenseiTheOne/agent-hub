@@ -125,12 +125,20 @@ export function curl(sock, method, path, body) {
   });
 }
 
-export async function waitFor(fn, { timeoutMs = 5000, stepMs = 50 } = {}) {
-  const until = Date.now() + timeoutMs;
+// Polls fn until it returns a truthy value (which is returned). On timeout the error says what was awaited: `label` if
+// given, otherwise the predicate's source; plus the elapsed time and the last (falsy) value the predicate returned.
+// The limit is not what a test measures: a wait returns as soon as its condition holds, so the default leaves a loaded
+// machine room (a 5 s default had waits passing at 3–5 s); a test that checks a duration measures it itself.
+export async function waitFor(fn, { timeoutMs = 15_000, stepMs = 50, label = null } = {}) {
+  const t0 = Date.now();
+  const until = t0 + timeoutMs;
   for (;;) {
     const v = await fn();
     if (v) return v;
-    if (Date.now() > until) throw new Error("waitFor: timeout");
+    if (Date.now() > until) {
+      const what = label || String(fn).replace(/\s+/g, " ").slice(0, 300);
+      throw new Error(`waitFor: timeout after ${Date.now() - t0} ms (limit ${timeoutMs}) waiting for: ${what}; last value: ${String(v)}`);
+    }
     await new Promise((r) => setTimeout(r, stepMs));
   }
 }

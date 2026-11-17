@@ -45,9 +45,12 @@ export function sanitize(entry) {
 // Entries that a flood of others must not push out (hub pause, build pin change): they are duplicated to
 // <journal>-audit.jsonl (journal-audit.jsonl next to the journal; its own rotation, 1 MB). A flood of plugin warnings
 // can push anything out of journal.jsonl and .1, but only these types are written here.
-// terminal-send and bridge-op-late (contract 3): every line sent to a tab, and every bridge reply that arrived after
-// the daemon stopped waiting; typing is rate-limited (sendPerMin), so a flood of screen reads cannot push them out.
-export const AUDIT_TYPES = new Set(["estop", "estop-set", "app-requirement-changed", "app-pin-path-changed", "shutdown-requested", "app-restart-stopped", "hub-update-cli", "hub-update-tag-moved", "terminal-send", "bridge-op-late"]);
+// Only rare events belong here: the file is one 1 MB generation, and a routine type would turn it into a second journal
+// that holds a few hours. So terminal-send (every line a plugin types into a tab — up to sendPerMin a minute) is NOT an
+// audit type: it stays in the main journal. bridge-op-late (contract 3) is: a bridge reply that arrived after the daemon
+// stopped waiting is an anomaly, not a routine. registry-key-* are the trust root of a plugin registry: the key remembered on
+// first use, a different key found in config.json, the human accepting it (lib/plugins.mjs, "accepted registry keys").
+export const AUDIT_TYPES = new Set(["estop", "estop-set", "app-requirement-changed", "app-pin-path-changed", "shutdown-requested", "app-restart-stopped", "hub-update-cli", "hub-update-tag-moved", "bridge-op-late", "registry-key-pinned", "registry-key-changed", "registry-key-accepted"]);
 
 function appendRotating(path, line, maxBytes) {
   if (existsSync(path) && statSync(path).size + line.length > maxBytes) renameSync(path, path + ".1");

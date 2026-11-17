@@ -8,6 +8,7 @@
 import { randomBytes } from "node:crypto";
 import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, renameSync, rmSync, statfsSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { writeJsonAtomic as writeStateJson } from "../statefile.mjs";
 import { compareVersions, isLabel } from "../version.mjs";
 import { msg } from "../i18n.mjs";
 
@@ -54,14 +55,9 @@ export function readJson(path) {
   }
 }
 
-// A 0600 temp file alongside + rename.
+// A 0600 temp file alongside + rename (the shared helper, lib/statefile.mjs).
 export function writeJsonAtomic(path, obj) {
-  const tmp = `${path}.tmp-${process.pid}-${randomBytes(3).toString("hex")}`;
-  writeFileSync(tmp, JSON.stringify(obj, null, 2) + "\n", { mode: 0o600 });
-  try {
-    chmodSync(tmp, 0o600);
-  } catch {}
-  renameSync(tmp, path);
+  writeStateJson(path, obj, { mode: 0o600, space: 2 });
 }
 
 // Pointer symlink target → a label or null (no link, not a label, no version directory).

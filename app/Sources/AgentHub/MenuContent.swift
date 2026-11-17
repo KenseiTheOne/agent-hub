@@ -77,7 +77,7 @@ enum StatusItemTip {
 }
 
 /// The menu bar popover (MenuBarExtra, .window style) per the approved prototype (Main.dc.html): glass, plugin
-/// tiles, tile expansion, "Waiting for you" with an inline action, Panel / Session / Pause hub capsules.
+/// tiles, tile expansion, "Needs you" with an inline action, Panel / Session / Pause hub capsules.
 struct PopoverView: View {
     static let width: CGFloat = 372
 
@@ -88,7 +88,7 @@ struct PopoverView: View {
     // the same key as HubUpdatePopoverLine: whether there's a hub update row (for the "Updates" heading)
     private let hubDoneAck = AppStorage(wrappedValue: "", HubDefaults.key("hubUpdateDoneAck", socketPath: HubPaths.socketPath()))
 
-    /// There's a hub or plugin update row — they get their own heading, otherwise they read as "Waiting for you" items.
+    /// There's a hub or plugin update row — they get their own heading, otherwise they read as "Needs you" items.
     private var hasUpdateLines: Bool {
         if let info = store.hubUpdate, HubUpdateText.line(info, ackedDone: hubDoneAck.wrappedValue == HubUpdateText.doneKey(info)) != nil { return true }
         return PluginUpdateLine.make(store.pluginUpdates) != nil
@@ -116,7 +116,7 @@ struct PopoverView: View {
             }
             attention
             ownRequestLine
-            // hub and plugin updates — in their own block with a heading: under "Waiting for you" they looked like its items, though
+            // hub and plugin updates — in their own block with a heading: under "Needs you" they looked like its items, though
             // they aren't waiting for the user
             if hasUpdateLines {
                 VStack(alignment: .leading, spacing: 8) {
@@ -149,6 +149,18 @@ struct PopoverView: View {
                 Text(updatedText).font(.system(size: 11)).foregroundStyle(.white.opacity(0.55))
             }
             Spacer()
+            // Settings — an ordinary button of its own: the menu on the right opens only on press-and-hold, and
+            // nobody finds a hold on their own
+            Button { router.open(.settings) } label: {
+                Image(systemName: "gearshape")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(.white)
+                    .frame(width: 28, height: 28)
+                    .background(Circle().fill(Color.white.opacity(0.10)))
+            }
+            .buttonStyle(.plain)
+            .help(tr("Настройки", "Settings"))
+            .accessibilityLabel(tr("Настройки", "Settings"))
             Menu {
                 Button(tr("Плагины…", "Plugins…")) { router.open(.manager) }
                 Button(tr("Журнал…", "Log…")) { router.open(.journal) }
@@ -177,7 +189,8 @@ struct PopoverView: View {
             .menuIndicator(.hidden)
             .buttonStyle(.plain)
             .fixedSize()
-            .help(tr("Плагины (удерживайте — журнал, настройки, язык, выход)", "Plugins (hold for log, settings, language, quit)"))
+            .help(tr("Плагины (удерживайте — журнал, язык, выход)", "Plugins (hold for log, language, quit)"))
+            .accessibilityLabel(tr("Плагины", "Plugins"))
         }
     }
 
@@ -319,7 +332,7 @@ struct PopoverView: View {
         .background(RoundedRectangle(cornerRadius: 12).fill(Color.black.opacity(0.22)))
     }
 
-    // MARK: "Waiting for you" (in the prototype — "You're needed"; the interface uses the polite form everywhere)
+    // MARK: "Needs you" (the prototype called it "You're needed")
 
     private struct Need: Identifiable {
         var id: String
@@ -331,16 +344,19 @@ struct PopoverView: View {
         var red: Bool
         var effort: String? = nil
         var ultracode = false
+        /// Where the row lives in the panel — what "N more" opens when this is the first row that did not fit.
+        var panel: PanelSection = .sessions
         var run: @MainActor () -> Void
     }
 
+    /// Every "Needs you" row, most pressing first; the popover shows the first `NeedsOverflow.limit`.
     private var needs: [Need] {
         var out: [Need] = []
         // plugin blockers first: they won't resolve without you
         for p in store.state?.pluginsByAttention ?? [] where p.status >= .block {
             let (title, sub) = p.attentionLines
             out.append(Need(id: "p:\(p.id)", status: p.status, title: title, sub: sub,
-                            action: tr("Показать", "Show"), red: true, run: { router.open(.plugin(p.id)) }))
+                            action: tr("Показать", "Show"), red: true, panel: .plugin(p.id), run: { router.open(.plugin(p.id)) }))
         }
         for c in store.visibleCards {
             let who = c.sessionName ?? String(c.sessionId.prefix(8))
@@ -358,20 +374,21 @@ struct PopoverView: View {
             let lines = s.attentionLines
             out.append(Need(id: "s:\(s.sessionId)", status: .wait,
                             title: lines.title,
-                            sub: lines.sub, action: canFocus ? tr("Перейти", "Go to tab") : tr("Показать", "Show"), red: false,
+                            sub: lines.sub, action: canFocus ? FocusText.short : tr("Показать", "Show"), red: false,
                             effort: s.effortLabel, ultracode: s.ultracode == true,
                             run: {
                                 if canFocus, let req = focusReq {
                                     router.closePopover()
-                                    Task { await store.perform(id: req.primitive, args: req.args, label: tr("Перейти во вкладку", "Switch to tab")) }
+                                    Task { await store.perform(id: req.primitive, args: req.args, label: FocusText.action) }
                                 } else { router.open(.sessions) }
                             }))
         }
-        return Array(out.prefix(5))
+        return out
     }
 
     @ViewBuilder private var attention: some View {
-        let list = needs
+        let all = needs
+        let (list, hidden) = NeedsOverflow.split(all)
         if !list.isEmpty {
             VStack(alignment: .leading, spacing: 4) {
                 Text(tr("Ждут вас", "Needs you")).font(.system(size: 11, weight: .semibold)).foregroundStyle(.white.opacity(0.55)).padding(.horizontal, 4).padding(.bottom, 2)
@@ -391,6 +408,23 @@ struct PopoverView: View {
                     }
                     .padding(8)
                     .background(RoundedRectangle(cornerRadius: 10).fill(Color.white.opacity(0.05)))
+                }
+                if let more = NeedsOverflow.label(hidden: hidden) {
+                    // the rest is in the panel: the row opens the page of the first one that did not fit
+                    Button { router.open(all[list.count].panel) } label: {
+                        HStack(spacing: 6) {
+                            Text(more).font(.system(size: 12, weight: .medium))
+                            Image(systemName: "chevron.right").font(.system(size: 9, weight: .semibold))
+                            Spacer(minLength: 0)
+                        }
+                        .foregroundStyle(.white.opacity(0.7))
+                        .padding(.horizontal, 10).padding(.vertical, 7)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(RoundedRectangle(cornerRadius: 10).fill(Color.white.opacity(0.05)))
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .help(tr("Открыть панель: там все, кто ждёт", "Open the panel: everything that needs you is there"))
                 }
             }
         }
@@ -692,7 +726,7 @@ final class FrameAutosaveGuard: NSView {
     // observers are removed in viewDidMoveToWindow (window is nil when the view leaves the window)
 }
 
-/// The "Waiting for you" row title: the full name first, the effort capsule only in the remaining space. If the pair
+/// The "Needs you" row title: the full name first, the effort capsule only in the remaining space. If the pair
 /// "xhigh + ⚡ultracode" doesn't fit — one capsule remains; if that doesn't fit either — just the name (only it is truncated, with no gap).
 struct AttentionTitle: View {
     let title: String

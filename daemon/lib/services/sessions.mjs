@@ -23,8 +23,9 @@
 // Settings (config.json → services.sessions): enabled (false — no service, no variable), minIntervalMs
 // (2000; can be lower in test mode, but no lower than 20).
 
-import { chmodSync, mkdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync } from "node:fs";
 import { join } from "node:path";
+import { writeFileAtomic } from "../statefile.mjs";
 
 export const name = "sessions";
 export const ENV_NAME = "AGENTHUB_CLAUDE_SESSIONS_FILE";
@@ -82,17 +83,7 @@ export function sessionRecord(s) {
 
 // Atomic 0600 write in the same directory.
 export function writeAtomic(path, data) {
-  const tmp = `${path}.${process.pid}.tmp`;
-  try {
-    writeFileSync(tmp, JSON.stringify(data), { mode: 0o600 });
-    chmodSync(tmp, 0o600);
-    renameSync(tmp, path);
-  } catch (e) {
-    try {
-      rmSync(tmp, { force: true });
-    } catch {}
-    throw e;
-  }
+  writeFileAtomic(path, JSON.stringify(data), { mode: 0o600 });
 }
 
 export class SessionsFileService {

@@ -21,7 +21,7 @@ export const via = "bridge";
 export const capabilities = Object.freeze(["focus", "read-screen", "send-text", "send-esc", "launch"]);
 export const APP_PATHS = Object.freeze(["/Applications/cmux.app"]);
 
-// → { target: {terminal, tab, surfaceId, workspaceId, lifecycle} } | { error } | null (the session is not in this terminal)
+// → { target: {terminal, tab, surfaceId, workspaceId, lifecycle, bound} } | { error } | null (the session is not in this terminal)
 export function locate(session, facts) {
   const cfg = cfgOf(facts);
   if (!cfg) return null; // the actions service is off — cmux is unavailable
@@ -30,9 +30,13 @@ export function locate(session, facts) {
   if (e.pid !== session.pid) return { error: "pid-mismatch" };
   // the process start time from the cmux entry is the same as that of the process verified by the core (the pid is not reused, the entry
   // is not from a previous process with the same pid); a one-second difference is rounding
-  if (Number.isFinite(e.pidStartSeconds) && Number.isFinite(session.startSec) && Math.abs(e.pidStartSeconds - session.startSec) > 1) return { error: "pid-mismatch" };
+  // Without a start time on either side the comparison cannot be made: the entry may be left from an earlier process that had
+  // this pid. The tab is still shown and can be switched to, but target.bound is false and nothing is typed into it
+  // (the terminal service: terminal:binding-unknown).
+  const bound = Number.isFinite(e.pidStartSeconds) && Number.isFinite(session.startSec);
+  if (bound && Math.abs(e.pidStartSeconds - session.startSec) > 1) return { error: "pid-mismatch" };
   if (!e.surfaceId || !e.workspaceId || !UUID_RE.test(e.surfaceId) || !UUID_RE.test(e.workspaceId)) return { error: "no-tab" };
-  return { target: { terminal: id, tab: e.surfaceId, surfaceId: e.surfaceId, workspaceId: e.workspaceId, lifecycle: e.agentLifecycle } };
+  return { target: { terminal: id, tab: e.surfaceId, surfaceId: e.surfaceId, workspaceId: e.workspaceId, lifecycle: e.agentLifecycle, bound } };
 }
 
 // A tab by its id (the terminal.focus primitive and its alias cmux.focus): the core session registry, then the cmux file.

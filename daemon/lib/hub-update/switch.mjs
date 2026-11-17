@@ -6,8 +6,9 @@
 // Each step is atomic by itself (tmp + rename). Order: pin → pointer → built-in plugins. A step failure
 // rolls back the steps already done (restoreFiles) using the prev snapshot taken before the first step.
 
-import { chmodSync, existsSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { readJsonFile } from "../config.mjs";
+import { updateConfig } from "../statefile.mjs";
 import { dirname } from "node:path";
 import { requirementSha, writeAppRequirement } from "../app-pin.mjs";
 import { msg } from "../i18n.mjs";
@@ -17,14 +18,6 @@ import { ensureDir, currentLabel, hubPaths, previousLabel, readBuild, setLink, v
 function readConfig(configPath) {
   if (!existsSync(configPath)) return {};
   return readJsonFile(configPath);
-}
-
-function writeConfig(configPath, cfg) {
-  ensureDir(dirname(configPath));
-  const tmp = `${configPath}.tmp-${process.pid}`;
-  writeFileSync(tmp, JSON.stringify(cfg, null, 2) + "\n", { mode: 0o600 });
-  chmodSync(tmp, 0o600);
-  renameSync(tmp, configPath);
 }
 
 // The snapshot was taken by capturePrev() (all fields present). An empty or foreign object isn't a snapshot: rolling back with it would wipe
@@ -86,15 +79,17 @@ export function restoreFiles({ home, prev, configPath = hubPaths(home).config, b
   const p = hubPaths(home);
   const errors = [];
   try {
-    const cfg = readConfig(configPath);
-    cfg.requirements = { ...(cfg.requirements || {}) };
-    const same = cfg.requirements.app === prev.requirement;
-    if (prev.requirement) cfg.requirements.app = prev.requirement;
-    else delete cfg.requirements.app;
-    if (prev.appPin) cfg.appPin = same || !by ? prev.appPin : { ...prev.appPin, by, under: "hub", pinnedAt: new Date().toISOString() };
-    else delete cfg.appPin;
-    if (prev.builtinPluginsDir) cfg.builtinPluginsDir = prev.builtinPluginsDir;
-    writeConfig(configPath, cfg);
+    ensureDir(dirname(configPath));
+    // read-modify-write under the config lock: the daemon, the CLI and the watchdog write this file too
+    updateConfig(configPath, (cfg) => {
+      cfg.requirements = { ...(cfg.requirements || {}) };
+      const same = cfg.requirements.app === prev.requirement;
+      if (prev.requirement) cfg.requirements.app = prev.requirement;
+      else delete cfg.requirements.app;
+      if (prev.appPin) cfg.appPin = same || !by ? prev.appPin : { ...prev.appPin, by, under: "hub", pinnedAt: new Date().toISOString() };
+      else delete cfg.appPin;
+      if (prev.builtinPluginsDir) cfg.builtinPluginsDir = prev.builtinPluginsDir;
+    });
   } catch (e) {
     errors.push({ step: "pin", message: e.message });
   }

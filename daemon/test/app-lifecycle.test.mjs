@@ -716,8 +716,10 @@ test("app service: app lost → restart via the double at the pinned build path;
   w.spawnApp(10);
   const h = await startHub({ sys: w.sys, services: "app", configFile: w.config() });
   try {
-    // the daemon started with the app alive: nothing
-    await sleep(400);
+    // the daemon started with the app alive: nothing. The start check has run when the supervisor is waiting for the
+    // follow-up look at a process that has not connected yet (lost-later) — a signal, not a pause
+    const sup = h.core.facts.get("app.supervisor");
+    await waitFor(() => sup.pendingReason === "lost-later", { timeoutMs: 15_000, label: "the start check found the app running" });
     assert.deepEqual(w.launches(), []);
     w.state.who = 10;
     const s = await openStream(h.sock);
@@ -729,13 +731,14 @@ test("app service: app lost → restart via the double at the pinned build path;
     await waitFor(() => journalTypes(h).includes("app-lost"));
     w.up();
     // wait for the journal entry, not the double's file: the entry appears only after the double exits
-    await waitFor(() => journalTypes(h).includes("app-launch"), { timeoutMs: 3000 });
+    // the wait time is not what is tested (restartDelayMs 150 + the double's 0.3 s): headroom for a loaded machine
+    await waitFor(() => journalTypes(h).includes("app-launch"), { timeoutMs: 15_000 });
     assert.deepEqual(w.launches(), [w.app]);
     const launch = h.core.journal.tail(100).find((e) => e.type === "app-launch");
     assert.equal(launch.reason, "lost");
     assert.equal(launch.ok, true);
-    // the check after launch: the process exists, nothing more
-    await sleep(700);
+    // the check after launch (verify) has run and found the process: it now waits for the follow-up look, nothing more
+    await waitFor(() => sup.pendingReason === "lost-later", { timeoutMs: 15_000, label: "the verify check found the launched app running" });
     assert.equal(w.launches().length, 1);
 
     // app 11 connected and crashed, but came back by itself within the delay window (new process 12)
@@ -751,9 +754,9 @@ test("app service: app lost → restart via the double at the pinned build path;
     w.spawnApp(12);
     w.state.who = 12;
     const s3 = await openStream(h.sock);
-    await sleep(500);
+    // the check after the loss has run and decided not to launch: its journal entry, not a pause
+    await waitFor(() => h.core.journal.tail(100).some((e) => e.type === "app-launch-skipped" && (e.why === "connected" || e.why === "running")), { timeoutMs: 15_000 });
     assert.equal(w.launches().length, 1, "came back by itself: no restart");
-    assert.ok(h.core.journal.tail(100).some((e) => e.type === "app-launch-skipped" && (e.why === "connected" || e.why === "running")));
     s3.close();
   } finally {
     await h.stop();
@@ -796,7 +799,7 @@ test("app service: test mode without a double leaves the real app alone: launch 
   delete cfg.services.app.test.launch;
   const h = await startHub({ sys: w.sys, services: "app", configFile: cfg });
   try {
-    await waitFor(() => journalTypes(h).includes("app-launch-skipped"), { timeoutMs: 3000 });
+    await waitFor(() => journalTypes(h).includes("app-launch-skipped"), { timeoutMs: 15_000 });
     const skip = h.core.journal.tail(100).find((e) => e.type === "app-launch-skipped");
     assert.equal(skip.why, "test-mode");
     assert.equal(skip.path, w.app);
@@ -853,7 +856,7 @@ test("app service: without appPin.path the app is not restarted, neither from th
     w.killApp(10);
     s.close();
     await waitFor(() => journalTypes(h).includes("app-lost"));
-    await waitFor(() => h.core.journal.tail(100).some((e) => e.type === "app-launch-skipped" && e.reason === "lost" && e.why === "no-path"), { timeoutMs: 3000 });
+    await waitFor(() => h.core.journal.tail(100).some((e) => e.type === "app-launch-skipped" && e.reason === "lost" && e.why === "no-path"), { timeoutMs: 15_000 });
     await sleep(600);
     assert.deepEqual(w.launches(), [], "no launch without a pinned path");
     assert.ok(!journalTypes(h).includes("app-launch"));
@@ -880,7 +883,9 @@ test("pin: an appPin.path change with the same requirement: journal and audit, e
     const c = JSON.parse(readFileSync(h.config.paths.config, "utf8"));
     c.appPin.path = other;
     writeFileSync(h.config.paths.config, JSON.stringify(c), { mode: 0o600 });
-    await waitFor(() => journalTypes(h).includes("app-pin-path-changed"), { timeoutMs: 8000 });
+    // what is tested is the reaction to the change, not who notices it first: when the fs.watch event was lost this
+    // waited for the 5 s poll, so the check is asked directly (noticing by watch and by poll — app-pin.test.mjs)
+    await waitFor(() => (h.core.appPin.check("test"), journalTypes(h).includes("app-pin-path-changed")), { timeoutMs: 15_000 });
     const e = h.core.journal.tail(100).find((x) => x.type === "app-pin-path-changed");
     assert.equal(e.old, w.app);
     assert.equal(e.new, other);
@@ -913,7 +918,8 @@ test("app service: the app crashes right after launch → 3 restarts, stop, a cr
     await waitFor(() => h.core.appConnections().length === 1);
     w.killApp(10);
     s.close();
-    await waitFor(() => journalTypes(h).includes("app-restart-stopped"), { timeoutMs: 5000 });
+    // three launches of the double (0.3 s each) with their checks: about 2 s idle, over 3 s under load — headroom
+    await waitFor(() => journalTypes(h).includes("app-restart-stopped"), { timeoutMs: 30_000 });
     assert.equal(w.launches().length, 3);
     const stop = h.core.journal.tail(200).find((e) => e.type === "app-restart-stopped");
     assert.equal(stop.restarts, 3);
@@ -949,7 +955,7 @@ test("app service in the daemon: \"Launch at login\" off, no app → app-login-g
     return stopHub({ srv: h.srv, core: h.core, reason });
   };
   try {
-    await waitFor(() => called === "login-off", { timeoutMs: 4000 });
+    await waitFor(() => called === "login-off", { timeoutMs: 15_000 });
     await waitFor(() => !existsSync(h.sock));
     const j = h.core.journal.tail(100);
     assert.deepEqual(j.filter((e) => e.type === "app-login-gate").map((e) => e.decision), ["wait", "exit"]);

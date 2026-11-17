@@ -260,7 +260,7 @@ test("sessions service: no more often than once per minIntervalMs, no changes �
     // the process exited — verified:false (the plugin does not type into such a session)
     dead.add(40);
     handlers.get("sessions")();
-    await waitFor(() => JSON.parse(readFileSync(join(dir, FILE_NAME), "utf8")).sessions[0].verified === false, { timeoutMs: 2000 });
+    await waitFor(() => JSON.parse(readFileSync(join(dir, FILE_NAME), "utf8")).sessions[0].verified === false, { timeoutMs: 15_000 });
     // pid reused (different start time) — also false
     dead.delete(40);
     list = [{ ...list[0], startSec: 3 }];

@@ -113,12 +113,33 @@ final class KickstartedDaemon: @unchecked Sendable {
     }
 
     @Test func diagnosticLaunchesDoNotStartDaemon() {
-        for a in ["--snapshot-panel", "--quit-after-snapshot", "--snapshot-menubar", "--print-status-item", "--show-popover", "--self-test-popover", "--self-test-status-menu"] {
+        // every key of the list, not a hand-picked few: a key added to the list is covered at once
+        #expect(QuitPolicy.diagnosticArguments.count >= 11)
+        for a in QuitPolicy.diagnosticArguments.sorted() {
             #expect(!QuitPolicy.startsDaemon(arguments: ["AgentHub", a]), "\(a) — doesn't bring up the daemon")
             #expect(QuitPolicy.isDiagnostic(arguments: ["AgentHub", a]), "\(a) — and doesn't stop it")
+            #expect(!QuitPolicy.shouldStopDaemon(peer: nil, arguments: ["AgentHub", a]), "\(a) — no /shutdown on quit")
+            #expect(QuitPolicy.terminateNow(hubRestarting: false, arguments: ["AgentHub", a]), "\(a) — quits without waiting")
         }
         #expect(QuitPolicy.startsDaemon(arguments: ["AgentHub"]))
         #expect(QuitPolicy.startsDaemon(arguments: ["AgentHub", "--open-panel"]))
+    }
+
+    @Test func shellReadsExactlyTheListedDiagnosticKeys() {
+        // the shell acts on diagnostic keys only through DiagnosticLaunch: it reads every key of the list and no other
+        #expect(DiagnosticLaunch.keys == QuitPolicy.diagnosticArguments)
+        let none = DiagnosticLaunch(arguments: ["AgentHub"])
+        #expect(none == DiagnosticLaunch(arguments: ["AgentHub", "--open-panel", "--home", "/tmp/x"]), "other keys are not diagnostic")
+        for a in QuitPolicy.diagnosticArguments.sorted() {
+            #expect(DiagnosticLaunch(arguments: ["AgentHub", a, "/tmp/x.png"]) != none, "\(a) — understood by the shell")
+        }
+        let d = DiagnosticLaunch(arguments: ["AgentHub", "--snapshot-confirm", "/tmp/c.png", "--snapshot-report", "/tmp/r.png", "--quit-after-snapshot", "--snapshot-panel"])
+        #expect(d.snapshotConfirm == "/tmp/c.png")
+        #expect(d.snapshotReport == "/tmp/r.png")
+        #expect(d.quitAfterSnapshot)
+        #expect(d.snapshotPanel == nil, "a key without its file is not a request")
+        #expect(d.snapshotConsent == nil && d.snapshotPopover == nil && d.snapshotMenubar == nil)
+        #expect(!d.showPopover && !d.printStatusItem && !d.selfTestPopover && !d.selfTestStatusMenu)
     }
 
     @Test func appPinPathChangedUpdatesSnapshot() throws {

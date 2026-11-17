@@ -23,7 +23,7 @@
 // Exiting on the disabled setting assumes a LaunchAgent with KeepAlive {SuccessfulExit: false}. Under an old plist
 // (KeepAlive true, before 2026-11-06) the daemon does not exit but logs a warning "reinstall the LaunchAgent: agenthub
 // install --apply"; /state.launchAtLogin.launchAgent = "outdated", and the shell disables the toggle with that hint
-// (fact app.launchAgent, lib/launchd.mjs launchAgentState).
+// (ctx.provideState "launchAtLogin", lib/launchd.mjs launchAgentState).
 //
 // Settings: services.app in config.json:
 //   supervise        — false: no supervision (default true); a disabled "Launch at login" still applies then;
@@ -90,9 +90,11 @@ export async function start(ctx) {
     return { path: p.path, requirement };
   };
   const launchAgent = () => launchAgentOf(ctx, testMode);
-  try {
-    ctx.facts.provide("app.launchAgent", launchAgent);
-  } catch {} // already present from a previous start in this core
+  // /state.launchAtLogin.launchAgent (and GET /settings): the state of the daemon job's plist; no key — not checked
+  ctx.provideState("launchAtLogin", () => {
+    const agent = launchAgent();
+    return agent ? { launchAgent: agent } : null;
+  });
   const sup = new AppSupervisor({
     adapter,
     pinned,

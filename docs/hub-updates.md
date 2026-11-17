@@ -530,7 +530,7 @@ Tests: `daemon/test/hub-brew.test.mjs`, the "Homebrew-managed hub" test in `hub-
 ```sh
 cd ~/path/to/agent-hub
 scripts/set-version.sh 0.2.0          # VERSION + daemon/package.json + claude-plugin/.claude-plugin/plugin.json
-(cd daemon && env -u NODE_OPTIONS node --test 'test/*.test.mjs') && scripts/app-test.sh   # tests are green
+(cd daemon && npm test) && scripts/app-test.sh   # tests are green (npm test: see "Building and testing" in the README)
 git commit -am "Agent Hub 0.2.0"
 # tag = VERSION with a "v" (the builder checks it); the message is the release description for the popover, the window
 # and "Settings": the first -m is what's new in one line (without "Agent Hub 0.2.0" — the hub shows the version itself),

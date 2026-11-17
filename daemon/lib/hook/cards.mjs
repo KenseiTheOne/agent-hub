@@ -11,7 +11,8 @@
 //   - a session_id already bound to another live signed pid isn't moved to a new pid; a session_id change
 //     for the same pid — only with source ∈ {clear, resume, compact};
 //   - after a daemon restart the registry is empty: the first PermissionRequest from a verified hook registers the session
-//     lazily with the same checks as SessionStart (source=lazy);
+//     lazily with the same checks as SessionStart (source=lazy). A session this daemon saw SessionEnd for is not such
+//     a case: its next request gets {} right away, only an explicit SessionStart makes it interactive again;
 //   - cards of pending PermissionRequest requests: they wait for a decision from the app no longer than waitMs;
 //   - a narrow reply: "once" (allow), "deny" (deny), choosing an option (allow + updatedInput with answers
 //     for AskUserQuestion). No updatedPermissions, "always", bypass, setMode, interrupt;
@@ -202,6 +203,7 @@ export class HookState {
     this.ctx = ctx;
     this.opts = { ...HOOK_DEFAULTS, ...opts };
     this.interactive = new Map(); // sessionId → { pid, startSec, at }
+    this.ended = new Map(); // sessionId → the Claude pid whose SessionEnd closed it (no lazy registration, see permission())
     this.cards = new Map(); // requestId → card
     this.approvals = []; // approval times within the last minute
     this.requests = new Map(); // sessionId → [request times]
@@ -243,6 +245,10 @@ export class HookState {
         return {};
       case "SessionEnd":
         await this.endSession(sid, "session-end");
+        // remembered (the last 256): a later PermissionRequest of this process must not bring the session back lazily
+        this.ended.delete(sid);
+        this.ended.set(sid, peer.claudePid);
+        if (this.ended.size > 256) this.ended.delete(this.ended.keys().next().value);
         return {};
       case "Stop":
         this.cancelSession(sid, "stop");
@@ -316,6 +322,7 @@ export class HookState {
       return false;
     }
     const startSec = this.ctx.sessions.get(sid)?.startSec ?? null;
+    this.ended.delete(sid);
     this.interactive.set(sid, { pid, startSec, at: Date.now() });
     this.log({ type: "hook-session", sessionId: sid, claudePid: pid, interactive: true, kind, entrypoint, source });
     return true;
@@ -378,7 +385,12 @@ export class HookState {
     if (this.paused(now)) return this.skip(sid, pid, tool, "paused");
     let interactive = await this.isInteractive(sid, pid);
     // The daemon restarted (the in-memory registry is empty): the same verified hook, the same checks as SessionStart.
-    if (!interactive && !this.interactive.has(sid)) interactive = await this.sessionStart(sid, pid, body, { lazy: true });
+    // An empty slot left by SessionEnd from this very process is not a restart: the session is over, and registering
+    // it again here would leave a card nobody expects hanging until waitMs.
+    if (!interactive && !this.interactive.has(sid)) {
+      if (this.ended.get(sid) === pid) return this.skip(sid, pid, tool, "session-ended");
+      interactive = await this.sessionStart(sid, pid, body, { lazy: true });
+    }
     if (!interactive) return this.skip(sid, pid, tool, "not-interactive");
     if (this.opts.skipTools.includes(tool)) return this.skip(sid, pid, tool, "skip-tool");
     if (!input || typeof input !== "object" || Array.isArray(input)) return this.skip(sid, pid, tool, "bad-input");

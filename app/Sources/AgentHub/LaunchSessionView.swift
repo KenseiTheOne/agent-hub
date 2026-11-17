@@ -108,14 +108,9 @@ struct LaunchSessionView: View {
     }
 
     private func chooseFolder() {
-        let p = NSOpenPanel()
-        p.canChooseDirectories = true
-        p.canChooseFiles = false
-        p.allowsMultipleSelection = false
-        p.prompt = tr("Выбрать", "Choose")
-        if !draft.folder.isEmpty { p.directoryURL = URL(fileURLWithPath: draft.expandedFolder) }
-        NSApp.activate(ignoringOtherApps: true)
-        if p.runModal() == .OK, let url = p.url {
+        let start = draft.folder.isEmpty ? nil : URL(fileURLWithPath: draft.expandedFolder)
+        Task {
+            guard let url = await HubWindow.chooseFolder(startAt: start) else { return }
             draft.folder = (url.path as NSString).abbreviatingWithTildeInPath
             if draft.name.isEmpty { draft.name = url.lastPathComponent }
         }

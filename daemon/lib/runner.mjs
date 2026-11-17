@@ -8,11 +8,12 @@
 // <agenthub.watch> — fs.watch (FSEvents on macOS) with debouncing.
 
 import { spawn, execFile } from "node:child_process";
-import { existsSync, mkdirSync, statSync, watch } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, statSync, watch } from "node:fs";
 import { homedir, tmpdir, userInfo } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { expandHome, standardPath } from "./config.mjs";
 import { FrameSplitter } from "./output.mjs";
+import { splitWhy } from "./meta.mjs";
 import { currentLocales, msg, normLocales } from "./i18n.mjs";
 import { groupAlive, interpreterFor, isWindows, killTree, osInfoCommands, treeSpawnOptions } from "./platform.mjs";
 
@@ -192,7 +193,8 @@ export function runOnce(argv, { env, cwd, timeoutMs = 5000, maxBytes = 1024 * 10
 // onBacklog() — the process stopped reading stdin and more than STDIN_BACKLOG_MAX bytes wait in the pipe (B6): from then on
 // writes are dropped (write → false) until the pipe drains; called once per such episode.
 export class StreamProcess {
-  constructor(argv, { env, envFn = null, cwd, maxBytes = 1024 * 1024, onFrame, onExit, onStart, onBacklog = null }) {
+  // onGone(pid) — the process and its whole group are gone (every 'close', also after stop(): onExit is not called then).
+  constructor(argv, { env, envFn = null, cwd, maxBytes = 1024 * 1024, onFrame, onExit, onStart, onBacklog = null, onGone = null }) {
     this.argv = argv;
     this.opts = { env, cwd };
     this.envFn = envFn;
@@ -201,6 +203,7 @@ export class StreamProcess {
     this.onExit = onExit;
     this.onStart = onStart;
     this.onBacklog = onBacklog;
+    this.onGone = onGone;
     this.backlogged = false;
     this.child = null;
     this.stopped = false;
@@ -238,6 +241,9 @@ export class StreamProcess {
       splitter.end();
       killGroup(child, "SIGKILL");
       if (this.child === child) this.child = null;
+      try {
+        this.onGone?.(child.pid);
+      } catch {}
       this.onExit?.({ code, signal });
       // ran for more than a minute: reset the backoff
       if (Date.now() - this.startedAt > 60_000) this.backoffMs = 1000;
@@ -420,13 +426,65 @@ function globToRe(mask) {
 // the first change of a burst starts the clock, and the call comes no later than this much after it.
 export const WATCH_MAX_WAIT_MS = 2000;
 
+// fs.watch loses events: the one for a write made right after the watch is armed (the stream starts asynchronously), and
+// now and then others under load. A slow poll catches what was missed: twice soon after a watch is armed and then every
+// pollMs, the watched files' mtime/size are compared with what the watcher saw last. pollMs 0 turns the poll off.
+// The scan is bounded: in a huge tree the poll covers only its first entries (by name), fs.watch stays the main channel.
+export const WATCH_POLL_MS = 5000;
+const POLL_SOON_MS = [250, 1000];
+const POLL_MAX_ENTRIES = 512;
+const POLL_MAX_DIRS = 64;
+
+// → Map(path → signature) of what the target's fs.watch callback reports on: the file itself, or the directory's entries
+// (those matching the mask; inside subdirectories too if recursive). A subdirectory is noted by presence only: its mtime
+// changes with its contents, which a non-recursive watch does not report.
+function scanTarget(t) {
+  const out = new Map();
+  const sig = (st) => `${st.mtimeMs}:${st.size}:${st.ino}`;
+  let top;
+  try {
+    top = statSync(t.dir);
+  } catch {
+    return out;
+  }
+  if (!top.isDirectory()) {
+    if (!t.filter) out.set(t.dir, sig(top));
+    return out;
+  }
+  if (!t.filter) out.set(t.dir, "dir");
+  const queue = [t.dir];
+  for (let dirs = 0; queue.length && dirs < POLL_MAX_DIRS; dirs++) {
+    const d = queue.shift();
+    let list;
+    try {
+      list = readdirSync(d, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    list.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+    for (const e of list) {
+      const p = join(d, e.name);
+      if (e.isDirectory()) {
+        if (t.recursive) queue.push(p);
+        if (!t.filter && out.size < POLL_MAX_ENTRIES) out.set(p, "dir");
+        continue;
+      }
+      if ((t.filter && !t.filter.test(e.name)) || out.size >= POLL_MAX_ENTRIES) continue;
+      try {
+        out.set(p, sig(statSync(p)));
+      } catch {}
+    }
+  }
+  return out;
+}
+
 export class Watcher {
-  constructor(entries, onChange, { debounceMs = 300, maxWaitMs = WATCH_MAX_WAIT_MS, retryMs = 30_000, home = homedir(), recursive = false } = {}) {
+  constructor(entries, onChange, { debounceMs = 300, maxWaitMs = WATCH_MAX_WAIT_MS, retryMs = 30_000, pollMs = WATCH_POLL_MS, home = homedir(), recursive = false } = {}) {
     this.recursive = recursive;
     // an entry is a path string or { path, recursive } (<agenthub.watch recursive="true">: subdirectories too)
     this.targets = entries.map((e) => {
       const obj = e && typeof e === "object";
-      const p = expandHome(String(obj ? e.path : e).split(/\s+[—–-]{1,2}\s+/)[0].trim(), home);
+      const p = expandHome(splitWhy(obj ? e.path : e).what, home);
       const base = basename(p);
       const rec = obj ? e.recursive === true : recursive;
       if (/[*?]/.test(base)) return { dir: dirname(p), filter: globToRe(base), raw: p, recursive: rec };
@@ -437,6 +495,10 @@ export class Watcher {
     this.maxWaitMs = Math.max(maxWaitMs, debounceMs);
     this.burstAt = 0; // when the first change of the pending burst came (0 — nothing pending)
     this.retryMs = retryMs;
+    this.pollMs = pollMs;
+    this.pollTimer = null;
+    this.pollSoon = [];
+    this.polling = false; // the first start() took the snapshot the poll compares with
     this.watchers = [];
     this.timer = null;
     this.retry = null;
@@ -445,10 +507,19 @@ export class Watcher {
   }
   start() {
     let missing = false;
+    let armed = false;
+    // the snapshot is taken before the watch is armed: a write that falls between the two is then seen by the poll
+    if (this.pollMs > 0 && !this.polling) {
+      this.polling = true;
+      this.snapshot();
+    }
     for (const t of this.targets) {
       if (t.w) continue;
       if (!existsSync(t.dir)) {
-        if (!t.filter && this.watchParent(t)) continue;
+        if (!t.filter && this.watchParent(t)) {
+          armed = true;
+          continue;
+        }
         missing = true;
         continue;
       }
@@ -467,6 +538,8 @@ export class Watcher {
           this.pending.add(n ? join(target, n) : target);
           this.kick();
         });
+        t.viaParent = false;
+        armed = true;
         t.w.on("error", () => {
           try {
             t.w.close();
@@ -479,6 +552,60 @@ export class Watcher {
       }
     }
     if (missing) this.scheduleRetry();
+    if (armed) this.schedulePoll(POLL_SOON_MS);
+  }
+  snapshot() {
+    for (const t of this.targets) t.seen = scanTarget(t);
+  }
+  // (Re)starts the poll clock. soon — the delays of the first looks (right after a watch is armed), then every pollMs.
+  schedulePoll(soon = null) {
+    if (this.closed || !(this.pollMs > 0)) return;
+    if (soon) this.pollSoon = [...soon];
+    clearTimeout(this.pollTimer);
+    this.pollTimer = setTimeout(() => {
+      this.pollTimer = null;
+      this.poll();
+      if (!this.pollTimer) this.schedulePoll(); // poll() may have armed a watch and restarted the clock itself
+    }, Math.min(this.pollSoon.shift() ?? this.pollMs, this.pollMs));
+    this.pollTimer.unref?.();
+  }
+  // → the target's paths that differ from the last look (up to 50); the new look is remembered.
+  changedSince(t) {
+    const prev = t.seen || new Map();
+    const next = scanTarget(t);
+    t.seen = next;
+    const changed = [];
+    for (const [p, s] of next) if (prev.get(p) !== s) changed.push(p);
+    for (const p of prev.keys()) if (!next.has(p)) changed.push(p);
+    return changed.slice(0, 50);
+  }
+  // The fallback for a lost fs.watch event: what changed since the watcher last looked goes the same way as an event.
+  poll() {
+    if (this.closed) return;
+    let arm = false;
+    for (const t of this.targets) {
+      const changed = this.changedSince(t);
+      if (changed.length) {
+        for (const p of changed) this.pending.add(p);
+        this.kick();
+        if (t.viaParent) this.promote(t);
+      }
+      if (!t.w && existsSync(t.dir)) arm = true; // appeared before retryMs
+    }
+    if (arm && !this.closed) this.start();
+  }
+  // The awaited path t.dir (watched by name in its parent) is a directory now: watch it instead.
+  promote(t) {
+    let dir = false;
+    try {
+      dir = statSync(t.dir).isDirectory();
+    } catch {}
+    if (!dir || this.closed) return;
+    try {
+      t.w?.close();
+    } catch {}
+    t.w = null;
+    this.start();
   }
   // Wait for the path t.dir to appear by watching its parent directory. → true if the watch is set up.
   watchParent(t) {
@@ -495,18 +622,9 @@ export class Watcher {
         if (n && n !== only) return;
         this.pending.add(t.dir);
         this.kick();
-        let dir = false;
-        try {
-          dir = statSync(t.dir).isDirectory();
-        } catch {}
-        if (dir && !this.closed) {
-          try {
-            t.w?.close();
-          } catch {}
-          t.w = null;
-          this.start();
-        }
+        this.promote(t);
       });
+      t.viaParent = true;
       t.w.on("error", () => {
         try {
           t.w.close();
@@ -536,6 +654,9 @@ export class Watcher {
     clearTimeout(this.timer);
     const delay = Math.max(0, Math.min(this.debounceMs, this.burstAt + this.maxWaitMs - now));
     this.timer = setTimeout(() => {
+      // the look is renewed with every report, so the poll does not report the same change a second time; what the
+      // look finds beyond the events (their events were lost or are still on the way) is reported along
+      if (this.polling && !this.closed) for (const t of this.targets) for (const p of this.changedSince(t)) this.pending.add(p);
       const paths = [...this.pending];
       this.pending.clear();
       this.burstAt = 0;
@@ -547,6 +668,7 @@ export class Watcher {
     this.closed = true;
     clearTimeout(this.timer);
     clearTimeout(this.retry);
+    clearTimeout(this.pollTimer);
     for (const t of this.targets) {
       try {
         t.w?.close();

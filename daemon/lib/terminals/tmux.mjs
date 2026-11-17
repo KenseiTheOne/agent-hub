@@ -19,7 +19,7 @@
 
 import { existsSync, realpathSync } from "node:fs";
 import { isAbsolute } from "node:path";
-import { hostOf, ttyOf } from "./_proc.mjs";
+import { hostOf, ttyOfAsync } from "./_proc.mjs";
 import { execError, execOf, LAUNCH_SH, shQuote } from "./_exec.mjs";
 import { analyzeScreen, flags, typeLine } from "./_screen.mjs";
 import * as iterm2 from "./iterm2.mjs";
@@ -93,7 +93,7 @@ function run(target, facts, args, opts) {
 
 // The pane of the session's tty. → { pane, session } | { error }
 export async function pane(target, facts) {
-  const tty = ttyOf(target.pid, facts);
+  const tty = await ttyOfAsync(target.pid, facts);
   if (!tty) return { error: "no-tab" };
   const r = await run(target, facts, ["list-panes", "-a", "-F", "#{pane_tty}\t#{pane_id}\t#{session_id}"]);
   if (r.code !== 0) return { error: execError(r, "tmux") };

@@ -126,25 +126,18 @@ struct PluginManagerView: View {
             NotConnected(catalog: c, builtin: (store.state?.plugins ?? []).filter { $0.tier == .builtin }.map(\.title), recheck: { Task { await store.loadRegistry() } })
         } else if let code = store.fetchError ?? catalog?.error {
             Notice(color: .red, icon: "xmark.octagon", title: Explain.text(code: code, status: 0, label: tr("Каталог", "Catalog")), detail: tr("Код: \(code)", "Code: \(code)"),
-                   actionTitle: isApp ? tr("Повторить", "Retry") : nil, onAction: retryFetch)
+                   actionTitle: isApp ? RetryText.button : nil, onAction: retryFetch)
         }
     }
 
     private func retryFetch() { Task { await store.fetchCatalog() } }
 
-    /// Folder picker — the system dialog (outside the button handler, like the other modal windows), then the request and the consent
-    /// window from the daemon.
+    /// Folder picker — the system dialog, awaited like the hub's own windows; then the request and the consent window
+    /// from the daemon.
     private func pickFolder() {
-        Task { @MainActor in
-            let panel = NSOpenPanel()
-            panel.canChooseDirectories = true
-            panel.canChooseFiles = false
-            panel.allowsMultipleSelection = false
-            panel.prompt = tr("Выбрать", "Choose")
-            panel.message = tr("Папка плагина (<id> с файлом <id>.<интервал>.<расширение>) или репозиторий с agenthub/<id>",
-                               "The plugin folder (<id> with <id>.<interval>.<ext>) or a repository with agenthub/<id>")
-            NSApp.activate(ignoringOtherApps: true)
-            guard panel.runModal() == .OK, let url = panel.url else { return }
+        Task {
+            guard let url = await HubWindow.chooseFolder(message: tr("Папка плагина (<id> с файлом <id>.<интервал>.<расширение>) или репозиторий с agenthub/<id>",
+                                                                     "The plugin folder (<id> with <id>.<interval>.<ext>) or a repository with agenthub/<id>")) else { return }
             await store.addFromFolder(url.path)
         }
     }
@@ -280,8 +273,8 @@ struct PluginManagerView: View {
             if let u = r.update { updateButton(u) }
             if r.own?.status == "update" { ownUpdateButton(r) }
             if !r.permissions.isEmpty || r.tier != .builtin {
-                // the modal window runs outside the button handler (Task): inside it SwiftUI does not deliver clicks to the window
-                Button(tr("Права", "Permissions")) { Task { @MainActor in PermissionsWindow.show(title: r.title, id: r.id, tier: r.tier, permissions: r.permissions) } }
+                // every hub window is asked the same way: a task from the button handler that awaits it (see `HubWindow`)
+                Button(tr("Права", "Permissions")) { Task { await PermissionsWindow.show(title: r.title, id: r.id, tier: r.tier, permissions: r.permissions) } }
                     .buttonStyle(CapsuleStyle(height: 28, expand: false))
             }
             if r.removable {
@@ -304,11 +297,12 @@ struct PluginManagerView: View {
             .help(tr("Новая версия из папки просит больше прав — покажу окно прав", "The new version in the folder asks for more permissions — you'll see the permissions window"))
     }
 
-    /// The removal window is started from a Task, not directly in the button handler: a modal loop started inside
-    /// a SwiftUI button action did not receive clicks (live check 2026-11-05 — "Remove" could not be pressed).
+    /// The removal window, by the rule for every hub window (`HubWindow`): a task from the button handler awaits it.
+    /// The windows are not modal, so there is no nested event loop to keep out of a SwiftUI button action any more
+    /// (that was the old reason for the Task: a modal loop started inside the action did not receive clicks).
     private func confirmRemove(_ id: String, title: String) {
-        Task { @MainActor in
-            guard let purge = RemoveWindow.ask(title: title, id: id) else { return }
+        Task {
+            guard let purge = await RemoveWindow.ask(title: title, id: id) else { return }
             await store.remove(id, purge: purge)
         }
     }
@@ -340,7 +334,7 @@ struct PluginManagerView: View {
                 }
                 .padding(.top, 30).frame(maxWidth: .infinity)
             } else if c.generatedAt == nil, store.fetchError ?? c.error != nil {
-                // loading has just failed — the banner with the reason and "Retry" is above; no second call to action
+                // loading has just failed — the banner with the reason and "Try again" is above; no second call to action
                 EmptyView()
             } else if c.generatedAt == nil {
                 VStack(spacing: 10) {
@@ -371,7 +365,7 @@ struct PluginManagerView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { catalogWidth = $0 }
                 Text(tr("Плагины сообщества показывают статусы, открывают ссылки и файлы, переводят во вкладку и запускают свои команды — каждая с подтверждением. Одобрять, останавливать и запускать агентов умеют только встроенные, официальные и свои (из вашей папки).",
-                        "Community plugins show statuses, open links and files, switch to a tab and run their own commands — each one asks you first. Only built-in, official and your own plugins (from your folder) can approve, stop or launch agents."))
+                        "Community plugins show statuses, open links and files, go to a tab and run their own commands — each one asks you first. Only built-in, official and your own plugins (from your folder) can approve, stop or launch agents."))
                     .font(.system(size: 11.5)).foregroundStyle(.white.opacity(0.5))
             }
         } else if catalog == nil {
@@ -517,9 +511,9 @@ struct PluginManagerView: View {
         case .rebuild: tr("Обновить", "Update")
         }
         return Button(grows && growsInLabel ? base + " · " + PluginUpdateLine.growsLabel : base) {
-            Task { @MainActor in
-                // rollback — only after an explicit "Roll back" (the window runs outside the button handler, like removal)
-                if case .older(let v) = kind, !RollbackAlert.ask(title: p.displayTitle, from: p.installed ?? "?", to: v) { return }
+            Task {
+                // rollback — only after an explicit "Roll back"
+                if case .older(let v) = kind, !(await RollbackWindow.ask(title: p.displayTitle, from: p.installed ?? "?", to: v)) { return }
                 await store.install(p.id)
             }
         }
@@ -565,7 +559,7 @@ struct NotConnected: View {
             Text(RegistryText.worksWithout(builtin: builtin))
                 .font(.system(size: 12)).foregroundStyle(.white.opacity(0.7))
             Text(missingText).font(.system(size: 12)).foregroundStyle(.orange)
-            DisclosureGroup(isExpanded: Binding(get: { open }, set: { open = $0 })) {
+            RowDisclosure(isExpanded: Binding(get: { open }, set: { open = $0 })) {
                 VStack(alignment: .leading, spacing: 6) {
                     Text(tr("1. Выполните в Терминале (адрес каталога и файл открытого ключа — от владельца реестра):",
                             "1. Run this in Terminal (the catalog address and public key file come from the registry owner):"))

@@ -82,6 +82,20 @@ export function ttyOf(pid, facts) {
   try {
     t = facts?.processTty?.(pid) ?? null;
   } catch {}
+  return devTty(t);
+}
+
+// The same without blocking the event loop: facts.processTtyAsync(pid) → Promise<"ttys004" | null> when the hub provides
+// it, otherwise the synchronous fact. → Promise<"/dev/ttys004" | null>
+export async function ttyOfAsync(pid, facts) {
+  let t = null;
+  try {
+    t = typeof facts?.processTtyAsync === "function" ? await facts.processTtyAsync(pid) : (facts?.processTty?.(pid) ?? null);
+  } catch {}
+  return devTty(t);
+}
+
+function devTty(t) {
   if (typeof t !== "string") return null;
   t = t.trim();
   if (!t || t === "??" || t === "-") return null;

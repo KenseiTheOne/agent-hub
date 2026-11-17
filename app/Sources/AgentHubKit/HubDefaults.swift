@@ -5,7 +5,7 @@ import Foundation
 /// screenshots would otherwise dismiss the live hub's notes and change its panel.
 public enum HubDefaults {
     /// Keys bound to the socket: `<base>:<socket path>`.
-    public static let scopedBases = ["hubLang", "hubLangSetting", "pinNoteAck", "hubUpdateDoneAck"]
+    public static let scopedBases = ["hubLang", "hubLangSetting", "pinNoteAck", "hubUpdateDoneAck", "notifyDeniedHidden"]
     /// Old bundle-wide keys (before 2026-11-07) — both the live and test copies wrote them; removed at startup.
     public static let legacyKeys = ["pinNoteAck", "hubUpdateDoneAck"]
 

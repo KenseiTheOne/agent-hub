@@ -97,12 +97,12 @@ import Testing
         #expect(TerminalText.unsupported(terminal: "Terminal", capability: "read-screen") == "Terminal doesn't support: read the screen")
         #expect(TerminalText.launchWhy("sessions") == "most sessions run there")
         #expect(TerminalText.launchNote("tmux") == "A new tmux tab opens in the background. The prompt goes as a 0600 file and is deleted after reading.")
-        #expect(PluginPermission(kind: "effects", what: "terminal.focus").plainText == "switch to a terminal tab")
+        #expect(PluginPermission(kind: "effects", what: "terminal.focus").plainText == "go to a terminal tab")
         L10n.shared.lang = .ru
         #expect(TerminalText.status(ts.adapters[1], bridgeOnline: false) == "1 сессия · установлен")
         #expect(TerminalText.unsupported(terminal: "iTerm2", capability: "focus") == "iTerm2 не умеет переходить во вкладку из хаба")
         #expect(TerminalText.launchNote("iTerm2").hasPrefix("Новая вкладка iTerm2 откроется в фоне."))
-        #expect(PluginPermission(kind: "effects", what: "cmux.focus").plainText == "переводить во вкладку терминала")
+        #expect(PluginPermission(kind: "effects", what: "cmux.focus").plainText == "переходить во вкладку терминала")
         // refusal codes of the terminal layer have their own texts
         for code in ["facts:no-terminal", "facts:esc-unsupported", "facts:no-launch-terminal", "facts:tmux-failed", "facts:osascript-failed", "terminal:unsupported"] {
             #expect(Explain.covers(code), "\(code)")

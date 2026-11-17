@@ -28,8 +28,9 @@
 // automatically — for tests only; the live hub never has it (lib/config.mjs testExtensionsOf).
 
 import { createHash } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, watch, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, watch } from "node:fs";
 import { join } from "node:path";
+import { writeJsonAtomic } from "./statefile.mjs";
 import { makeCtx } from "./ctx.mjs";
 import { t } from "./i18n.mjs";
 import { myUid, usesFileModes } from "./platform.mjs";
@@ -74,11 +75,7 @@ function writeApprovals(home, map) {
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   const files = {};
   for (const [p, r] of [...map].sort(([a], [b]) => (a < b ? -1 : 1))) files[p] = { sha256: r.sha256, approvedAt: r.approvedAt };
-  const path = approvalsFile(home);
-  const tmp = `${path}.tmp-${process.pid}`;
-  writeFileSync(tmp, JSON.stringify({ version: 1, files }, null, 2) + "\n", { mode: 0o600 });
-  chmodSync(tmp, 0o600);
-  renameSync(tmp, path);
+  writeJsonAtomic(approvalsFile(home), { version: 1, files }, { mode: 0o600, space: 2 });
 }
 
 export class ExtensionError extends Error {

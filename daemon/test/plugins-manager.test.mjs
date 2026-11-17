@@ -931,7 +931,8 @@ test("a v1 confirmation token does not execute the v2 command: a plugin update w
     await h.call("POST", "/registry/fetch");
     await installAny(h, "off");
     await h.rescan();
-    const st2 = await waitFor(() => h.core.pluginState("off")?.body?.[0]?.title?.includes("1.1.0") && h.core.pluginState("off"), { timeoutMs: 8000 }).catch(() => h.core.pluginState("off"));
+    // the v2 run has replaced the frame: the header line carries the new version
+    const st2 = await waitFor(() => h.core.pluginState("off")?.header?.[0]?.title?.includes("1.1.0") && h.core.pluginState("off"), { timeoutMs: 15_000 });
     const o2 = st2.body.find((i) => i.offer).offer;
     assert.equal(o2.id, o1.id, "the offer has the same id");
     const done = await h.call("POST", `/actions/${o2.id}`, { confirmToken: c1.body.token });

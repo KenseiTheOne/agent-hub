@@ -23,10 +23,10 @@ macOS behavior. Tests: `daemon/test/portability.test.mjs` (each fails without it
 |---|---|
 | `osVars()` returned `null` on the first call when the OS has no `OS_*` commands (Linux, Windows): `buildEnv` crashed, a streamable plugin did not start | `runner.mjs` `osVars`/`collectOsVars` — the cache is updated in `.then` |
 | An absolute path was checked with `startsWith("/")` | `platform.mjs` `isAbsolutePath` (on win32 — only with a drive letter: "/x", "\\x" and UNC are not, even though `win32.isAbsolute` accepts them); `host.mjs` `watchPaths`, `plugins.mjs` `loadRequests` |
-| Directory comparison: copies of `resolve(a) === resolve(b)` all over the core | `platform.mjs` `samePath` (on win32 — case-insensitive and without a trailing separator; on POSIX also by realpath when both paths exist: APFS is case-insensitive); `core.mjs` hubInfo/bridgeInfo, `plugins.mjs` connect, `services/app.mjs`, `services/push.mjs`, `selftest.mjs`, `builtin-copy.mjs`, `hub-update/cli.mjs` (uninstall), `bin/agenthub` |
-| The live hub directory via `defaultHome({})` — without `XDG_STATE_HOME`/`LOCALAPPDATA` | `liveStateDir()` in `core.mjs`, `plugins.mjs`, `launchd.mjs` (`stateDirs`, `daemonLocation`, `plistXml`) |
+| Directory comparison: copies of `resolve(a) === resolve(b)` all over the core | `platform.mjs` `samePath` (on win32 — case-insensitive and without a trailing separator; on POSIX also by realpath when both paths exist: APFS is case-insensitive); `core.mjs` hubInfo, `services/actions.mjs` (`/state.bridge`), `plugins.mjs` connect, `services/app.mjs`, `services/push.mjs`, `selftest.mjs`, `builtin-copy.mjs`, `hub-update/cli.mjs` (uninstall), `bin/agenthub` |
+| The live hub directory via `defaultHome({})` — without `XDG_STATE_HOME`/`LOCALAPPDATA` | `liveStateDir()` in `core/state.mjs`, `plugins/views.mjs`, `launchd.mjs` (`stateDirs`, `daemonLocation`, `plistXml`) |
 | A BOM in `config.json`/`settings.json`: the daemon did not start, the language was lost | `config.mjs` `readJsonFile` (UTF-16 gives a clear error) for every reader of these files |
-| A corrupted `config.json` printed a stack trace instead of a line | `bin/agenthub`, `bin/agenthubd`: one line, exit code 1 |
+| A corrupted `config.json` printed a stack trace instead of a line | `bin/agenthub`: one line, exit code 1. The daemon (`bin/agenthubd`) no longer exits on it: it starts on the defaults with the dangerous parts closed and keeps a `config.json.bad` copy ([`api.md`](api.md), "Damaged state files") |
 | `install`/`uninstall` without launchd crashed (ENOENT, `process.getuid`) | `launchd.mjs` `hasLaunchd`; refusal with code 2 and a `--no-launchd` hint. The test variable `AGENTHUB_TEST_NO_LAUNCHD=1` does not lift the protection of the live directory in `uninstall --no-launchd` (that check is by platform) |
 | Without the peercred addon a session was treated as "process exited" | `peer.mjs`: reason `no-peercred` |
 | `open.file`: the list of forbidden types was incomplete for `open` on macOS too (`.pyw`, `.jnlp`, `.afploc`, `.term`, `.wflow`…) | `primitives/open.file.mjs`: an allowlist `OPEN_EXT`, directories only without an extension, everything else only reveal; a Finder alias and `OpenWith` are refused (`platform.mjs` `launchRedirect`; found by the port review, not in the patch); the type is checked again in `run()` — the swap window is narrowed, not closed ([`api.md`](api.md)) |
@@ -112,8 +112,8 @@ moved over.
 
 ### Lifecycle and push
 
-- **A17.** `agenthub stop` (POST `/shutdown` from cli), SIGBREAK, SIGHUP as console close,
-  `core.onShutdownRequest` (`bin/agenthub`, `bin/agenthubd`, `server.mjs`, `core.mjs`). When porting, reconcile it
+- **A17.** `agenthub stop` (a command the patch adds — the current CLI has none; POST `/shutdown` from cli), SIGBREAK,
+  SIGHUP as console close, `core.onShutdownRequest` (`bin/agenthub`, `bin/agenthubd`, `server.mjs`, `core.mjs`). When porting, reconcile it
   with the existing `/shutdown` (currently `app` only; exit code 0 and KeepAlive). The route in the patch admits
   `cli`, and on Windows without peer verification `cli` means **any process of the user**: it can be opened to cli
   only together with a `GetNamedPipeClientProcessId` check or with `/proof` (A4).

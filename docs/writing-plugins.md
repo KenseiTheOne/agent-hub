@@ -110,7 +110,7 @@ curl -s --unix-socket $H/hub.sock -X POST http://hub/actions/$OFFER -H 'content-
 
 ### 1.3 See it and debug it
 
-The CLI is not on `PATH`. After the installer it is
+The CLI is on `PATH` only after a Homebrew install (`agenthub`). After the installer it is
 
 ```sh
 AH="$HOME/Library/Application Support/AgentHub/Versions/current/src/daemon/bin/agenthub"
@@ -212,7 +212,10 @@ than 5 minutes counts as hung.
 **Process lifecycle.** Every run, streamable process and action runs in its own process group; when it ends (or times
 out) the hub kills the whole group, so do not leave children behind on purpose — a long task is a background action
 (`background="true"`, section 5.2). A streamable process must keep reading its stdin: while more than 1 MB of messages
-waits unread in the pipe, new ones are dropped (journaled once a minute as `stdin-backlog`). Before stopping a streamable process the hub writes
+waits unread in the pipe, new ones are dropped (journaled once a minute as `stdin-backlog`). **Frame rate:** the hub
+applies at most 10 frames a second from one streamable plugin (`plugins.maxFramesPerSec`), with a burst of as many; a
+plugin printing faster is not slowed down or stopped — the frames in between are dropped and the latest one is always
+applied (journal `plugin-throttled`). Print a frame when something changed, not in a tight loop. Before stopping a streamable process the hub writes
 `{"type":"stopping","reason":…}` to its stdin and closes it, then sends SIGTERM 200 ms later and SIGKILL a second after
 that. `reason`: `restart` (the hub starts it again with a new environment — `cause` is the new
 `AGENTHUB_REFRESH_REASON`: `LanguageChanged`, `Paused`, `Resumed`, `SecretChanged`), `updated` (your file changed),
@@ -551,7 +554,7 @@ Models · 7 days
   the list until it fits, and drops the same count from every list of that chart line (`values`, `labels`,
   `valueLabels`, `tips` and each `;`-row of `series`) so bar *i* keeps its caption and tooltip; a numeric `highlight=`
   moves with them (gone if its bar was dropped). `spark=` is trimmed on its own. A single entry longer than the limit
-  keeps its tail. Each trimmed key leaves a warning in the journal (`agenthub journal`) — send fewer days instead.
+  keeps its tail. Each trimmed key leaves a warning in the journal (`agenthub logs`) — send fewer days instead.
 
 ### 4.5 Status: what it means
 
@@ -668,7 +671,7 @@ core's confirmation window; `local` plugins get none (except on a test hub with 
 - `id` — `[A-Za-z0-9][\w.-]{0,63}`, unique.
 - The text is the command, split into argv **without a shell** (quotes and `\` work, no pipes or variables). The first
   word is your main file name: it runs with the plugin's interpreter, cwd = the plugin folder, the same environment as a
-  run (`AGENTHUB_REFRESH_REASON=MenuAction`), a 30 s timeout. `--action <id>` is a convention, not a requirement.
+  run (`AGENTHUB_REFRESH_REASON=MenuAction`), the action timeout (30 s by default). `--action <id>` is a convention, not a requirement.
 - `level` — `immediate` (no window), `confirm` (default; a window with text the core writes) or `confirm-cost` (a
   window with a price: `cost="…"` says what it spends). The core raises the level: a plugin that declares `net` (unless the
   action says `net="none"`, below) or an action with `cost=` always gets at least `confirm-cost`; a `community` plugin's
@@ -703,7 +706,7 @@ core's confirmation window; `local` plugins get none (except on a test hub with 
   # <agenthub.action id="reply" level="confirm" title="Reply" arg="thread:^t[0-9]{1,9}$" input="Your reply" inputPattern="^[^<>]{1,500}$" maxLength="500">chat.mjs --action reply {thread}</agenthub.action>
   Thread t2: deploy now? | action=reply arg=t2
   ```
-- `background="true"` — a **job**: the command keeps running after the click, with no 30 s timeout, in its own process
+- `background="true"` — a **job**: the command keeps running after the click, without the action timeout, in its own process
   group. The click returns at once with the job id; `/state.plugins[].jobs` lists running jobs (the app shows them with a
   "Stop" button — the `job.cancel` primitive), and "Can I shut down?" counts them. At most 4 jobs per plugin at once
   (`409 facts:jobs-limit`; jobs of the previous version that are still being stopped after an update don't count). A job survives restarts of your streamable process (language, a new secret) but
@@ -768,14 +771,18 @@ if (i >= 0) {
 }
 ```
 
-`reason=<code>` (last line, `[a-z0-9-]`, up to 48) goes to `result.reason`; `message=<text>` (one of the last 5 lines,
-contract 2) is shown to the human as `"<button>": <text>` — in the hub language, up to 120 characters, without the button
-name. Without `message=` the human only sees "the plugin refused (<code>)". Hub 0.1.6 shows a refusal in its own
-window with `message=` as the headline; three optional lines fill the rest — write them **before** `message=` (older
-hubs read only the last 5 lines): `hint=<what to do>`, `session=<session id>` (the window names that session's tab and
-offers "Show the tab") and up to three `fact=<label>: <value>` rows. After an action the hub runs the plugin
-again (a streamable plugin gets `{"type":"actionResult","id":…,"actionId":…,"primitive":null,"arg":…,"ok":…,"code":…}`
-instead — `arg` is the checked value from the offer, `null` without one and for an input action, which adds
+`reason=<code>` (last line, `[a-z0-9-]`, up to 48) goes to `result.reason`; `message=<text>` (one of the last 5
+non-empty lines, contract 2) goes to `result.message` — write it in the hub language, up to 120 characters, without the
+button name. The hub (0.1.6+) shows a refusal in its own window with `message=` as the headline (older hubs showed
+`"<button>": <text>` in a system alert); without `message=` the headline is only "The plugin refused", with the code
+in small print. The window always has an "Action" row with the button's label; three optional lines fill the rest —
+write them **before** `message=` and `reason=`, among the last 12 non-empty stdout lines (`message=` itself is looked
+for in the last 5 only): `hint=<what to do>` (an advice line, up to 120 characters), `session=<session id>` (the window
+names that session's tab and offers "Show the tab") and up to three `fact=<label>: <value>` rows (the label up to 40
+characters, without a colon). A button without a typed-text field (`input=`) also gets "Try again", which runs the
+action once more, the confirmation included. A background job's end carries only `reason` and `message`. After an
+action the hub runs the plugin again (a streamable plugin gets
+`{"type":"actionResult","id":…,"actionId":…,"primitive":null,"arg":…,"ok":…,"code":…}` instead — `arg` is the checked value from the offer, `null` without one and for an input action, which adds
 `inputLength`; a background action adds `job`), so the new state shows right away: the first frame after an action
 reaches the app without the frame-rate wait (section 2).
 
@@ -1090,13 +1097,15 @@ if (s.body?.ready) await hubPost("/terminal/send-text", { sessionId, text: "/eff
 `ready` = the session is idle, in the foreground, its input field is found and empty, no turn running. A line is
 printable ASCII without `\`, 1…200 characters, no leading or trailing spaces; the hub presses Enter itself after
 checking that the field holds exactly that line. Calls come from a run, a streamable process or a running action (a
-human click — 30 s budget; typing may take up to ~20 s, so prefer an action or streamable over a 5 s standard run).
+human click — the action timeout, 30 s by default; typing may take up to ~20 s, so prefer an action or streamable over a 5 s standard run).
 Rate limits: 60 requests and 12 sends per minute per plugin, 4 sends per minute per tab. Do not call anything with
 `AGENTHUB_PAUSED=1`.
 
 What to do with refusals: `prompt-not-empty` — the human has a draft (the hub typed, saw the draft and erased its own characters): show "clear
 the input field"; `prompt-mismatch` — **the line was typed but Enter was not pressed**: tell the human, never retry
-automatically; `session-busy`, `not-foreground`, `prompt-not-found` — try on the next frame; `unverified`,
+automatically; `session-busy`, `not-foreground`, `prompt-not-found` — try on the next frame; `binding-unknown` — the
+hub could not confirm that the tab belongs to this very session process, so nothing was typed (`read-screen` says so
+beforehand: `bound: false`, `ready: false`) — try on a later frame; `unverified`,
 `pid-mismatch` — never type into that session; `unsupported` — the session's terminal cannot do it (iTerm2 and
 Terminal.app neither read the screen nor type; cmux and tmux do) — the answer names `terminal` and `capability`, do not
 retry; timeouts — check `claude-sessions.json` before retrying. The full list is in [`api.md`](api.md), "Terminal". Lines are never journaled, only their length and declared command.

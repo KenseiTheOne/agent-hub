@@ -28,6 +28,9 @@ final class FakeDaemon: @unchecked Sendable {
     var reply: @Sendable (_ method: String, _ uri: String) -> (status: Int, body: String)? = { _, _ in nil }
     /// Like `reply`, with the request body (checked first).
     var replyBody: @Sendable (_ method: String, _ uri: String, _ body: String) -> (status: Int, body: String)? = { _, _, _ in nil }
+    /// Seconds to hold an answer back: by path and that path's request number (from 0). The body is the one made
+    /// when the request arrived — a slow answer is an old one.
+    var delay: @Sendable (_ uri: String, _ n: Int) -> Double = { _, _ in 0 }
 
     var peerClass: String {
         get { lock.withLock { _peerClass } }
@@ -100,13 +103,18 @@ final class FakeDaemon: @unchecked Sendable {
             case .end:
                 guard let h = head else { return }
                 let r = daemon.respond(h, body: body.readString(length: body.readableBytes) ?? "", channel: context.channel)
-                var headers = HTTPHeaders()
-                headers.add(name: "content-type", value: r.sse ? "text/event-stream" : "application/json")
-                if !r.sse { headers.add(name: "content-length", value: "\(r.body.utf8.count)") }
-                context.write(wrapOutboundOut(.head(HTTPResponseHead(version: h.version, status: r.status, headers: headers))), promise: nil)
-                context.write(wrapOutboundOut(.body(.byteBuffer(ByteBuffer(string: r.body)))), promise: nil)
-                // keep the event stream open until the test closes it (dropStreams)
-                if r.sse { context.flush() } else { context.writeAndFlush(wrapOutboundOut(.end(nil)), promise: nil) }
+                let wait = daemon.delay(h.uri, daemon.requests.filter { $0.uri == h.uri }.count - 1)
+                let channel = context.channel
+                let send: @Sendable () -> Void = {
+                    var headers = HTTPHeaders()
+                    headers.add(name: "content-type", value: r.sse ? "text/event-stream" : "application/json")
+                    if !r.sse { headers.add(name: "content-length", value: "\(r.body.utf8.count)") }
+                    channel.write(HTTPServerResponsePart.head(HTTPResponseHead(version: h.version, status: r.status, headers: headers)), promise: nil)
+                    channel.write(HTTPServerResponsePart.body(.byteBuffer(ByteBuffer(string: r.body))), promise: nil)
+                    // keep the event stream open until the test closes it (dropStreams)
+                    if r.sse { channel.flush() } else { channel.writeAndFlush(HTTPServerResponsePart.end(nil), promise: nil) }
+                }
+                if wait > 0 { _ = context.eventLoop.scheduleTask(in: .milliseconds(Int64(wait * 1000)), send) } else { send() }
             }
         }
     }

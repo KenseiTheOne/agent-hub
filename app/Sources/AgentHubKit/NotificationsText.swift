@@ -162,3 +162,39 @@ public enum NotificationsText {
         }
     }
 }
+
+/// What macOS says about this app's own banners (System Settings → Notifications). `unknown` — not read yet, or the
+/// app runs without a bundle and has no notifications of its own.
+public enum NotifyPermission: String, Sendable, Equatable {
+    case unknown, allowed, notAsked, denied
+}
+
+/// "macOS does not let Agent Hub show notifications": a quiet row with a button that opens System Settings. Without
+/// it the refusal is invisible — the hub falls back to the daemon's plain banner and nothing says why the buttons
+/// are gone.
+public enum NotifyPermissionText {
+    /// Whether to show the row: macOS said "no" and the hub's own notifications are on (`/state.notifications.enabled`;
+    /// with them off there is nothing to miss). `hidden` — the human pressed "Dismiss" in the panel row.
+    public static func shows(_ p: NotifyPermission, hubEnabled: Bool?, hidden: Bool = false) -> Bool {
+        p == .denied && hubEnabled != false && !hidden
+    }
+
+    public static var title: String {
+        tr("macOS не разрешает Agent Hub показывать уведомления", "macOS doesn't allow Agent Hub to show notifications")
+    }
+
+    public static var detail: String {
+        tr("Хаб показывает их запасным способом: без кнопок, и щелчок по уведомлению не открывает панель. Разрешите уведомления для Agent Hub в Системных настройках.",
+           "The hub falls back to plain banners: no buttons, and clicking one doesn't open the panel. Allow notifications for Agent Hub in System Settings.")
+    }
+
+    public static var button: String { tr("Открыть настройки macOS", "Open System Settings") }
+    public static var hide: String { tr("Скрыть", "Dismiss") }
+
+    /// System Settings → Notifications, on this app's page when the bundle id is known.
+    public static func settingsURL(bundleId: String?) -> URL {
+        let base = "x-apple.systempreferences:com.apple.Notifications-Settings.extension"
+        let id = bundleId?.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
+        return URL(string: id.isEmpty ? base : "\(base)?id=\(id)") ?? URL(string: base)!
+    }
+}

@@ -872,7 +872,7 @@ test("trial run: no confirmation by the deadline and no watchdog — the new dae
     w.conns = [{ pid: 555 }];
     const u = w.make({ hasSupervisor: () => true });
     assert.equal(u.resume(), "confirm-wait");
-    await waitFor(() => w.calls.includes("restart"), { timeoutMs: 2000 });
+    await waitFor(() => w.calls.includes("restart"), { timeoutMs: 15_000 });
     assert.ok(w.calls.includes("kill:555"), "the new app is killed");
     assert.ok(w.calls.includes(`killApp:${versionApp(home, "0.2.0")}`), "and one that did not connect — by the version's bundle path");
     assert.ok(w.calls.indexOf(`killApp:${versionApp(home, "0.2.0")}`) < w.calls.indexOf("restart"));
@@ -1596,7 +1596,7 @@ test("review: the new daemon came up after the trial-run deadline — the deadli
     const w2 = updaterWorld(home, { self: "0.2.0", available: null });
     const u2 = w2.make({ hasSupervisor: () => true, ...fastOpts({ deadlineMs: 400 }) });
     u2.resume();
-    await waitFor(() => w2.calls.includes("restart"), { timeoutMs: 2000 });
+    await waitFor(() => w2.calls.includes("restart"), { timeoutMs: 15_000 });
     assert.equal(readInstall(home).phase, "rolled-back");
     u2.stop();
   } finally {
@@ -2309,12 +2309,12 @@ test("install: the builder did not start (node removed) — hub-update:node-miss
   }
 });
 
-test("platform: process descendants from the ps table; killProcessTree signals the process and all its descendants", () => {
+test("platform: process descendants from the ps table; killProcessTree signals the process and all its descendants", async () => {
   const { descendantPids, killProcessTree } = PLATFORM_MOD;
   const ps = "  10 1\n  11 10\n  12 11\n  13 10\n  20 1\n  21 20\n";
   assert.deepEqual(descendantPids(10, { psOutput: ps, platform: "darwin" }).sort(), [11, 12, 13]);
   assert.deepEqual(descendantPids(10, { psOutput: ps, platform: "win32" }), []);
   const sent = [];
-  assert.equal(killProcessTree(10, "SIGKILL", { psOutput: ps, platform: "darwin", kill: (p, s) => sent.push([p, s]) }), 4);
+  assert.equal(await killProcessTree(10, "SIGKILL", { psOutput: ps, platform: "darwin", kill: (p, s) => sent.push([p, s]) }), 4);
   assert.deepEqual(sent.map((x) => x[0]).sort(), [10, 11, 12, 13]);
 });

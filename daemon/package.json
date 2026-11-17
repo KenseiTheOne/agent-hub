@@ -1,6 +1,6 @@
 {
   "name": "agenthub-daemon",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "private": true,
   "type": "module",
   "description": "Agent Hub: the daemon (core) — Node ESM with no dependencies",
@@ -14,6 +14,6 @@
   },
   "scripts": {
     "build:native": "../scripts/build-native.sh",
-    "test": "env -u NODE_OPTIONS node --test 'test/*.test.mjs'"
+    "test": "env -u NODE_OPTIONS node --test --test-concurrency=3 --test-timeout=300000 'test/*.test.mjs'"
   }
 }

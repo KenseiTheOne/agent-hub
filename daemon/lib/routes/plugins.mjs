@@ -10,10 +10,14 @@
 //                                          install --from); without a pinned application — 409 own:no-app
 //   POST /registry/own/approve  app      — {requestId, consentToken?}: without a token, always 428 with the consent sheet
 //   POST /registry/own/decline  app      — {requestId}
+//   POST /registry/key/accept   app      — {registry, consentToken?}: the key in config.json differs from the accepted one
+//                                          (/state.registryKeys); without a token, 428 with both fingerprints; with it — the
+//                                          new key is accepted and the catalog is fetched again
 //
 // The daemon decides on consent: the token is single-use, lives 120 s, and is bound to the id, the archive and the application's pid.
 // A diagnostic shell run (peer.diagnostic: --snapshot-consent) can't change anything (server.mjs); install
-// and own/approve answer it with the sheet but no install (preview): 428 or 409 consent:nothing.
+// and own/approve answer it with the sheet but no install (preview): 428 or 409 consent:nothing. key/accept answers it
+// with its sheet too (428, a token nothing accepts) and never accepts a key.
 
 import { managerFor, RegistryError } from "../plugins.mjs";
 import { _checker as pluginsChecker } from "../services/plugins.mjs";
@@ -119,6 +123,31 @@ export const routes = [
       if (!requestId) return { status: 400, body: { error: "args:requestId:required" } };
       const token = typeof body.consentToken === "string" ? body.consentToken : null;
       return { status: 200, body: mgrOf(ctx).approveOwn(requestId, { consentToken: token, peer, preview: Boolean(peer.diagnostic) }) };
+    }),
+  },
+  {
+    // The registry key in config.json is not the one the hub accepted: only a human in the pinned app makes it the trust root.
+    // A diagnostic shell run (peer.diagnostic) gets the window only: the same 428 body with a token nothing accepts, and
+    // 403 peer:diagnostic for a request that carries a token — it never reaches the fetch below.
+    method: "POST",
+    path: "/registry/key/accept",
+    peers: ["app"],
+    diagnostic: "preview",
+    handler: wrap(async ({ body, peer, ctx }) => {
+      const registry = body && typeof body.registry === "string" ? body.registry : null;
+      if (!registry) return { status: 400, body: { error: "args:registry:required" } };
+      const token = typeof body.consentToken === "string" ? body.consentToken : null;
+      const m = mgrOf(ctx);
+      const r = m.acceptRegistryKey(registry, { consentToken: token, peer, preview: Boolean(peer.diagnostic) });
+      // the catalog on disk was signed with the previous key and no longer verifies: take the one the new key signs
+      let fetchError = null;
+      try {
+        const f = await m.fetchCatalog();
+        fetchError = f.registries.find((x) => x.name === registry)?.error ?? null;
+      } catch (e) {
+        fetchError = e instanceof RegistryError ? e.code : "registry:fetch";
+      }
+      return { status: 200, body: { ...r, fetched: !fetchError, ...(fetchError ? { fetchError } : {}) } };
     }),
   },
   {

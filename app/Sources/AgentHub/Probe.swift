@@ -12,7 +12,7 @@ import Foundation
 /// build doesn't have it: any process of the same user could launch the AgentHub.app binary with this flag
 /// and run an "immediate"-level action as the app class (e.g. `session.respond` — approve a card
 /// without a human). Besides, the daemon doesn't treat a process with `--probe-action` in argv as app (peer:app-probe).
-/// Probe **never gives** confirmation: on 428 it prints the core's text and exits (consent comes only from a human in an NSAlert).
+/// Probe **never gives** confirmation: on 428 it prints the core's text and exits (consent comes only from a human in the hub's confirmation window).
 enum Probe {
     static var wanted: Bool {
         let a = CommandLine.arguments

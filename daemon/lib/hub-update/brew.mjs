@@ -8,7 +8,8 @@
 // newer version than Versions/current, the hub offers "Update", which builds it from the brew tree with the normal trial
 // run and rollback.
 
-import { existsSync, readFileSync, realpathSync, renameSync, statSync, writeFileSync, chmodSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { updateConfig } from "../statefile.mjs";
 import { isAbsolute, join, resolve, sep } from "node:path";
 import { parseVersionFile } from "../version.mjs";
 
@@ -97,31 +98,22 @@ export function brewSettingReader() {
 // Write services.hubUpdate.brew (dir) or remove it (null); the rest of config.json stays. tmp 0600 + rename.
 // → true if the file changed.
 export function writeBrewSetting(configPath, dir) {
-  let cfg = {};
-  try {
-    cfg = JSON.parse(readFileSync(configPath, "utf8"));
-  } catch (e) {
-    if (e?.code !== "ENOENT") throw e;
-  }
-  if (!cfg || typeof cfg !== "object" || Array.isArray(cfg)) cfg = {};
-  const cur = brewSetting(cfg);
-  const want = dir ? resolve(dir) : null;
-  if (cur === want) return false;
-  const services = cfg.services && typeof cfg.services === "object" ? cfg.services : (cfg.services = {});
-  const hu = services.hubUpdate && typeof services.hubUpdate === "object" ? services.hubUpdate : (services.hubUpdate = {});
-  if (want) hu.brew = want;
-  else {
-    delete hu.brew;
-    if (!Object.keys(hu).length) delete services.hubUpdate;
-    if (!Object.keys(services).length) delete cfg.services;
-  }
-  const tmp = `${configPath}.tmp-${process.pid}`;
-  writeFileSync(tmp, JSON.stringify(cfg, null, 2) + "\n", { mode: 0o600 });
-  try {
-    chmodSync(tmp, 0o600);
-  } catch {}
-  renameSync(tmp, configPath);
-  return true;
+  // nothing to remove from a file that does not exist (and no directory is created for it)
+  if (!dir && !existsSync(configPath)) return false;
+  // under the config lock (lib/statefile.mjs updateConfig): the daemon, the CLI and the updater write config.json too
+  return updateConfig(configPath, (cfg) => {
+    const cur = brewSetting(cfg);
+    const want = dir ? resolve(dir) : null;
+    if (cur === want) return false;
+    const services = cfg.services && typeof cfg.services === "object" ? cfg.services : (cfg.services = {});
+    const hu = services.hubUpdate && typeof services.hubUpdate === "object" ? services.hubUpdate : (services.hubUpdate = {});
+    if (want) hu.brew = want;
+    else {
+      delete hu.brew;
+      if (!Object.keys(hu).length) delete services.hubUpdate;
+      if (!Object.keys(services).length) delete cfg.services;
+    }
+  }).written;
 }
 
 // Paths not taken from the brew tree into Versions/<label>/src: VCS data, Finder litter and build products (the builder

@@ -11,7 +11,7 @@
 // The first call asks macOS for permission to control Terminal (Privacy & Security → Automation).
 
 import { existsSync } from "node:fs";
-import { hostOf, ttyOf } from "./_proc.mjs";
+import { hostOf, ttyOfAsync } from "./_proc.mjs";
 import { execError, execOf } from "./_exec.mjs";
 import { launchCommand, osa, OSASCRIPT } from "./iterm2.mjs";
 
@@ -64,7 +64,7 @@ export async function focusTty(tty, facts) {
 }
 
 export async function focus(target, facts) {
-  const tty = ttyOf(target.pid, facts);
+  const tty = await ttyOfAsync(target.pid, facts);
   if (!tty) return { ok: false, error: "no-tab" };
   return focusTty(tty, facts);
 }

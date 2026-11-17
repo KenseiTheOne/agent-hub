@@ -327,9 +327,9 @@ private func body(_ r: FakeDaemon.Request) -> [String: JSONValue] {
         #expect(changed && st.externalSessions.map(\.sessionId) == ["cx-3"])
         // an older daemon: no field
         #expect(try JSONDecoder().decode(HubState.self, from: Data(#"{"seq":1}"#.utf8)).externalSessions.isEmpty)
-        #expect(PluginPermission(kind: "subscribe", what: "agents:run-done").kindLabel == "Event subscription")
+        #expect(PluginPermission(kind: "subscribe", what: "agents:run-done").kindLabel == "Other plugins' events")
         L10n.shared.lang = .ru
-        #expect(PluginPermission(kind: "subscribe", what: "agents:run-done").kindLabel == "Подписка на события")
+        #expect(PluginPermission(kind: "subscribe", what: "agents:run-done").kindLabel == "События других плагинов")
     }
 }
 

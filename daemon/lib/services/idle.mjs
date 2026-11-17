@@ -11,7 +11,8 @@ import { computeIdle } from "../idle.mjs";
 
 export const name = "idle";
 
-// The idle.state fact — one per core (facts): survives a service restart in the same core.
+// The state behind /state.idle (ctx.provideState) — one per core (keyed by its facts): survives a service restart in the
+// same core.
 const byFacts = new WeakMap();
 
 function signature(v) {
@@ -117,9 +118,8 @@ export async function start(ctx) {
   const onStarted = () => st.schedule();
   ctx.on("services.started", onStarted);
   byFacts.set(ctx.facts, st);
-  try {
-    ctx.facts.provide("idle.state", () => byFacts.get(ctx.facts)?.state() ?? null);
-  } catch {} // already exists from a previous start in this core
+  // /state.idle — whether the computer can be shut down (lib/idle.mjs): {verdict, items, checked, since}
+  ctx.provideState("idle", () => byFacts.get(ctx.facts)?.state() ?? null);
   running.set(ctx, {
     st,
     off: () => {

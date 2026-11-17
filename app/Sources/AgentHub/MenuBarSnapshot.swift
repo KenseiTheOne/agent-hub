@@ -8,7 +8,7 @@ import AppKit
 enum MenuBarSnapshot {
     static let looks: [(MenuBarLook, Bool, String)] = [
         (.calm, false, tr("обычный", "normal")),
-        (.working, false, tr("идёт работа", "working")),
+        (.working, false, tr("идёт работа", "work in progress")),
         (.waiting(2), false, tr("ждут: 2", "waiting: 2")),
         // the number on the red badge is the waiting count, not the blockers
         (.blocked(1), false, tr("блокер, ждут 1", "blocker, 1 waiting")),

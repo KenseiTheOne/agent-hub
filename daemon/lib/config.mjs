@@ -5,13 +5,14 @@
 // Signature requirement strings (requirements.*) live here, not in the verification code. The daemon re-reads
 // requirements.app from config.json without a restart (lib/app-pin.mjs); the rest — at startup.
 
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { isLiveStateDir, standardPath as platformPath, stateDir, transportPath } from "./platform.mjs";
 import { isLabel } from "./version.mjs";
 import { msg } from "./i18n.mjs";
+import { loadStateJson, readJsonFile } from "./statefile.mjs";
 
 export const DAEMON_DIR = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 export const REPO_DIR = resolve(DAEMON_DIR, "..");
@@ -28,7 +29,7 @@ export function installOf(repoDir) {
 export const INSTALL = installOf(REPO_DIR);
 // Directories the hook and the bridge may be launched from: via Versions/current (that is how they are launched after install) and
 // the real directory of this version. Outside an install — REPO_DIR only.
-const RUN_DIRS = INSTALL ? [INSTALL.stableRepo, REPO_DIR] : [REPO_DIR];
+export const RUN_DIRS = INSTALL ? [INSTALL.stableRepo, REPO_DIR] : [REPO_DIR];
 
 // PATH like that of agents launched by launchd (Homebrew and ~/.local/bin ahead of the system ones), without NODE_OPTIONS. Platform layer.
 export function standardPath(home = homedir()) {
@@ -72,6 +73,9 @@ export const DEFAULTS = Object.freeze({
     // `plugin` SSE events of one plugin are coalesced to at most one per this interval (≤ 4/s), the latest state always
     // arrives (trailing edge); the first frame after a quiet period and the first after an action go out at once. 0 — off.
     emitMinIntervalMs: 250,
+    // Frames of one streamable plugin applied per second (parsed into the state), with a burst of as many: a plugin printing
+    // faster is throttled — the frames in between are dropped, the latest one is always applied. 0 — no limit.
+    maxFramesPerSec: 10,
     maxOutputBytes: 1024 * 1024,
     minIntervalMs: 1000,
     // Safety rescan of plugin directories: fs.watch (FSEvents) sometimes loses events.
@@ -108,14 +112,8 @@ export function defaultHome(env = process.env) {
   return stateDir({ env });
 }
 
-// JSON that a human edits by hand (config.json, settings.json). Editors also write UTF-8 with a BOM (VS Code "UTF-8
-// with BOM", PowerShell 5.1 Set-Content): the BOM is stripped. UTF-16 (BOM FF FE / FE FF) is not parsed, but we say so plainly.
-export function readJsonFile(path) {
-  const buf = readFileSync(path);
-  if ((buf[0] === 0xff && buf[1] === 0xfe) || (buf[0] === 0xfe && buf[1] === 0xff)) throw new Error(msg("err.json.utf16"));
-  const text = buf.toString("utf8");
-  return JSON.parse(text.charCodeAt(0) === 0xfeff ? text.slice(1) : text);
-}
+// JSON that a human edits by hand (BOM-aware) lives in lib/statefile.mjs; re-exported for its many importers.
+export { readJsonFile };
 
 // Paths inside the state directory.
 export function pathsFor(home) {
@@ -145,14 +143,37 @@ export function fileSig(path) {
   }
 }
 
+// What a damaged config.json must not loosen. The file could not be read, so whatever the human had switched off in it is
+// unknown — and the defaults switch some things ON. The parts that let code other than the hub's own act outside the hub are
+// closed until the file is fixed:
+//   - requirements.app stays null (the default): the `app` class is unreachable, so nothing app-only can be done;
+//   - extensions.enabled = false: <home>/Extensions is not scanned (external daemon code);
+//   - services.terminal.enabled = false: plugins cannot read or type into terminal tabs.
+// Everything else runs on the defaults (a service the human had disabled with services.<name>.enabled = false starts again).
+function failClosed(cfg) {
+  cfg.requirements = { ...cfg.requirements, app: null };
+  cfg.extensions = { ...cfg.extensions, enabled: false };
+  cfg.services = { ...cfg.services, terminal: { ...(cfg.services?.terminal || {}), enabled: false } };
+  return cfg;
+}
+
 // overrides — for tests (an object on top of config.json).
-export function loadConfig({ env = process.env, overrides = null } = {}) {
+// A config.json that cannot be parsed (or is empty, or is not an object): by default an error — a command-line tool says so
+// and exits. tolerant (the daemon): the file is treated as absent, its bytes are copied to config.json.bad, the parts listed
+// at failClosed are closed, and the result carries cfg.configDamaged = true and cfg.damagedFiles = [{file, backup, detail,
+// at}] for the journal and /state.
+export function loadConfig({ env = process.env, overrides = null, tolerant = false } = {}) {
   const home = defaultHome(env);
   const paths = pathsFor(home);
   // signature before reading: if the file changes after it, AppPinWatcher.reconcile() sees the mismatch and re-reads
   const loadedSig = fileSig(paths.config);
   let fileCfg = {};
-  if (existsSync(paths.config)) {
+  let damaged = null;
+  if (tolerant) {
+    const r = loadStateJson(paths.config);
+    damaged = r.damaged;
+    fileCfg = r.value || {};
+  } else if (existsSync(paths.config)) {
     try {
       fileCfg = readJsonFile(paths.config);
     } catch (e) {
@@ -160,6 +181,11 @@ export function loadConfig({ env = process.env, overrides = null } = {}) {
     }
   }
   let cfg = deepMerge(deepMerge(structuredClone(DEFAULTS), fileCfg), overrides || {});
+  if (damaged) {
+    cfg = failClosed(cfg);
+    cfg.configDamaged = true;
+  }
+  cfg.damagedFiles = damaged ? [damaged] : [];
   if (env.AGENTHUB_CLAUDE_HOME) cfg.claudeHome = env.AGENTHUB_CLAUDE_HOME;
   cfg.claudeHome = resolve(expandHome(cfg.claudeHome));
   cfg.builtinPluginsDir = resolve(expandHome(cfg.builtinPluginsDir || join(REPO_DIR, "plugins")));

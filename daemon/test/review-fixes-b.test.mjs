@@ -104,7 +104,7 @@ test("B1: a job that ends while the streamable process restarts — the new proc
     const jobId = r.body.result.job;
     // the restart takes ~1.5 s (the old process lingers); the 0.4 s job ends inside that window
     const restarted = h.core.restartPlugin("s", "SecretChanged");
-    await waitFor(() => !h.core.jobList().some((j) => j.id === jobId), { timeoutMs: 4000 });
+    await waitFor(() => !h.core.jobList().some((j) => j.id === jobId), { timeoutMs: 15_000 });
     await restarted;
     await waitFor(() => h.stdin().some(([why, m]) => why === "SecretChanged" && m.type === "jobExit" && m.job === jobId), { timeoutMs: 5000 });
     const after = h.stdin().filter(([why]) => why === "SecretChanged").map(([, m]) => m);
@@ -127,14 +127,14 @@ test("B2: a job whose descendant escapes with setsid and keeps stdout open still
     await waitFor(() => readIf(join(h.data, "gc.pid")).trim());
     gc = Number(readIf(join(h.data, "gc.pid")).trim());
     // the leader exits after 0.2 s; the grandchild holds stdout for 20 s — the job must end anyway
-    await waitFor(() => h.core.jobList().length === 0, { timeoutMs: 4000 });
+    await waitFor(() => h.core.jobList().length === 0, { timeoutMs: 15_000 });
     assert.ok(h.core.journal.tail(100).some((e) => e.type === "job-exit" && e.job === r.body.result.job && e.ok === true));
     // a job that never reports its exit (a kill that cannot stop it): stopJob ends it as orphaned
     h.core.jobKillGraceMs = 50;
     const fake = { id: "f".repeat(16), plugin: "s", actionId: "long", title: "Fake", startedAt: new Date().toISOString(), pid: 999999, kill: () => false, inst: h.core.host.get("s"), started: Date.now() };
     h.core.jobs.set(fake.id, fake);
     h.core.stopJob(fake, "cancelled");
-    await waitFor(() => !h.core.jobs.has(fake.id), { timeoutMs: 2000 });
+    await waitFor(() => !h.core.jobs.has(fake.id), { timeoutMs: 15_000 });
     const e = h.core.journal.tail(100).find((x) => x.type === "job-exit" && x.job === fake.id);
     assert.equal(e.reason, "orphaned");
     assert.equal(e.cancelled, "cancelled");
@@ -188,7 +188,7 @@ test("B3: on start the daemon kills job groups left by a crashed daemon — only
     const config = loadConfig({ env: { AGENTHUB_HOME: home, AGENTHUB_BUILTIN_PLUGINS: join(home, "none"), AGENTHUB_SERVICES: "none" } });
     core = new Core({ config, peer: createPeer({ config, sys: sysAs({ startSec: () => 500 }) }) });
     await core.init({ startPlugins: false });
-    await waitFor(() => !alive(a.pid), { timeoutMs: 4000 });
+    await waitFor(() => !alive(a.pid), { timeoutMs: 15_000 });
     assert.ok(alive(b.pid), "a process whose start time differs is not touched");
     const j = core.journal.tail(50);
     assert.ok(j.some((e) => e.type === "job-orphan-killed" && e.pid === a.pid && e.plugin === "p"));
@@ -220,7 +220,7 @@ test("B4: a run's pid stops being attributed as soon as the process exits, even 
     const sp = new StreamProcess(["/bin/sh", s2], { env: { PATH: "/usr/bin:/bin" }, cwd: dir, onFrame: () => {} });
     sp.start();
     await waitFor(() => readIf(join(dir, "qpid")).trim() && !alive(Number(readIf(join(dir, "qpid")).trim())));
-    await waitFor(() => sp.pid === null, { timeoutMs: 1000 });
+    await waitFor(() => sp.pid === null, { timeoutMs: 15_000 });
     await sp.stop();
     // a job: after the leader exited, kill() no longer signals its (possibly reused) group
     let exited = null;

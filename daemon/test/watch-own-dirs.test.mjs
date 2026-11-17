@@ -42,12 +42,14 @@ test("Watcher: a recursive entry sees a file in a subdirectory, a mask matches t
   const w = new Watcher([{ path: join(deep, "*.json"), recursive: true }, flat], (paths) => seen.push(...paths), { debounceMs: 50 });
   w.start();
   try {
-    await new Promise((r) => setTimeout(r, 200));
-    writeFileSync(join(deep, "sub", "a.json"), "1");
+    // no pauses for fs.watch to arm (a lost event is reported by the poll) and none to see that nothing came: each
+    // file that must not be reported is written before one that must, so it would have been reported no later
     writeFileSync(join(deep, "sub", "a.txt"), "1");
-    await waitFor(() => seen.some((p) => p.endsWith("a.json")), { timeoutMs: 5000 });
+    writeFileSync(join(deep, "sub", "a.json"), "1");
+    await waitFor(() => seen.some((p) => p.endsWith("a.json")), { timeoutMs: 15_000 });
     writeFileSync(join(flat, "sub", "b.json"), "1");
-    await new Promise((r) => setTimeout(r, 500));
+    writeFileSync(join(flat, "c.json"), "1");
+    await waitFor(() => seen.some((p) => p.endsWith("c.json")), { timeoutMs: 15_000 });
     assert.ok(!seen.some((p) => p.endsWith("a.txt")), "the mask filters by file name");
     assert.ok(!seen.some((p) => p.endsWith("b.json")), "a non-recursive directory does not see its subdirectories");
   } finally {
@@ -73,14 +75,13 @@ test("a local plugin watches its own data directory (recursively) and a path und
     writePlugin(h.config.paths.pluginsLocal, "home.1h.sh", WATCHER("Home", `# <agenthub.watch>~/.tool/state.json — the tool state</agenthub.watch>`));
     await h.core.host.rescan();
     await waitFor(() => title("own") === "run FirstLaunch" && title("home") === "run FirstLaunch", { timeoutMs: 8000 });
-    await new Promise((r) => setTimeout(r, 300));
+    // no pauses for fs.watch to arm: an event lost right after arming is reported by the Watcher's poll (within pollMs, 5 s)
     const data = join(h.config.paths.pluginData, "own");
     mkdirSync(join(data, "jobs"), { recursive: true });
-    await new Promise((r) => setTimeout(r, 300));
     writeFileSync(join(data, "jobs", "1.json"), "{}");
-    await waitFor(() => title("own") === "run FileChanged", { timeoutMs: 8000 });
+    await waitFor(() => title("own") === "run FileChanged", { timeoutMs: 20_000 });
     writeFileSync(join(pluginHome, ".tool", "state.json"), "{}");
-    await waitFor(() => title("home") === "run FileChanged", { timeoutMs: 8000 });
+    await waitFor(() => title("home") === "run FileChanged", { timeoutMs: 20_000 });
     assert.ok(!h.core.journal.tail(2000).some((e) => e.type === "warning" && e.plugin === "own" && /AGENTHUB_PLUGIN_DATA_PATH/.test(e.detail || "")), "no 'variable not given' warning");
   } finally {
     await h.stop();

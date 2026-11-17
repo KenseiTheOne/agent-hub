@@ -39,25 +39,55 @@ struct ResponseCard: View {
         return who + age + (card.subagent ? tr(" · субагент", " · subagent") : "")
     }
 
+    /// The head: glyph, title, badges. In one row while the title fits on a single line beside the badges; otherwise
+    /// the badges go to a row of their own under the title, which then has the card's whole width — a word is never
+    /// broken to make room for a badge (a narrow card used to show «Разрешени / е»).
     private var head: some View {
-        HStack(alignment: .top, spacing: 10) {
-            StatusGlyph(status: .wait, size: 22, question: card.kind == .question)
-            VStack(alignment: .leading, spacing: 1) {
-                Text(card.kind == .question ? (card.questions.first?.question ?? tr("Вопрос", "Question")) : tr("Разрешение", "Permission"))
-                    .font(.system(size: 14, weight: .bold)).fixedSize(horizontal: false, vertical: true)
-                Text(sub).font(.system(size: 11.5)).foregroundStyle(.white.opacity(0.55))
+        ViewThatFits(in: .horizontal) {
+            HStack(alignment: .top, spacing: 10) {
+                StatusGlyph(status: .wait, size: 22, question: card.kind == .question)
+                titleBlock(oneLine: true)
+                Spacer(minLength: 0)
+                badges(top: 0)
             }
-            Spacer()
-            if demo { Text(tr("демо", "demo")).font(.system(size: 10.5, weight: .bold)).padding(.horizontal, 6).padding(.vertical, 2).background(Capsule().fill(Color.white.opacity(0.12))) }
-            if card.kind == .permission {
-                Text("Claude Code ✓").font(.system(size: 10.5, weight: .bold)).foregroundStyle(hexColor(0x7EE29B))
-                    .padding(.horizontal, 7).padding(.vertical, 2).background(Capsule().fill(hexColor(0x30D158, 0.16)))
-                    .help(tr("Подпись Claude Code проверена хабом", "Claude Code signature verified by the hub"))
+            VStack(alignment: .leading, spacing: 0) {
+                HStack(alignment: .top, spacing: 10) {
+                    StatusGlyph(status: .wait, size: 22, question: card.kind == .question)
+                    titleBlock(oneLine: false)
+                    Spacer(minLength: 0)
+                }
+                // under the title, aligned with it (glyph 22 + spacing 10); an empty row takes no height
+                HStack(spacing: 6) { badges(top: 6) }.padding(.leading, 32)
             }
-            if let until = card.expiresDate {
-                TimelineView(.periodic(from: .now, by: 1)) { ctx in
-                    let left = max(0, Int(until.timeIntervalSince(ctx.date)))
-                    if left < 30 { Text(left > 0 ? tr("ещё \(left) с", "\(left) s left") : tr("истекает", "expiring")).font(.system(size: 11).monospacedDigit()).foregroundStyle(.orange) }
+        }
+    }
+
+    private func titleBlock(oneLine: Bool) -> some View {
+        VStack(alignment: .leading, spacing: 1) {
+            Text(card.kind == .question ? (card.questions.first?.question ?? tr("Вопрос", "Question")) : tr("Разрешение", "Permission"))
+                .font(.system(size: 14, weight: .bold)).lineLimit(oneLine ? 1 : nil).fixedSize(horizontal: oneLine, vertical: true)
+            Text(sub).font(.system(size: 11.5)).foregroundStyle(.white.opacity(0.55)).lineLimit(oneLine ? 1 : nil).fixedSize(horizontal: oneLine, vertical: true)
+        }
+    }
+
+    /// The badges never wrap or shrink: each keeps its one line. The top padding (`top`, for the row under the title)
+    /// belongs to each badge, so that row has no height when there is none.
+    @ViewBuilder private func badges(top: CGFloat) -> some View {
+        if demo {
+            Text(tr("демо", "demo")).font(.system(size: 10.5, weight: .bold)).lineLimit(1).fixedSize()
+                .padding(.horizontal, 6).padding(.vertical, 2).background(Capsule().fill(Color.white.opacity(0.12))).padding(.top, top)
+        }
+        if card.kind == .permission {
+            Text("Claude Code ✓").font(.system(size: 10.5, weight: .bold)).foregroundStyle(hexColor(0x7EE29B)).lineLimit(1).fixedSize()
+                .padding(.horizontal, 7).padding(.vertical, 2).background(Capsule().fill(hexColor(0x30D158, 0.16))).padding(.top, top)
+                .help(tr("Подпись Claude Code проверена хабом", "Claude Code signature verified by the hub"))
+        }
+        if let until = card.expiresDate {
+            TimelineView(.periodic(from: .now, by: 1)) { ctx in
+                let left = max(0, Int(until.timeIntervalSince(ctx.date)))
+                if left < 30 {
+                    Text(left > 0 ? tr("ещё \(left) с", "\(left) s left") : tr("истекает", "expiring")).font(.system(size: 11).monospacedDigit()).foregroundStyle(.orange)
+                        .lineLimit(1).fixedSize().padding(.top, top)
                 }
             }
         }
@@ -76,7 +106,7 @@ struct ResponseCard: View {
             HStack(spacing: 8) {
                 Button(tr("Разрешить один раз", "Allow once")) { send(.allowOnce) }
                     .buttonStyle(CapsuleStyle(fill: hexColor(0x0A84FF), stroke: .clear, height: 32, expand: false))
-                Button(tr("Отклонить", "Deny")) { send(.deny) }
+                Button(tr("Запретить", "Deny")) { send(.deny) }
                     .buttonStyle(CapsuleStyle(height: 32, expand: false))
                 tabLink
             }
@@ -103,8 +133,8 @@ struct ResponseCard: View {
     @ViewBuilder private var tabLink: some View {
         if let req = focusRequest {
             let b = demo ? nil : block(req)
-            Button(tr("Открыть вкладку", "Open tab")) {
-                Task { await store.perform(id: req.primitive, args: req.args, label: tr("Перейти во вкладку", "Switch to tab")) }
+            Button(FocusText.action) {
+                Task { await store.perform(id: req.primitive, args: req.args, label: FocusText.action) }
             }
             .buttonStyle(.plain).font(.system(size: 12.5)).foregroundStyle(b == nil ? hexColor(0x4DA3FF) : .white.opacity(0.35))
             .disabled(b != nil)
@@ -191,7 +221,7 @@ struct ResponseCard: View {
 /// Synthetic cards for `--demo-cards` (screenshots without a live session or a certificate).
 enum DemoCards {
     static var all: [HookCard] {
-        let soon = ISO8601DateFormatter().string(from: Date().addingTimeInterval(95))
+        let soon = ISODate.string(Date().addingTimeInterval(95))
         return [
             HookCard(requestId: "demo0000000000000000000000000001", sessionId: "00000000-0000-4000-8000-00000000d001",
                      sessionName: tr("Демо — сборка", "Demo — build"), kind: .permission, tool: "Bash", summary: "Bash: npm", expiresAt: soon),
@@ -218,7 +248,7 @@ enum DemoSessions {
             SessionInfo(sessionId: "00000000-0000-4000-8000-00000000e003", status: "idle", name: tr("Демо — заметки", "Demo — notes"), cwd: "~/docs",
                         surfaceId: "00000000-0000-4000-8000-00000000f003", effort: "medium"),
             SessionInfo(sessionId: "00000000-0000-4000-8000-00000000e004", status: "idle", name: tr("Демо — фон", "Demo — background"), cwd: "~", effort: "low"),
-            // "Waiting for you": the "xhigh + ⚡ultracode" pair does not fit next to the name, so one capsule stays and the name is shown in full
+            // "Needs you": the "xhigh + ⚡ultracode" pair does not fit next to the name, so one capsule stays and the name is shown in full
             SessionInfo(sessionId: "00000000-0000-4000-8000-00000000e005", status: "waiting", name: tr("Демо — документация", "Demo — docs"), cwd: "~/Projects/Demo/docs",
                         surfaceId: "00000000-0000-4000-8000-00000000f005", effort: "xhigh", ultracode: true),
         ]

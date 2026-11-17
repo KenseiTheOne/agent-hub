@@ -14,6 +14,38 @@ import UserNotifications
 /// the panel button (non-immediate → the app's confirmation sheet). macOS attaches buttons through a category, so each
 /// distinct button set gets its own category, registered before the banner is added. `href` is the body click target;
 /// without it the click opens the plugin page. Without these fields — the plain "Open" banner as before.
+/// What macOS allows this app, for the views: read at launch, every time the app comes forward (the human returns
+/// from System Settings) and whenever a banner is about to be shown. Without a bundle it stays `unknown`.
+@MainActor
+@Observable
+final class NotifyPermissionModel {
+    static let shared = NotifyPermissionModel()
+    private(set) var status: NotifyPermission = .unknown
+
+    func refresh() {
+        guard Bundle.main.bundleIdentifier != nil else { return } // UNUserNotificationCenter crashes without a bundle
+        Task {
+            let s = await UNUserNotificationCenter.current().notificationSettings()
+            set(s.authorizationStatus)
+        }
+    }
+
+    func set(_ s: UNAuthorizationStatus) {
+        let next: NotifyPermission
+        switch s {
+        case .authorized, .provisional: next = .allowed
+        case .notDetermined: next = .notAsked
+        case .denied: next = .denied
+        default: next = .unknown
+        }
+        if next != status { status = next }
+    }
+
+    static func openSystemSettings() {
+        NSWorkspace.shared.open(NotifyPermissionText.settingsURL(bundleId: Bundle.main.bundleIdentifier))
+    }
+}
+
 @MainActor
 final class Notifier: NSObject, UNUserNotificationCenterDelegate {
     nonisolated static let category = NotifyCategory.plain
@@ -27,6 +59,7 @@ final class Notifier: NSObject, UNUserNotificationCenterDelegate {
     private let center = UNUserNotificationCenter.current()
     /// Button sets registered as categories, oldest first: category id → buttons (verified on every hit).
     private var buttonSets = NotifyCategory.Registry(limit: maxCategories)
+    private var activeObserver: (any NSObjectProtocol)?
 
     init(store: HubStore, onOpen: @escaping @MainActor (NotifyTarget) -> Void) {
         self.store = store
@@ -34,6 +67,11 @@ final class Notifier: NSObject, UNUserNotificationCenterDelegate {
         super.init()
         center.delegate = self
         registerCategory()
+        NotifyPermissionModel.shared.refresh()
+        // the human may have changed the permission in System Settings while the app was in the background
+        activeObserver = NotificationCenter.default.addObserver(forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main) { _ in
+            Task { @MainActor in NotifyPermissionModel.shared.refresh() }
+        }
     }
 
     /// The "Открыть" / "Open" button and the plugin buttons' categories — in the hub language; re-registered when the
@@ -93,11 +131,13 @@ final class Notifier: NSObject, UNUserNotificationCenterDelegate {
 
     private func authorized() async -> Bool {
         let settings = await center.notificationSettings()
+        NotifyPermissionModel.shared.set(settings.authorizationStatus)
         switch settings.authorizationStatus {
         case .authorized, .provisional: return true
         case .notDetermined:
             // ask, but don't show this notification: while the human is answering, the daemon will already show it itself
             _ = try? await center.requestAuthorization(options: [.alert, .sound])
+            NotifyPermissionModel.shared.set(await center.notificationSettings().authorizationStatus)
             return false
         default: return false
         }

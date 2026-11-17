@@ -3,8 +3,14 @@
 The bridge is a small process that lives in a **pinned cmux tab** and runs allowlisted cmux operations for the daemon
 (three since stage 5; `read-screen` and `send-text` since contract 3, for the terminal layer and the `/terminal/*`
 routes of trusted plugins). Inside a cmux tab it legitimately inherits access to the cmux socket; the daemon itself
-neither has nor gets that access. The daemon recognizes the bridge by its script path (`peer.bridgePaths`, by default
-`<repo>/bridge/agenthub-bridge.mjs`) — peer class `bridge`, which may use only the `/bridge/*` routes.
+neither has nor gets that access. The daemon takes a process for the bridge — peer class `bridge`, which may use only
+the `/bridge/*` routes — when all of this holds: the interpreter runs the script directly (it is `argv[1]`, with no
+`--require` / `--import` / `--eval` / `--inspect` before it); the script's real path, not a symlink with its name, is one
+of `peer.bridgePaths` (by default `<repo>/bridge/agenthub-bridge.mjs`); and that file sits inside the hub's own tree as
+a regular file owned by this user (or root) that nobody else can write, the same for every directory above it up to the
+tree's root. A process that fails a rule is an ordinary `cli` peer and is told why (`403 peer:bridge-launch` or
+`peer:bridge-file`). A script has no code signature, so this narrows the class rather than proves it — see "The bridge
+class" in [`docs/api.md`](../docs/api.md#peer-classes).
 
 The bridge is the **cmux terminal adapter's internal detail** (`daemon/lib/terminals/cmux.mjs`): the core and the shell
 talk to terminals only through the terminal layer, and only cmux sessions need the bridge. Other terminals (tmux, iTerm2,

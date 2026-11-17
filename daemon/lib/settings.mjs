@@ -13,18 +13,21 @@
 // the system preferred languages (systemLocales) go to plugins in AGENTHUB_LOCALE and pick plugin metadata translations
 // (lib/i18n.mjs contentLang). A non-Russian system gets the en UI (product decision, detectSystemLang).
 
-import { execFileSync } from "node:child_process";
-import { existsSync, renameSync, writeFileSync } from "node:fs";
+import { execFile, execFileSync } from "node:child_process";
 import { join } from "node:path";
-import { readJsonFile, systemLangOverride } from "./config.mjs";
+import { systemLangOverride } from "./config.mjs";
+import { loadStateJson, writeJsonAtomic } from "./statefile.mjs";
 import { systemLanguagesCommand } from "./platform.mjs";
 import { normLang, normLocales } from "./i18n.mjs";
 import { normPrefs, prefsFromFile, prefsToFile } from "./push/prefs.mjs";
 
 export const LANG_SETTINGS = ["system", "ru", "en"];
 const SYSTEM_TTL_MS = 60_000;
+const SYSTEM_STALE_MS = 5 * SYSTEM_TTL_MS;
 
 // The raw OS language list (macOS: `defaults read -g AppleLanguages`, a synchronous call ≤ 2 s). → text | "" (none, failed)
+// Synchronous: the very first read of a daemon (its messages need a language at once) and the CLI. A running daemon re-reads
+// with readSystemLanguagesAsync (Settings.refreshSystem), off the event loop.
 export function readSystemLanguages({ platform = process.platform } = {}) {
   const cmd = systemLanguagesCommand({ platform });
   if (!cmd) return "";
@@ -33,6 +36,19 @@ export function readSystemLanguages({ platform = process.platform } = {}) {
   } catch {
     return "";
   }
+}
+
+// The same read without blocking the event loop. → Promise<text | ""> (never rejects)
+export function readSystemLanguagesAsync({ platform = process.platform } = {}) {
+  const cmd = systemLanguagesCommand({ platform });
+  if (!cmd) return Promise.resolve("");
+  return new Promise((resolve) => {
+    try {
+      execFile(cmd[0], cmd.slice(1), { encoding: "utf8", timeout: 2000 }, (e, out) => resolve(e ? "" : String(out || "")));
+    } catch {
+      resolve("");
+    }
+  });
 }
 
 const intlLocale = () => {
@@ -69,10 +85,18 @@ export class Settings {
   // detectLocales — the system language list (detectSystemLocales). With only detect overridden (a test hub's fixed
   // language), the list is that one language — unless AGENTHUB_SYSTEM_LOCALES sets it explicitly.
   // Neither overridden (the live daemon): both come from ONE OS read per SYSTEM_TTL_MS (readLanguages — readSystemLanguages;
-  // a check may pass its own, with env for AGENTHUB_SYSTEM_LOCALES).
-  constructor(path, { detect = null, detectLocales = null, readLanguages = null, env = process.env, now = () => Date.now() } = {}) {
+  // a check may pass its own, with env for AGENTHUB_SYSTEM_LOCALES). The first read is synchronous; once refreshSystem()
+  // has run (the daemon calls it every minute — readLanguagesAsync, readSystemLanguagesAsync), the getters stop reading the
+  // OS themselves and serve what the last refresh brought.
+  // keepBad (the daemon only): a file that cannot be parsed is copied to <path>.bad before anything overwrites it; either
+  // way this.damaged says so ({file, backup, detail, at} | null) and the defaults apply.
+  constructor(path, { detect = null, detectLocales = null, readLanguages = null, readLanguagesAsync = null, env = process.env, now = () => Date.now(), keepBad = false } = {}) {
     this.path = path;
-    this.shared = !detect && !detectLocales ? { read: readLanguages || (() => readSystemLanguages()), env, at: 0, value: null } : null;
+    this.keepBad = keepBad;
+    this.damaged = null;
+    // readAsync: a check that passes only the synchronous reader is refreshed through it
+    const readAsync = readLanguagesAsync || (readLanguages ? async () => readLanguages() : () => readSystemLanguagesAsync());
+    this.shared = !detect && !detectLocales ? { read: readLanguages || (() => readSystemLanguages()), readAsync, env, at: 0, value: null, background: false, pending: null } : null;
     this.detect = detect || (() => this.sharedLanguages().lang);
     this.detectLocales = detectLocales || (this.shared ? () => this.sharedLanguages().locales : () => (process.env.AGENTHUB_SYSTEM_LOCALES ? detectSystemLocales() : [this.detect()]));
     this.locs = null;
@@ -87,11 +111,11 @@ export class Settings {
     this.load();
   }
   load() {
+    const r = loadStateJson(this.path, { keepBad: this.keepBad });
+    this.damaged = r.damaged;
     try {
-      if (existsSync(this.path)) {
-        const d = readJsonFile(this.path);
-        if (d && typeof d === "object") this.data = { ...this.data, ...d, notifications: prefsFromFile(d) };
-      }
+      const d = r.value;
+      if (d) this.data = { ...this.data, ...d, notifications: prefsFromFile(d) };
     } catch {}
     if (!LANG_SETTINGS.includes(this.data.lang)) this.data.lang = "system";
     if (typeof this.data.checkPluginUpdates !== "boolean") this.data.checkPluginUpdates = true;
@@ -141,19 +165,20 @@ export class Settings {
     this.save();
   }
   save() {
-    const tmp = `${this.path}.tmp-${process.pid}`;
     // notifications — in a form that a contract 1 core will also understand after a rollback (lib/push/prefs.mjs prefsToFile)
     const out = { ...this.data, ...prefsToFile(this.data.notifications) };
-    writeFileSync(tmp, JSON.stringify(out, null, 2) + "\n", { mode: 0o600 });
-    renameSync(tmp, this.path);
+    writeJsonAtomic(this.path, out, { mode: 0o600, space: 2 });
   }
   get langSetting() {
     return this.data.lang;
   }
   // One OS read for systemLang and systemLocales (their own caches expire together, so a minute costs one read).
+  // With a background refresh running (refreshSystem) the value is only served: a synchronous read happens for the first
+  // value, for an explicit { fresh: true }, and when no refresh has landed for SYSTEM_STALE_MS (the refresher is gone).
   sharedLanguages() {
     const sh = this.shared;
-    if (!sh.value || this.now() - sh.at > SYSTEM_TTL_MS) {
+    const age = this.now() - sh.at;
+    if (!sh.value || age > (sh.background ? SYSTEM_STALE_MS : SYSTEM_TTL_MS)) {
       try {
         sh.value = systemLanguagesFrom(sh.read(), { env: sh.env });
       } catch {
@@ -162,6 +187,31 @@ export class Settings {
       sh.at = this.now();
     }
     return sh.value;
+  }
+  // Re-read the system languages without blocking the event loop (the daemon's minute poll, core.watchLang). A fixed
+  // language (detect / detectLocales given: test hubs, AGENTHUB_SYSTEM_LANG) has nothing to read. A failed read keeps the
+  // previous value. → Promise<boolean> (a value was read); never rejects.
+  refreshSystem() {
+    const sh = this.shared;
+    if (!sh) return Promise.resolve(false);
+    if (sh.pending) return sh.pending;
+    sh.pending = (async () => {
+      try {
+        const text = await sh.readAsync();
+        sh.value = systemLanguagesFrom(text, { env: sh.env });
+        sh.at = this.now();
+        sh.background = true;
+        // the getters' own caches: recomputed from the new value at the next call
+        this.sysAt = -Infinity;
+        this.locsAt = -Infinity;
+        return true;
+      } catch {
+        return false;
+      } finally {
+        sh.pending = null;
+      }
+    })();
+    return sh.pending;
   }
   systemLang({ fresh = false } = {}) {
     if (fresh || !this.sys || this.now() - this.sysAt > SYSTEM_TTL_MS) {

@@ -116,7 +116,7 @@ public enum MenuBarLook: Equatable, Sendable {
         switch self {
         case .offline: state = tr("нет связи со службой хаба", "no connection to the hub service")
         case .paused(_, let blocker):
-            state = tr("хаб на паузе", "hub paused")
+            state = tr("хаб на паузе", "the hub is paused")
             if blocker { state += tr(", блокер: \(culprit ?? status.label)", ", blocker: \(culprit ?? status.label)") }
         case .working: state = tr("идёт работа — выключать рано", "work in progress — too early to shut down")
         case .quiet: state = tr("тихо — можно выключать", "all quiet — OK to shut down")
@@ -554,9 +554,7 @@ public enum PluginUpdatesStatus {
 
     public static func parseDate(_ s: String?) -> Date? {
         guard let s else { return nil }
-        let f = ISO8601DateFormatter()
-        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        return f.date(from: s) ?? ISO8601DateFormatter().date(from: s)
+        return ISODate.parse(s)
     }
 }
 
@@ -650,7 +648,7 @@ public struct SidebarStatus: Equatable, Sendable {
         return cut.isEmpty ? head : String(cut)
     }
 
-    /// Sessions: "2 awaiting a reply · 5 working". Waiting for you — sessions: the waiting ones in the list and those with a reply
+    /// Sessions: "2 awaiting a reply · 5 working". "Needs you" — sessions: the waiting ones in the list and those with a reply
     /// card (`cardSessions` — `HookCard.sessionId`; two cards from subagents of one session count as one waiting),
     /// at least `waiting` (`/state.waitingSessions`). A session with a card doesn't count as working.
     /// The session registry plugin (`claude-sessions`): crashed — red "Sessions plugin didn't answer"; can't see its source —
@@ -892,15 +890,14 @@ public enum RefreshInterval {
         let s = interval.trimmingCharacters(in: .whitespaces)
         guard let m = s.wholeMatch(of: /(\d+)(ms|s|m|h|d)/) else { return tr("каждые \(s)", "every \(s)") }
         let n = String(m.1)
-        let unit: String
+        // whole phrases, not a bare unit: a one-letter unit is a homograph of another word in Russian
         switch m.2 {
-        case "ms": unit = tr("мс", "ms")
-        case "s": unit = tr("с", "s")
-        case "m": unit = tr("мин", "min")
-        case "h": unit = tr("ч", "h")
-        default: unit = tr("дн", "d")
+        case "ms": return tr("каждые \(n) мс", "every \(n) ms")
+        case "s": return tr("каждые \(n) с", "every \(n) s")
+        case "m": return tr("каждые \(n) мин", "every \(n) min")
+        case "h": return tr("каждые \(n) ч", "every \(n) h")
+        default: return tr("каждые \(n) дн", "every \(n) d")
         }
-        return tr("каждые \(n) \(unit)", "every \(n) \(unit)")
     }
 }
 
@@ -957,10 +954,10 @@ public final class PinAdvice: @unchecked Sendable {
 /// Texts of the terminal layer (Settings → Terminal, disabled buttons). Terminal names come from the daemon (`label`); the shell
 /// knows only the capability names, not the terminals.
 public enum TerminalText {
-    /// The capability as a short phrase: "switch to tab".
+    /// The capability as a short phrase: "go to tab".
     public static func capability(_ c: String) -> String {
         switch c {
-        case "focus": return tr("переход во вкладку", "switch to tab")
+        case "focus": return tr("переход во вкладку", "go to tab")
         case "read-screen": return tr("чтение экрана", "read the screen")
         case "send-text": return tr("набор строки", "type a line")
         case "send-esc": return tr("Esc (прервать ход)", "Esc (interrupt)")
@@ -972,7 +969,7 @@ public enum TerminalText {
     /// The tooltip of a button the session's terminal can't serve.
     public static func unsupported(terminal: String, capability c: String) -> String {
         switch c {
-        case "focus": return tr("\(terminal) не умеет переходить во вкладку из хаба", "\(terminal) can't switch to the tab from the hub")
+        case "focus": return tr("\(terminal) не умеет переходить во вкладку из хаба", "\(terminal) can't go to the tab from the hub")
         case "send-esc": return tr("\(terminal) не умеет нажимать Esc из хаба — прервите ход во вкладке", "\(terminal) can't press Esc from the hub — interrupt the turn in the tab")
         default: return tr("\(terminal) не умеет: \(capability(c))", "\(terminal) doesn't support: \(capability(c))")
         }
@@ -1026,5 +1023,68 @@ public enum BridgeSettingsText {
     public static func missing(stateKnown: Bool) -> String {
         stateKnown ? tr("Служба действий хаба не запущена — моста нет", "The hub's actions service isn't running — no bridge")
                    : tr("Нет связи с хабом — состояние моста неизвестно", "No connection to the hub — the bridge state is unknown")
+    }
+}
+
+/// The panel's search field: a row stays when any of its texts contains the query (trimmed, case-insensitive);
+/// an empty query keeps every row.
+public enum SearchFilter {
+    public static func apply<T>(_ rows: [T], query: String, _ texts: (T) -> [String?]) -> [T] {
+        let q = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !q.isEmpty else { return rows }
+        return rows.filter { row in texts(row).contains { $0?.lowercased().contains(q) == true } }
+    }
+}
+
+/// The panel's warning row for a state file the daemon could not read at start (`/state.damagedFiles`): which file,
+/// where its copy is and what to do. The same words for any file — the shell does not know what each one holds.
+public enum DamagedFileText {
+    public static func title(_ d: DamagedFile) -> String {
+        tr("Хаб не смог прочитать \(d.file) и работает без него", "The hub couldn't read \(d.file) and is running without it")
+    }
+
+    /// `home` — the hub directory (shown with ~). `restartCommand` — how to restart the daemon by hand, when the shell
+    /// knows it (the live hub under launchd); nil — the text only says to restart.
+    public static func detail(_ d: DamagedFile, home: String?, restartCommand: String? = nil) -> String {
+        let dir = home.map { ($0 as NSString).abbreviatingWithTildeInPath }
+        let restart = restartCommand.map { tr("перезапустите хаб командой \($0)", "restart the hub with \($0)") } ?? tr("перезапустите хаб", "restart the hub")
+        let until = tr("До этого вместо файла действуют значения по умолчанию.", "Until then the defaults apply instead of the file.")
+        if let backup = d.backup {
+            let kept = dir.map { tr("Копия сохранена как \(backup) в папке \($0).", "A copy was kept as \(backup) in \($0).") }
+                ?? tr("Копия сохранена как \(backup).", "A copy was kept as \(backup).")
+            return kept + " " + tr("Исправьте \(d.file) — нужное возьмите из копии — и \(restart).", "Fix \(d.file) — take what you need from the copy — and \(restart).") + " " + until
+        }
+        let fix = dir.map { tr("Исправьте \(d.file) в папке \($0) и \(restart).", "Fix \(d.file) in \($0) and \(restart).") }
+            ?? tr("Исправьте \(d.file) и \(restart).", "Fix \(d.file) and \(restart).")
+        return tr("Сохранить копию не удалось.", "No copy could be kept.") + " " + fix + " " + until
+    }
+
+    /// What the parser said, as small print; nil — nothing was reported.
+    public static func reason(_ d: DamagedFile) -> String? {
+        guard let detail = d.detail?.trimmingCharacters(in: .whitespacesAndNewlines), !detail.isEmpty else { return nil }
+        return tr("Причина: \(detail)", "Reason: \(detail)")
+    }
+
+    /// The file to select in Finder: the kept copy when there is one, otherwise the file itself.
+    public static func revealPath(_ d: DamagedFile, home: String) -> String {
+        // a name inside the hub directory, whatever the daemon sent
+        (home as NSString).appendingPathComponent(((d.backup ?? d.file) as NSString).lastPathComponent)
+    }
+}
+
+/// The popover's "Needs you" shows the first rows only; what did not fit is one "N more" row that opens the panel —
+/// a cut list with no hint reads as "that is all".
+public enum NeedsOverflow {
+    public static let limit = 5
+
+    /// The rows to show and how many are left out.
+    public static func split<T>(_ rows: [T], limit: Int = limit) -> (shown: [T], hidden: Int) {
+        let n = max(0, limit)
+        return (Array(rows.prefix(n)), max(0, rows.count - n))
+    }
+
+    /// "3 more" — the row under the list; nil — nothing is hidden.
+    public static func label(hidden: Int) -> String? {
+        hidden > 0 ? tr("Ещё \(hidden)", "\(hidden) more") : nil
     }
 }

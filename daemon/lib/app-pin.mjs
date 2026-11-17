@@ -28,10 +28,11 @@
 // The cdhash of the build on disk is read by lib/app-sign.mjs (codesign — macOS only); here is the cross-platform part.
 
 import { createHash } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, watch, writeFileSync } from "node:fs";
+import { watch } from "node:fs";
 import { fileSig, readJsonFile } from "./config.mjs";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { msg } from "./i18n.mjs";
+import { loadStateJson, updateConfig, writeJsonAtomic } from "./statefile.mjs";
 
 export const APP_BUNDLE_ID = "com.kensei.agenthub";
 const HEX40 = /^[0-9a-f]{40}$/;
@@ -58,50 +59,37 @@ export function pinFingerprint(req) {
   return { kind: "other", value: v, label: `req:${v}` };
 }
 
-// Write requirements.app (and pin info — appPin) to config.json: a 0600 temp file + rename,
-// other config fields are untouched. A broken config.json isn't overwritten.
+// Write requirements.app (and pin info — appPin) to config.json: under the config lock, a 0600 temp file + rename
+// (lib/statefile.mjs updateConfig); other config fields are untouched. A broken config.json isn't overwritten.
 export function writeAppRequirement(configPath, requirement, meta = {}) {
-  let cfg = {};
-  if (existsSync(configPath)) {
-    try {
-      cfg = readJsonFile(configPath);
-    } catch (e) {
-      throw new Error(msg("err.config.parseKeep", { why: e.message }));
-    }
-  }
-  const old = cfg.requirements?.app ?? null;
-  cfg.requirements = { ...(cfg.requirements || {}), app: requirement };
-  cfg.appPin = { pinnedAt: new Date().toISOString(), requirementSha: requirementSha(requirement), ...meta };
-  mkdirSync(dirname(configPath), { recursive: true, mode: 0o700 });
-  const tmp = `${configPath}.tmp-${process.pid}`;
-  writeFileSync(tmp, JSON.stringify(cfg, null, 2) + "\n", { mode: 0o600 });
-  chmodSync(tmp, 0o600);
-  renameSync(tmp, configPath);
+  let old = null;
+  updateConfig(configPath, (cfg) => {
+    old = cfg.requirements?.app ?? null;
+    cfg.requirements = { ...(cfg.requirements || {}), app: requirement };
+    cfg.appPin = { pinnedAt: new Date().toISOString(), requirementSha: requirementSha(requirement), ...meta };
+  });
   return { old, requirement };
 }
 
 // Add the build path (appPin.path) to an already active pin — without changing requirements.app or the pin
 // time. → true if written (appPin belongs to this requirement or there was none).
 export function writeAppPinPath(configPath, requirement, path) {
-  let cfg;
-  try {
-    cfg = readJsonFile(configPath);
-  } catch (e) {
-    throw new Error(msg("err.config.parseKeep", { why: e.message }));
-  }
-  if (cfg.requirements?.app !== requirement) return false;
-  const m = cfg.appPin && typeof cfg.appPin === "object" ? cfg.appPin : null;
-  if (m && m.requirementSha !== requirementSha(requirement)) return false;
-  cfg.appPin = { ...(m || { requirementSha: requirementSha(requirement) }), path };
-  const tmp = `${configPath}.tmp-${process.pid}`;
-  writeFileSync(tmp, JSON.stringify(cfg, null, 2) + "\n", { mode: 0o600 });
-  chmodSync(tmp, 0o600);
-  renameSync(tmp, configPath);
-  return true;
+  return updateConfig(
+    configPath,
+    (cfg) => {
+      if (cfg.requirements?.app !== requirement) return false;
+      const m = cfg.appPin && typeof cfg.appPin === "object" ? cfg.appPin : null;
+      if (m && m.requirementSha !== requirementSha(requirement)) return false;
+      cfg.appPin = { ...(m || { requirementSha: requirementSha(requirement) }), path };
+    },
+    { missing: "throw" },
+  ).written;
 }
 
 export class AppPinWatcher {
-  constructor({ config, peer, journal, emit, pollMs = 5000, now = () => new Date() }) {
+  // onDamaged({file, backup, detail, at}) — app-pin.json could not be read (the daemon notes it: journal, /state.damagedFiles).
+  constructor({ config, peer, journal, emit, pollMs = 5000, now = () => new Date(), onDamaged = null }) {
+    this.onDamaged = onDamaged;
     this.config = config;
     this.peer = peer;
     this.journal = journal;
@@ -115,6 +103,7 @@ export class AppPinWatcher {
     this.state = null; // { requirementSha, fingerprint, kind, changedAt, by, under, source }
     this.watcher = null;
     this.timer = null;
+    this.deferred = false; // config.json was damaged at start and still is: the start-time comparison waits for a readable file
   }
 
   // The file signature isn't remembered here: requirements.app in memory was read back in loadConfig(), and the file may
@@ -123,10 +112,15 @@ export class AppPinWatcher {
   start() {
     this.sig = null;
     this.ready = false;
-    try {
-      const s = JSON.parse(readFileSync(this.statePath, "utf8"));
-      if (s && typeof s === "object") this.state = s;
-    } catch {}
+    // A damaged app-pin.json: its copy is kept (app-pin.json.bad) and the daemon forgets which pin it had seen — the next
+    // reconcile() records the current one as a change from "unknown" (the alert errs on the loud side).
+    const saved = loadStateJson(this.statePath);
+    if (saved.value) this.state = saved.value;
+    if (saved.damaged) {
+      try {
+        this.onDamaged?.(saved.damaged);
+      } catch {}
+    }
     try {
       this.watcher = watch(this.config.paths.home, { persistent: false }, (_e, name) => {
         const n = String(name || "");
@@ -157,12 +151,23 @@ export class AppPinWatcher {
     // A broken file — what was read earlier stays, the signature isn't remembered, the next check() re-reads.
     const sig = fileSig(this.configPath);
     let fileCfg = null;
-    if (this.config.configLoadedSig === undefined || sig === this.config.configLoadedSig) this.sig = sig; // unchanged (or the config wasn't built by loadConfig)
+    // config.json could not be parsed at load (config.configDamaged, lib/config.mjs): the requirement in memory is the
+    // closed default, not what the human pinned — the file is read again here, it may be fixed by now
+    const damaged = Boolean(this.config.configDamaged);
+    if (!damaged && (this.config.configLoadedSig === undefined || sig === this.config.configLoadedSig)) this.sig = sig; // unchanged (or the config wasn't built by loadConfig)
     else if (sig === "absent") fileCfg = {};
     else {
       try {
         fileCfg = readJsonFile(this.configPath);
       } catch {}
+    }
+    if (damaged && !fileCfg) {
+      // Still unreadable. "No requirement" here is not a change of the pin, so nothing is recorded and app-pin.json keeps the
+      // pin last seen: once the file can be read again (check), the comparison with it is made as at a start — a human who
+      // repairs the file gets the same pin back without a "pin changed" alert.
+      this.deferred = true;
+      this.ready = true;
+      return false;
     }
     if (fileCfg) {
       this.sig = sig;
@@ -174,6 +179,11 @@ export class AppPinWatcher {
       }
     }
     this.ready = true;
+    return this.settle(fileCfg, source);
+  }
+
+  // The requirement in effect against the one last seen (app-pin.json). → true if a change was recorded.
+  settle(fileCfg, source) {
     const cur = this.current();
     const curSha = requirementSha(cur);
     if (this.state && this.state.requirementSha === curSha) {
@@ -207,6 +217,15 @@ export class AppPinWatcher {
     const raw = fileCfg?.requirements?.app;
     const next = typeof raw === "string" && raw.trim() ? raw : null;
     const old = this.current();
+    if (this.deferred) {
+      // the config.json that was damaged at start can be read now: this is the start-time comparison, made late (reconcile)
+      this.deferred = false;
+      if (next !== old) {
+        this.config.requirements = { ...(this.config.requirements || {}), app: next };
+        this.peer?.forget?.("app");
+      }
+      return this.settle(fileCfg, source);
+    }
     if (next === old) {
       this.reconcilePath(fileCfg, source);
       return false;
@@ -292,9 +311,7 @@ export class AppPinWatcher {
   saveState(s) {
     this.state = s;
     try {
-      const tmp = `${this.statePath}.tmp-${process.pid}`;
-      writeFileSync(tmp, JSON.stringify(s) + "\n", { mode: 0o600 });
-      renameSync(tmp, this.statePath);
+      writeJsonAtomic(this.statePath, s, { mode: 0o600 });
     } catch {}
   }
 

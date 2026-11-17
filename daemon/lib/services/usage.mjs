@@ -24,10 +24,11 @@
 
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmodSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync } from "node:fs";
 import { request as httpsRequest } from "node:https";
 import { request as httpRequest } from "node:http";
 import { join } from "node:path";
+import { writeFileAtomic } from "../statefile.mjs";
 
 export const name = "usage";
 
@@ -129,17 +130,7 @@ function readCache(path) {
 
 // Atomic 0600 write in the same directory.
 export function writeCache(path, data) {
-  const tmp = `${path}.${process.pid}.tmp`;
-  try {
-    writeFileSync(tmp, JSON.stringify(data), { mode: 0o600 });
-    chmodSync(tmp, 0o600);
-    renameSync(tmp, path);
-  } catch (e) {
-    try {
-      rmSync(tmp, { force: true });
-    } catch {}
-    throw e;
-  }
+  writeFileAtomic(path, JSON.stringify(data), { mode: 0o600 });
 }
 
 // Request URL: live — only https://api.anthropic.com/api/oauth/usage; in test mode — a double on loopback.

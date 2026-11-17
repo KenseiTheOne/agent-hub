@@ -6,7 +6,8 @@
 //            (present only in a debug build) does not count as app;
 //   hook   — agenthub-hook (path from peer.hookPaths), and among its ancestors (up to 4 levels by ppid) there is a process
 //            whose signature passes requirements.claudeCode; the pid of that Claude is remembered;
-//   bridge — the bridge process (peer.bridgePaths);
+//   bridge — the bridge process: a script from peer.bridgePaths run directly by an interpreter, the file itself inside the
+//            hub's own tree and writable by this user only (bridgeCandidate below — and what this does NOT prove);
 //   cli    — everything else (read-only and "immediate"-level actions).
 // Requirement strings live in the daemon config (requirements.*), not in code.
 //
@@ -30,10 +31,10 @@
 // with the same key).
 
 import { execFile, execFileSync } from "node:child_process";
-import { readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
-import { basename, isAbsolute, join, sep } from "node:path";
+import { lstatSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
+import { basename, dirname, isAbsolute, join, sep } from "node:path";
 import { createHash } from "node:crypto";
-import { expandHome } from "./config.mjs";
+import { expandHome, RUN_DIRS } from "./config.mjs";
 import { loadNative } from "./native.mjs";
 import { myUid, psCommand } from "./platform.mjs";
 
@@ -109,9 +110,44 @@ export const APP_DIAGNOSTIC_ARGS = new Set([
   "--snapshot-popover",
   "--snapshot-consent",
   "--snapshot-report",
+  "--snapshot-confirm",
   "--self-test-popover",
   "--self-test-status-menu",
 ]);
+
+// What is wrong with a script file as the identity of a peer class (the bridge): → null | a short reason.
+// real — the script's realpath; roots — the realpaths of the hub's own trees. The file must be inside one of them, a regular
+// file owned by this user (or root) that nobody else can write, and so must every directory from it up to the tree's root:
+// otherwise another account could put its own code where the daemon expects the hub's. Owner and mode bits mean nothing on
+// Windows — there only the location is checked.
+export function scriptProblem(real, roots, uid = myUid()) {
+  const root = (roots || []).find((r) => typeof r === "string" && r && real.startsWith(r.endsWith(sep) ? r : r + sep));
+  if (!root) return "outside-tree";
+  const posix = process.platform !== "win32";
+  const foreign = (st) => posix && st.uid !== uid && st.uid !== 0;
+  const open = (st) => posix && (st.mode & 0o022) !== 0;
+  try {
+    const st = lstatSync(real);
+    if (!st.isFile()) return "not-a-file";
+    if (foreign(st)) return "owner";
+    if (open(st)) return "writable";
+    const top = root.endsWith(sep) ? root.slice(0, -1) : root;
+    for (let d = dirname(real); d.length >= top.length; d = dirname(d)) {
+      const ds = statSync(d);
+      if (foreign(ds)) return "dir-owner";
+      if (open(ds)) return "dir-writable";
+      if (d === top || dirname(d) === d) break;
+    }
+  } catch {
+    return "stat";
+  }
+  return null;
+}
+
+// The hub's own trees (the version this daemon runs from, and the install's Versions/current), resolved.
+function hubTrees() {
+  return [...new Set(RUN_DIRS.map((d) => realOr(d)))];
+}
 
 // System functions; replaced by doubles in tests.
 export function defaultSys() {
@@ -131,36 +167,84 @@ export function defaultSys() {
     writeJson: (p, v) => writeFileSync(p, JSON.stringify(v) + "\n", { mode: 0o600 }),
     procState,
     ttyName,
+    scriptProblem: (real) => scriptProblem(real, hubTrees()),
   };
 }
 
+// ps for one process, synchronously and not. The synchronous functions (ttyName, procState) stay for callers that cannot
+// await — the facts and ctx methods an extension calls synchronously (facts.processTty, ctx.peer.procState). The hub's own
+// request paths (the terminal service and the built-in adapters) use the asynchronous twins: a ps run does not stop the
+// event loop.
+const psSync = (cmd, args) => execFileSync(cmd, args, { encoding: "utf8", timeout: 3000, stdio: ["ignore", "pipe", "ignore"] });
+const psAsync = (cmd, args) => new Promise((resolve, reject) => execFile(cmd, args, { encoding: "utf8", timeout: 3000 }, (e, out) => (e ? reject(e) : resolve(out))));
+const ttyFrom = (out) => {
+  const v = String(out).trim();
+  return /^tty[A-Za-z0-9]{1,12}$/.test(v) ? v : null;
+};
+const stateFrom = (out) => {
+  const v = String(out).trim();
+  if (!/^[A-Za-z<>+]{1,8}$/.test(v)) return null;
+  return { stopped: v.includes("T"), foreground: v.includes("+") };
+};
+
 // The controlling terminal of a process ("ttys004") — for the terminal layer, which finds a session's tab by it (tmux,
 // iTerm2, Terminal.app). Asked only when an operation runs. → string | null (no process, no terminal, no ps).
-export function ttyName(pid, { exec = (cmd, args) => execFileSync(cmd, args, { encoding: "utf8", timeout: 3000, stdio: ["ignore", "pipe", "ignore"] }) } = {}) {
+export function ttyName(pid, { exec = psSync } = {}) {
   const ps = psCommand();
   if (!ps || !Number.isInteger(pid) || pid <= 0) return null;
-  let out;
   try {
-    out = String(exec(ps, ["-o", "tty=", "-p", String(pid)])).trim();
+    return ttyFrom(exec(ps, ["-o", "tty=", "-p", String(pid)]));
   } catch {
     return null;
   }
-  return /^tty[A-Za-z0-9]{1,12}$/.test(out) ? out : null;
+}
+// → Promise<string | null>; never rejects.
+export async function ttyNameAsync(pid, { exec = psAsync } = {}) {
+  const ps = psCommand();
+  if (!ps || !Number.isInteger(pid) || pid <= 0) return null;
+  try {
+    return ttyFrom(await exec(ps, ["-o", "tty=", "-p", String(pid)]));
+  } catch {
+    return null;
+  }
 }
 
 // Process state for typing into a tab (contract 3): whether it is stopped (Ctrl+Z, "T") and in the foreground group
 // of its terminal ("+" in ps STAT: pgid == tpgid). → { stopped, foreground } | null (no process, or no ps on the platform).
-export function procState(pid, { exec = (cmd, args) => execFileSync(cmd, args, { encoding: "utf8", timeout: 3000, stdio: ["ignore", "pipe", "ignore"] }) } = {}) {
+export function procState(pid, { exec = psSync } = {}) {
   const ps = psCommand();
   if (!ps || !Number.isInteger(pid) || pid <= 0) return null;
-  let out;
   try {
-    out = String(exec(ps, ["-o", "stat=", "-p", String(pid)])).trim();
+    return stateFrom(exec(ps, ["-o", "stat=", "-p", String(pid)]));
   } catch {
     return null;
   }
-  if (!/^[A-Za-z<>+]{1,8}$/.test(out)) return null;
-  return { stopped: out.includes("T"), foreground: out.includes("+") };
+}
+// → Promise<{ stopped, foreground } | null>; never rejects.
+export async function procStateAsync(pid, { exec = psAsync } = {}) {
+  const ps = psCommand();
+  if (!ps || !Number.isInteger(pid) || pid <= 0) return null;
+  try {
+    return stateFrom(await exec(ps, ["-o", "stat=", "-p", String(pid)]));
+  } catch {
+    return null;
+  }
+}
+
+// The asynchronous answer of a set of system functions (sys): its own async function if it has one; the real ps twin
+// when sys carries the real synchronous function; otherwise the synchronous function it carries (a double in tests).
+// → Promise<value | null>; never rejects.
+const SYS_ASYNC = { ttyName: [ttyName, ttyNameAsync], procState: [procState, procStateAsync] };
+export async function sysAsync(sys, name, pid) {
+  const [sync, twin] = SYS_ASYNC[name] || [];
+  try {
+    const own = sys?.[`${name}Async`];
+    if (typeof own === "function") return (await own(pid)) ?? null;
+    if (twin && sys?.[name] === sync) return await twin(pid);
+    return sys?.[name]?.(pid) ?? null;
+  } catch {
+    return null;
+  }
 }
 
 function globRe(pattern) {
@@ -193,6 +277,8 @@ export function createPeer({ config, sys = defaultSys() } = {}) {
   const peerCfg = config.peer || {};
   const hookRes = (peerCfg.hookPaths || []).map((p) => globRe(expandHome(p)));
   const bridgeRes = (peerCfg.bridgePaths || []).map((p) => globRe(expandHome(p)));
+  // entries without wildcards: the directory part is resolved (an install lists Versions/current/…), the file name is not
+  const bridgeLiterals = (peerCfg.bridgePaths || []).map((p) => expandHome(p)).filter((p) => !/[*?]/.test(p));
   const interpreters = new Set(peerCfg.interpreters || []);
   const depth = peerCfg.hookAncestorDepth ?? 4;
   const appMarker = `${sep}${peerCfg.appBundleName || "AgentHub.app"}${sep}Contents${sep}MacOS${sep}`;
@@ -339,6 +425,46 @@ export function createPeer({ config, sys = defaultSys() } = {}) {
     return cands;
   }
 
+  // Is this process the bridge? → null (does not even look like one) | { ok: true } | { ok: false, reason, detail }.
+  //
+  // The app class rests on a code signature the kernel vouches for. A script has none: the kernel only says which
+  // interpreter runs, and what the interpreter was told to run is the process's own argv. So this is the most that can be
+  // checked from outside, and each rule closes one cheap way of posing as the bridge:
+  //   - the script is the interpreter's first argument (argv[1]): `node --require other.js <bridge>`, `--import`, `--eval=`
+  //     run someone else's code under the bridge's name — peer:bridge-launch;
+  //   - only the script's realpath counts, and it must be one of peer.bridgePaths: a symlink with the bridge's name that
+  //     leads elsewhere is not the bridge — peer:bridge-file;
+  //   - that file is inside the hub's own tree, whatever config.json lists in peer.bridgePaths, is a regular file of this
+  //     user (or root) and neither it nor the directories above it up to the tree's root are writable by anyone else
+  //     (sys.scriptProblem; test doubles without it skip this part) — peer:bridge-file.
+  // What stays open (v1, the same limit as the app pin, lib/app-pin.mjs): a process of the same user can edit the bridge
+  // file in the hub's tree, preload code through the interpreter's environment (NODE_OPTIONS), or rewrite its own argv after
+  // start. The class is a convention between the user's own processes, not a wall; what it gives is narrow — the
+  // /bridge/* routes only, and only while no other bridge is connected (bridge:busy).
+  function bridgeCandidate(pid, exePath) {
+    const named = (p) => bridgeRes.some((re) => re.test(p));
+    // the resolved file is one the config lists (a literal entry may itself go through a directory link)
+    const listed = (real) => named(real) || bridgeLiterals.some((p) => join(realOr(dirname(p)), basename(p)) === real);
+    let script = null;
+    let direct = true;
+    if (interpreters.has(basename(exePath))) {
+      const argv = sys.procArgv(pid) || [];
+      const first = argv.slice(1).find((a) => typeof a === "string" && !a.startsWith("-"));
+      if (first && isAbsolute(first) && (named(first) || listed(realOr(first)))) {
+        script = first;
+        direct = argv[1] === first;
+      }
+    }
+    if (!script && named(exePath)) script = exePath;
+    if (!script) return null;
+    if (!direct) return { ok: false, reason: "peer:bridge-launch", detail: "interpreter-options" };
+    const real = realOr(script);
+    if (!listed(real)) return { ok: false, reason: "peer:bridge-file", detail: "symlink" };
+    const problem = typeof sys.scriptProblem === "function" ? sys.scriptProblem(real) : null;
+    if (problem) return { ok: false, reason: "peer:bridge-file", detail: problem };
+    return { ok: true };
+  }
+
   async function findClaudeAncestor(pid) {
     let cur = sys.pidInfo(pid);
     for (let i = 0; i < depth && cur; i++) {
@@ -391,7 +517,8 @@ export function createPeer({ config, sys = defaultSys() } = {}) {
       if (claudePid) return { ...base, class: "hook", claudePid };
       return { ...base, class: "cli", reason: "peer:no-claude-ancestor", hookCandidate: true };
     }
-    if (scripts.some((s) => bridgeRes.some((re) => re.test(s)))) return { ...base, class: "bridge" };
+    const bridge = bridgeCandidate(pid, path);
+    if (bridge) return bridge.ok ? { ...base, class: "bridge" } : { ...base, class: "cli", reason: bridge.reason, detail: bridge.detail };
     return { ...base, class: "cli" };
   }
 

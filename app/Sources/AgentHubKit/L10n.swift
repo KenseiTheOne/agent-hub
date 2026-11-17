@@ -153,6 +153,21 @@ public func plural(_ n: Int, ru: (String, String, String), en: (String, String))
     L10n.shared.lang == .en ? (n == 1 ? en.0 : en.1) : pluralRu(n, ru.0, ru.1, ru.2)
 }
 
+// MARK: - one name per action
+
+/// "Bring the session's terminal tab forward" has one name everywhere: on the buttons, as the action label in
+/// refusals and reports, in the report window and in hints. `short` is the same verb for a narrow row button (the
+/// session row's fixed button column, the popover); English has no shorter form.
+public enum FocusText {
+    public static var action: String { tr("Перейти во вкладку", "Go to tab") }
+    public static var short: String { tr("Перейти", "Go to tab") }
+}
+
+/// "Do the same thing once more" (reconnect, load the catalog, run the action) has one name on every button.
+public enum RetryText {
+    public static var button: String { tr("Повторить", "Try again") }
+}
+
 // MARK: - statuses
 
 extension HubStatus {
@@ -222,7 +237,7 @@ extension PluginState {
         return nil
     }
 
-    /// A blocker row in the popover's "Waiting for you": "Build will not start: disk busy…" → title and subtitle. Without a colon
+    /// A blocker row in the popover's "Needs you": "Build will not start: disk busy…" → title and subtitle. Without a colon
     /// the plugin's header itself is the title (it holds the gist: "Task 'demo: morning summary' failed"), and the subtitle is the plugin and
     /// the status label; the plugin's generic label ("Task failed or the service is not responding") as the title would push out the gist.
     public var attentionLines: (title: String, sub: String) {
@@ -363,7 +378,7 @@ extension PluginMigration {
             return tr("id совпадает с \(what) «\(name)» из каталога (он не установлен). Свой плагин получит всё, что хаб хранит под этим id: его секреты в связке ключей, данные и правила уведомлений. Ставьте, только если это ваш плагин.",
                       "The id matches \(what) \"\(name)\" from the catalog (not installed). Your own plugin gets everything the hub keeps under this id: its secrets in the keychain, data and notification rules. Install only if this is your plugin.")
         case "official", "community":
-            let what = from == "official" ? tr("официальный", "the official") : tr("плагин сообщества", "the community plugin")
+            let what = from == "official" ? tr("официальный плагин", "the official plugin") : tr("плагин сообщества", "the community plugin")
             return tr("Заменит \(what) «\(title)»\(v) из каталога на свой из этой папки. Обновления из каталога для него приходить перестанут; данные плагина сохранятся.",
                       "Replaces \(what) \"\(title)\"\(v) from the catalog with your own from this folder. Catalog updates stop for it; the plugin's data is kept.")
         case "own":
@@ -407,7 +422,7 @@ extension SessionInfo {
         }
     }
 
-    /// A "Waiting for you" row in the popover: "X is waiting for you" · what it waits for. If that is unknown (session files only, without
+    /// A "Needs you" row in the popover: "X is waiting for you" · what it waits for. If that is unknown (session files only, without
     /// `claude agents --json`), the title is the name and the caption is a complete phrase, not a fragment of the "answer".
     public var attentionLines: (title: String, sub: String) {
         if let w = waitingText { return (tr("\(displayName) ждёт вас", "\(displayName) needs you"), w) }
@@ -439,9 +454,24 @@ extension PluginPermission {
         case "push": return tr("Громкое уведомление", "Loud notification")
         case "connections": return tr("Подключение", "Connection")
         case "terminal": return tr("Терминал", "Terminal")
-        case "subscribe": return tr("Подписка на события", "Event subscription")
+        case "subscribe": return tr("События других плагинов", "Other plugins' events")
         default: return kind
         }
+    }
+
+    /// "agents:run-done" (`plugin-id:key-prefix`; `*` — every other plugin, an empty prefix — every key) in plain
+    /// words: whose events the plugin is told about and what it gets from them.
+    private var subscribeText: String {
+        let cut = what.firstIndex(of: ":")
+        let id = cut.map { String(what[..<$0]) } ?? what
+        let prefix = cut.map { String(what[what.index(after: $0)...]) } ?? ""
+        let whose = id == "*" ? tr("любого другого плагина", "any other plugin") : tr("плагина \(id)", "the \(id) plugin")
+        if prefix.isEmpty {
+            return tr("узнавать о любых событиях \(whose): когда событие появилось или пропало и его заголовок",
+                      "learn when \(whose) raises or clears any event, and read the event's title")
+        }
+        return tr("узнавать о событиях \(whose) с ключом «\(prefix)…»: когда событие появилось или пропало и его заголовок",
+                  "learn when \(whose) raises or clears an event whose key starts with \"\(prefix)\", and read the event's title")
     }
 
     /// The main line of a permission in the permission window, in plain words. An own button: its name and how it will ask; a hub action:
@@ -481,13 +511,15 @@ extension PluginPermission {
                          "type the \(words) commands (up to three short arguments) into Claude Code tabs and press Enter")
             }
             return why.map { "\($0) — \(how)" } ?? how
+        case "subscribe":
+            return why.map { "\($0) — \(subscribeText)" } ?? subscribeText
         case "effects":
             switch what {
             case "open.url": return tr("открывать ссылки в браузере", "open links in the browser")
             case "open.file": return tr("открывать файлы и папки", "open files and folders")
             case "open.*": return tr("открывать ссылки и файлы", "open links and files")
-            case "terminal.focus", "cmux.focus": return tr("переводить во вкладку терминала", "switch to a terminal tab")
-            case "session.focus": return tr("переводить во вкладку сессии", "switch to a session's tab")
+            case "terminal.focus", "cmux.focus": return tr("переходить во вкладку терминала", "go to a terminal tab")
+            case "session.focus": return tr("переходить во вкладку сессии", "go to a session's tab")
             case "session.interrupt": return tr("прерывать ход сессии", "interrupt a session's turn")
             case "session.stop": return tr("завершать сессию (с подтверждением)", "end a session (asks first)")
             default: return why ?? what
@@ -565,6 +597,7 @@ extension PluginPermission {
         case "push": return tr("громкие уведомления", "loud notifications")
         case "connections": return tr("подключение к сервису", "service connection")
         case "terminal": return tr("терминал", "terminal")
+        case "subscribe": return tr("события других плагинов", "other plugins' events")
         default: return kind
         }
     }
@@ -573,7 +606,7 @@ extension PluginPermission {
     public var weight: Int {
         // a hijack location (contract 3) goes above everything: a human must see it first
         if risk != nil { return -1 }
-        return ["actions": 0, "effects": 1, "push": 2, "terminal": 2, "connections": 3, "exec": 3, "secrets": 4, "net": 5, "fsWrite": 6, "watch": 7, "fsRead": 8][kind] ?? 9
+        return ["actions": 0, "effects": 1, "push": 2, "terminal": 2, "connections": 3, "exec": 3, "secrets": 4, "net": 5, "fsWrite": 6, "watch": 7, "subscribe": 7, "fsRead": 8][kind] ?? 9
     }
 
     /// Order in the permission window: new ones (on update) first, then by weight; within a kind, as the daemon sent them.
@@ -600,6 +633,7 @@ extension PluginPermission {
         case "push": w = plural(n, ru: ("громкое уведомление", "громких уведомления", "громких уведомлений"), en: ("loud notification", "loud notifications"))
         case "connections": w = plural(n, ru: ("подключение", "подключения", "подключений"), en: ("connection", "connections"))
         case "terminal": w = plural(n, ru: ("право терминала", "права терминала", "прав терминала"), en: ("terminal permission", "terminal permissions"))
+        case "subscribe": w = plural(n, ru: ("источник событий", "источника событий", "источников событий"), en: ("event source", "event sources"))
         default: w = kind
         }
         return "\(n) \(w)"
@@ -657,6 +691,9 @@ public enum Explain {
         "secrets:no-keychain", "secrets:keychain", "args:value:required", "args:value:chars", "args:value:length",
         "extensions:changed", "extensions:not-found", "extensions:disabled", "extensions:write-failed", "extensions:unsafe-file",
         "extensions:too-large",
+        "registry:key-changed", "registry:key-unchanged", "registry:key-format", "registry:expired",
+        "terminal:binding-unknown", "terminal:binding-unknown:process", "terminal:binding-unknown:tab",
+        "peer:bridge-launch", "peer:bridge-file",
     ]
 
     /// Whether the code has its own text (not the generic fallback).
@@ -742,7 +779,7 @@ public enum Explain {
         case "consent:invalid":
             return tr("Согласие просрочено — повторите установку.", "The consent expired — install again.")
         case "not-found":
-            return tr("\(q): плагин уже обновил вывод — нажмите кнопку ещё раз.", "\(q): the plugin has updated — press the button again.")
+            return tr("\(q): плагин обновил вывод — нажмите кнопку ещё раз.", "\(q): the plugin has updated — press the button again.")
         case "rate-limit":
             return tr("Слишком много одобрений подряд — ответы из хаба приостановлены на минуту.", "Too many approvals in a row — hub replies are paused for a minute.")
         case "peer:cli", "peer:app-signature", "peer:app-probe", "peer:unknown", "peer:no-peercred", "peer:no-pid", "peer:no-process", "peer:error":
@@ -780,7 +817,7 @@ public enum Explain {
         case "facts:no-terminal":
             return tr("Хаб не нашёл вкладку этой сессии: её терминал не поддерживается или вкладка закрыта.", "The hub couldn't find this session's tab: its terminal isn't supported or the tab is closed.")
         case "facts:focus-unsupported":
-            return tr("Терминал этой сессии не умеет переходить во вкладку.", "This session's terminal can't switch to its tab.")
+            return tr("Терминал этой сессии не умеет переходить во вкладку.", "This session's terminal can't go to its tab.")
         case "facts:esc-unsupported":
             return tr("Терминал этой сессии не умеет нажимать Esc из хаба — прервите ход во вкладке.", "This session's terminal can't press Esc from the hub — interrupt the turn in the tab.")
         case "facts:launch-unsupported", "facts:no-launch-terminal":
@@ -798,6 +835,21 @@ public enum Explain {
             return tr("\(q): терминал не ответил.", "\(q): the terminal didn't respond.")
         case "terminal:unsupported":
             return tr("Терминал этой сессии этого не умеет.", "This session's terminal doesn't support that.")
+        case "terminal:binding-unknown", "terminal:binding-unknown:process", "terminal:binding-unknown:tab":
+            // `part` of the answer, when the caller has it, comes as the third segment
+            let what = code.hasSuffix(":process")
+                ? tr("Хаб не смог убедиться, что процесс сессии тот же, что был при её запуске.", "The hub could not make sure the session's process is the one it started with.")
+                : code.hasSuffix(":tab")
+                    ? tr("Хаб не смог убедиться, что вкладка терминала принадлежит именно этой сессии.", "The hub could not make sure the terminal tab belongs to this very session.")
+                    : tr("Хаб не смог убедиться, что вкладка терминала принадлежит этой сессии.", "The hub could not make sure the terminal tab belongs to this session.")
+            return what + " " + tr("В неё ничего не напечатано. Повторите чуть позже; если не проходит — перейдите во вкладку и введите текст сами.",
+                                   "Nothing was typed into it. Try again a little later; if it still fails, go to the tab and type the text yourself.")
+        case "peer:bridge-launch":
+            return tr("Мост терминала запущен с дополнительными параметрами интерпретатора перед скриптом — хаб такой запуск не принимает. Запустите мост командой, которую показывает хаб, без своих параметров.",
+                      "The terminal bridge was started with extra interpreter options before its script, and the hub does not accept such a launch. Start the bridge with the command the hub shows, without options of your own.")
+        case "peer:bridge-file":
+            return tr("Скрипт моста терминала — не тот файл, которому доверяет хаб: это ссылка на другое место, файл вне папки хаба или его могут менять другие пользователи. Запустите мост из установленного хаба командой, которую он показывает.",
+                      "The terminal bridge script is not a file the hub trusts: it is a link to another place, lies outside the hub's folder, or other users may change it. Start the bridge from the installed hub with the command it shows.")
         case "facts:pid-mismatch", "facts:proc-start-mismatch", "facts:session-file-mismatch", "facts:no-session-file", "facts:session-file-unreadable":
             return tr("Сессия перезапустилась или закрылась — обновите список и попробуйте ещё раз.", "The session restarted or closed — refresh and try again.")
         case "facts:bad-url", "facts:scheme", "facts:credentials-in-url":
@@ -823,10 +875,22 @@ public enum Explain {
                       "\(q): needs a newer hub — the plugin requires a newer plugin contract. Update Agent Hub and try again.")
         case "registry:no-index-url", "registry:no-public-key":
             return tr("Каталог плагинов не подключён — хаб не знает, откуда брать плагины.", "Plugin catalog isn't connected — the hub doesn't know where to get plugins.")
-        case "registry:foreign-key", "registry:signature", "registry:global-signature", "registry:key-format", "registry:sig-format":
+        case "registry:key-format":
+            return tr("В config.json вместо ключа реестра записано что-то другое — принимать нечего. Запишите туда настоящий ключ или верните прежний.",
+                      "config.json holds something that is not a registry key, so there is nothing to accept. Write a real key there or put the previous one back.")
+        case "registry:foreign-key", "registry:signature", "registry:global-signature", "registry:sig-format":
             return tr("Каталог отвергнут: подпись не сошлась. Возможна подмена — ничего не установлено.", "Catalog rejected: signature mismatch. It may be tampered with; nothing was installed.")
         case "registry:rollback":
-            return tr("Каталог старее уже полученного — отвергнут как возможный откат.", "Catalog is older than the one already accepted — rejected as a possible rollback.")
+            return tr("Реестр прислал каталог старее того, что хаб уже принял, — он отвергнут: так могут подсовывать старые версии. Ничего не изменилось. Загрузите каталог позже; если повторяется — сообщите владельцу реестра.",
+                      "The registry sent a catalog older than the one the hub already accepted, so it was rejected: that is how old versions get slipped in. Nothing changed. Load the catalog again later; if it keeps happening, tell the registry's owner.")
+        case "registry:key-changed":
+            return tr("Ключ реестра в config.json отличается от принятого хабом, и каталог подписан не принятым ключом — каталог отвергнут. Сравните ключи и примите новый в баннере о смене ключа (или командой agenthub plugins trust-key). Если ключ меняли не вы — верните прежний в config.json.",
+                      "The registry key in config.json differs from the one the hub accepted, and the catalog is not signed with the accepted key, so it was rejected. Compare the keys and accept the new one in the key-change banner (or with agenthub plugins trust-key). If you did not change the key, put the previous one back into config.json.")
+        case "registry:key-unchanged":
+            return tr("Ключ реестра в config.json совпадает с принятым — подтверждать нечего.", "The registry key in config.json is the accepted one — there is nothing to confirm.")
+        case "registry:expired":
+            return tr("Каталог реестра просрочен: срок, подписанный владельцем реестра, вышел. Из него ничего не ставится и не обновляется, пока не придёт свежий. Загрузите каталог ещё раз позже; если не помогает — сообщите владельцу реестра.",
+                      "The registry catalog has expired: the date signed by the registry's owner has passed. Nothing is installed or updated from it until a fresh one arrives. Load the catalog again later; if that does not help, tell the registry's owner.")
         case "registry:blocklist":
             return tr("\(q) заблокирован реестром.", "\(q) is blocked by the registry.")
         case "registry:lint", "registry:archive-permissions":
@@ -834,7 +898,7 @@ public enum Explain {
         case "registry:sha256":
             return tr("Архив \(q) не совпал с подписанным каталогом — не установлено.", "The \(q) archive doesn't match the signed catalog — not installed.")
         case "registry:fetch", "registry:http", "registry:redirect":
-            return tr("Нет связи с каталогом плагинов — проверьте интернет и нажмите «Обновить».", "Can't reach the plugin catalog — check your connection and retry.")
+            return tr("Нет связи с каталогом плагинов — проверьте интернет и нажмите «\(RetryText.button)».", "Can't reach the plugin catalog — check your connection and press \"\(RetryText.button)\".")
         case "registry:network-disabled":
             return tr("Сеть для каталога выключена в настройках хаба (allowNetwork: false).", "Network access for the catalog is turned off in hub settings (allowNetwork: false).")
         case "registry:not-found":
@@ -867,7 +931,7 @@ public enum Explain {
     /// Failure of an already executed action (200, ok: false): an explanation from the plugin itself (`message=`, contract 2, in the
     /// hub language, shown as is), its reason code, exit code or timeout. The app knows no specific plugins'
     /// codes.
-    public static func failure(result: JSONValue?, label: String) -> String {
+    public static func failure(result: JSONValue?, label: String, limitMs: Double? = nil) -> String {
         let q = L10n.shared.lang == .en ? "\"\(label)\"" : "«\(label)»"
         if let msg = result?["message"]?.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines), !msg.isEmpty {
             return "\(q): \(msg)"
@@ -875,16 +939,30 @@ public enum Explain {
         if let why = result?["reason"]?.stringValue, !why.isEmpty {
             return tr("\(q): плагин отказал (\(why)).", "\(q): the plugin refused (\(why)).")
         }
-        if result?["timedOut"]?.boolValue == true { return tr("\(q): команда не уложилась в 30 с и остановлена.", "\(q): the command took over 30 s and was stopped.") }
+        if result?["timedOut"]?.boolValue == true { return "\(q): " + timedOut(result, sentence: true, limitMs: limitMs) }
         if let code = result?["code"]?.intValue { return tr("\(q): команда завершилась с ошибкой (код \(code)).", "\(q): the command failed (exit code \(code)).") }
         if let e = result?["error"]?.stringValue { return text(code: "facts:\(e)", status: 200, label: label) }
         return label
     }
 
+    /// "The command took over 30 s and was stopped". The figure is how long the daemon says this run took (`durationMs`
+    /// in the action's result, whole seconds, rounded down — "over N s" stays true); a run without its own duration
+    /// names the hub's limit (`/state.limits.actionTimeoutMs`, `limitMs`); without either the text names no number.
+    static func timedOut(_ result: JSONValue?, sentence: Bool, limitMs: Double? = nil) -> String {
+        let dot = sentence ? "." : ""
+        let ran = result?["durationMs"]?.intValue.flatMap { $0 >= 1000 ? $0 / 1000 : nil }
+        let limit = limitMs.flatMap { $0 >= 1000 && $0 < 1e12 ? Int($0 / 1000) : nil }
+        if let s = ran ?? limit {
+            return tr("Команда не уложилась в \(s) с и остановлена\(dot)", "The command took over \(s) s and was stopped\(dot)")
+        }
+        return tr("Команда не уложилась в отведённое время и остановлена\(dot)", "The command ran out of time and was stopped\(dot)")
+    }
+
     /// The same failure for the shell's own window: the reason is the headline (the plugin's `message=`, else what the
     /// shell knows itself), the rows are the action, the session's tab (`session=`, named as the human sees it) and the
     /// plugin's `fact=` rows, `hint=` is the advice. The small print carries the code and the session id.
-    public static func report(result: JSONValue?, label: String, session: SessionInfo? = nil, canFocus: Bool = false, canRetry: Bool = false) -> Report {
+    public static func report(result: JSONValue?, label: String, session: SessionInfo? = nil, canFocus: Bool = false, canRetry: Bool = false,
+                              limitMs: Double? = nil) -> Report {
         let message = result?["message"]?.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines)
         let reason = result?["reason"]?.stringValue.flatMap { $0.isEmpty ? nil : $0 }
         let exit = result?["code"]?.intValue
@@ -892,7 +970,7 @@ public enum Explain {
         var title: String
         if let message, !message.isEmpty { title = message }
         else if reason != nil { title = tr("Плагин отказал", "The plugin refused") }
-        else if result?["timedOut"]?.boolValue == true { title = tr("Команда не уложилась в 30 с и остановлена", "The command took over 30 s and was stopped") }
+        else if result?["timedOut"]?.boolValue == true { title = timedOut(result, sentence: false, limitMs: limitMs) }
         else if exit != nil { title = tr("Команда завершилась с ошибкой", "The command failed") }
         else if let e = result?["error"]?.stringValue { title = text(code: "facts:\(e)", status: 200, label: label) }
         else { title = tr("Не получилось", "It didn't work") }
@@ -912,7 +990,7 @@ public enum Explain {
         let hint = result?["hint"]?.stringValue.flatMap { $0.isEmpty ? nil : $0 }
         let code = [reason, reason == nil ? exit.map { tr("код выхода \($0)", "exit code \($0)") } : nil, sid].compactMap { $0 }.joined(separator: " · ")
         return Report(title: title, rows: rows, hint: hint, code: code.isEmpty ? nil : code, canFocus: canFocus, canRetry: canRetry,
-                      plainTitle: tr("Не получилось: \(label)", "Couldn't: \(label)"), plainDetail: failure(result: result, label: label))
+                      plainTitle: tr("Не получилось: \(label)", "Couldn't: \(label)"), plainDetail: failure(result: result, label: label, limitMs: limitMs))
     }
 }
 
@@ -996,7 +1074,7 @@ extension JournalEntry {
         case "app-restart-stopped": return tr("Приложение падает — перезапуск остановлен", "App keeps crashing — restart stopped")
         case "app-supervise": return tr("Надзор за приложением", "App supervision")
         case "app-supervise-resumed": return tr("Надзор за приложением снова включён", "App supervision resumed")
-        case "app-pin-path-changed": return tr("Сменился путь закреплённой сборки", "Pinned build path changed")
+        case "app-pin-path-changed": return tr("Сменился путь закреплённой сборки", "The pinned build's path changed")
         // old entries (before 2026-11-07 the daemon remembered the bundle of the last connection)
         case "app-path-seen": return tr("Хаб запомнил, откуда запускать приложение", "Hub noted where to launch the app from")
         case "service-start": return tr("Служба запущена", "Service started")

@@ -36,6 +36,9 @@ const FORBIDDEN_FILE_SAMPLES = [
 // Directories where keys sit next to the files you need: whole or with an "everything" mask is not allowed.
 const KEY_DIRS = ["~/.claude/sessions"];
 
+// Entries of the form "what — why": separate the object from the explanation. → { what, why | null }. The only
+// implementation in the daemon (lib/meta.mjs re-exports it): the separator is a dash (—, –, - or --) between spaces, the
+// first one wins.
 export function splitWhy(entry) {
   const m = /^(.*?)\s+[—–-]{1,2}\s+(.*)$/.exec(String(entry));
   return m ? { what: m[1].trim(), why: m[2].trim() } : { what: String(entry).trim(), why: null };

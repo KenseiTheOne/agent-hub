@@ -382,8 +382,8 @@ struct PluginTableView: View {
     }
 }
 
-/// A `group=true` row: a subheading (chevron + title) that collapses its rows. A plain button, not a `DisclosureGroup`
-/// (which on macOS toggles only from its chevron, see `DetailsDisclosure`); the state lives in `TableGroupMemory`.
+/// A `group=true` row: a subheading (chevron + title) that collapses its rows. The control is the shared
+/// `RowDisclosure`; the state lives in `TableGroupMemory`.
 struct TableGroupView: View {
     let store: HubStore
     let group: ItemNode
@@ -401,34 +401,26 @@ struct TableGroupView: View {
     }
 
     var body: some View {
+        // read here, not inside the binding: the body must depend on the state to be redrawn when it flips
         let open = openStore.wrappedValue
-        VStack(alignment: .leading, spacing: 4) {
-            Button {
-                let now = !openStore.wrappedValue
-                openStore.wrappedValue = now
-                if now { TableGroupMemory.closed.remove(key) } else { TableGroupMemory.closed.insert(key) }
-            } label: {
-                HStack(spacing: 6) {
-                    Image(systemName: "chevron.right").font(.system(size: 9, weight: .semibold))
-                        .rotationEffect(.degrees(open ? 90 : 0))
-                    Text(group.item.title).font(group.item.titleFont(11.5, .semibold)).lineLimit(1)
-                        .reportsTruncation(group.item.title, font: group.item.titleFont(11.5, .semibold))
-                    if let n = group.item.note {
-                        Text(n).font(.system(size: 11.5)).lineLimit(1).foregroundStyle(.white.opacity(0.4))
-                    }
+        let binding = Binding<Bool>(get: { open }, set: { now in
+            openStore.wrappedValue = now
+            if now { TableGroupMemory.closed.remove(key) } else { TableGroupMemory.closed.insert(key) }
+        })
+        let tint = swiftBarColor(group.item.color) ?? .white.opacity(0.5)
+        RowDisclosure(isExpanded: binding, chevron: tint, gap: 6, spacing: 4,
+                      insets: EdgeInsets(top: 8, leading: 10, bottom: 2, trailing: 10),
+                      help: (PluginText.rowHelp(group.item), group.item.tooltip != nil)) {
+            ForEach(rows) { TableRowView(store: store, row: $0, columns: columns, widths: widths, marks: marks, inGroup: true) }
+        } label: {
+            HStack(spacing: 6) {
+                Text(group.item.title).font(group.item.titleFont(11.5, .semibold)).lineLimit(1)
+                    .reportsTruncation(group.item.title, font: group.item.titleFont(11.5, .semibold))
+                if let n = group.item.note {
+                    Text(n).font(.system(size: 11.5)).lineLimit(1).foregroundStyle(.white.opacity(0.4))
                 }
-                .foregroundStyle(swiftBarColor(group.item.color) ?? .white.opacity(0.5))
-                .padding(.horizontal, 10).padding(.top, 8).padding(.bottom, 2)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .contentShape(Rectangle())
             }
-            .buttonStyle(.plain)
-            .hoverHelp(PluginText.rowHelp(group.item), always: group.item.tooltip != nil)
-            .accessibilityAddTraits(.isButton)
-            .accessibilityValue(open ? tr("развёрнуто", "expanded") : tr("свёрнуто", "collapsed"))
-            if open {
-                ForEach(rows) { TableRowView(store: store, row: $0, columns: columns, widths: widths, marks: marks, inGroup: true) }
-            }
+            .foregroundStyle(tint)
         }
     }
 }

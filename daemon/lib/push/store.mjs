@@ -1,7 +1,8 @@
 // Push state across daemon restarts: what has already been sent, the morning digest queue.
 // File <home>/push-state.json, mode 0600, written atomically (tmp + rename). Metadata only.
 
-import { chmodSync, existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
+import { writeFileAtomic } from "../statefile.mjs";
 
 export function createStore(file) {
   return {
@@ -17,10 +18,7 @@ export function createStore(file) {
     },
     save(obj) {
       if (!file) return;
-      const tmp = `${file}.tmp-${process.pid}`;
-      writeFileSync(tmp, JSON.stringify(obj), { mode: 0o600 });
-      chmodSync(tmp, 0o600);
-      renameSync(tmp, file);
+      writeFileAtomic(file, JSON.stringify(obj), { mode: 0o600 });
     },
   };
 }

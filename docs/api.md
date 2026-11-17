@@ -18,9 +18,37 @@ and is bound to the connection:
 |---|---|---|
 | `app` | the executable is inside `AgentHub.app/Contents/MacOS/` **and** `codesign --verify --strict -R=<requirements.app>` passes | everything |
 | `hook` | the process is `agenthub-hook` (a path from `peer.hookPaths`; for an interpreter — `argv[1]`) **and** among its ancestors (up to 4 levels by ppid) there is a process passing `requirements.claudeCode`; its pid is remembered (`claudePid`) | only `POST /hook` (+ `/health`, `/peer`) |
-| `bridge` | the bridge process (`peer.bridgePaths`) | only its own routes (stage 5) (+ `/health`, `/peer`) |
+| `bridge` | the bridge script from `peer.bridgePaths`, run directly by an interpreter, the file itself inside the hub's own tree and writable by this user only ("The bridge class" below) | only its own routes (stage 5) (+ `/health`, `/peer`) |
 | `cli` | everything else, including `curl` | reading (`/state`, `/events` without `hook.*` events, `/journal`) and `immediate` actions, except app-only ones |
 | `foreign` | another uid (the 0600 socket does not allow this; just in case) | nothing, `403 peer:uid` |
+
+**The bridge class.** The `app` class rests on a code signature the kernel vouches for. A script has none: the kernel
+says which interpreter runs, and what the interpreter was told to run is the process's own `argv`. So the class is the
+most that can be checked from outside (`daemon/lib/peer.mjs`, `bridgeCandidate`), and each rule closes one cheap way of
+posing as the bridge:
+
+- **launch shape** — the script is the interpreter's first argument (`argv[1]`). `node --require=x.js <bridge>`,
+  `--import=…`, `--eval=…`, `--inspect` run other code under the bridge's name: class `cli`, `reason:
+  "peer:bridge-launch"`;
+- **the real file** — only the script's realpath counts, and it must be one of `peer.bridgePaths` (a directory link in
+  a listed path, such as an install's `Versions/current`, is resolved). A symlink with the bridge's name that leads
+  elsewhere is not the bridge: `reason: "peer:bridge-file"`;
+- **the hub's own tree** — whatever `config.json` lists in `peer.bridgePaths`, the file must be inside the tree this
+  daemon runs from (or the install's `Versions/current`), be a regular file owned by this user (or root) with no group
+  or world write bit, and so must every directory from it up to the tree's root: `reason: "peer:bridge-file"`. On
+  Windows only the location is checked (owner and mode bits mean nothing there).
+
+A process refused by these rules is class `cli`; a route closed to it answers `403` with that reason instead of the bare
+`peer:cli` (the bridge prints it), `GET /peer` shows it in `reason`, and the `denied` journal line carries `detail`:
+`interpreter-options`, `symlink`, `outside-tree`, `not-a-file`, `owner`, `writable`, `dir-owner`, `dir-writable`, `stat`.
+
+**What this does not prove** (an accepted v1 limit, the same as for the app pin — a tripwire between the user's own
+processes, not a wall): a process of the same user can edit the bridge file in the hub's tree, preload code through the
+interpreter's environment (`NODE_OPTIONS`), put its own binary named `node` in front, or rewrite its own `argv` after
+start. What the class gives is narrow: the `/bridge/*` routes only, and only while no other bridge is connected
+(`409 bridge:busy`) — a fake bridge can receive the daemon's terminal operations for cmux tabs (switch to a tab, Esc, a
+new workspace, a screen read, a line a trusted plugin types), drop them or answer falsely. It gets no `app` right and no
+access to `/state`.
 
 **Plugin processes (2026-11-12).** Next to the class the server binds `peer.plugin = {id, trusted, tier, source}` when
 the client pid **or one of its ancestors** (any depth by ppid, not above the daemon) is a running plugin process: a
@@ -104,6 +132,7 @@ An error response is `{"error": "<code>", ...}`. The code is stable and never tr
 | 403 | `peer:cli`, `peer:hook`, `peer:bridge`, `peer:uid` | the route or action is not available to the class |
 | 403 | `peer:app-signature`, `peer:app-requirement-missing` | the executable is in `AgentHub.app`, but the signature failed / no requirement is set (for actions) |
 | 403 | `peer:no-claude-ancestor` | `agenthub-hook` without a signed Claude Code among its ancestors |
+| 403 | `peer:bridge-launch`, `peer:bridge-file` | the process runs the bridge script but is not taken for the bridge: interpreter options before the script / the file is a link elsewhere, outside the hub's tree or writable by others ("The bridge class" above) |
 | 403 | `peer:untrusted-plugin` | the client is a process of an untrusted plugin (or its child): only `/health` and `/peer` ("Plugin processes" above) |
 | 403 | `peer:session-mismatch`, `peer:no-session-file` | the hook's `session_id` did not match `~/.claude/sessions/<claudePid>.json` |
 | 403 | `confirm:invalid` | the confirmation token is foreign, expired, used or from another pid |
@@ -123,7 +152,8 @@ An error response is `{"error": "<code>", ...}`. The code is stable and never tr
 (`daemon/lib/meta.mjs` CONTRACT_VERSION; changelog in [`extension-points.md`](extension-points.md), "Contract versions").
 
 ### `GET /peer` — all classes (untrusted plugin processes too)
-Your class: `{"class":"cli","reason":null,"pid":4242,"plugin":null}`. For debugging the app signature; `plugin` —
+Your class: `{"class":"cli","reason":null,"pid":4242,"plugin":null}`. For debugging the app signature and the bridge
+class (`reason`: `peer:app-signature`, `peer:bridge-launch`, `peer:bridge-file`, …); `plugin` —
 `{id, trusted}` when the client is a plugin process or its child ("Plugin processes" above).
 
 ### `GET /state` — app, cli
@@ -209,9 +239,53 @@ Snapshot:
   "hubUpdate": {"installed":true,"running":"0.2.0","label":"0.2.0","current":{"label":"0.2.0","tag":"v0.2.0","commit":"…"},
                 "previous":{"label":"0.1.0"},"enabled":true,"configured":true,"available":{"version":"0.3.0","tag":"v0.3.0"},
                 "install":{"phase":"idle"},"blocked":null},
+  "registryKeys": [{"registry":"default","registryLabel":null,"trust":"official",                 // [] — nothing waits
+                    "since":"2026-11-17T10:00:00.000Z",
+                    "was":{"keyId":"A1B2C3D4E5F60718","fingerprint":"<32 hex>"},
+                    "now":{"keyId":"0F1E2D3C4B5A6978","fingerprint":"<32 hex>"}}],
+  "damagedFiles": [{"file":"settings.json","backup":"settings.json.bad","detail":"Unexpected end of JSON input",
+                    "at":"2026-11-17T10:00:00.000Z"}],                                             // [] — all read fine
+  "limits": {"actionTimeoutMs": 30000},                                                           // how long one plugin action may run
+  "hook": {"installed": true, "lastEventAt": "2026-11-17T10:00:00.000Z",                          // or {"installed":false,"lastEventAt":null,"reason":"no-events", …}
+           "installCommand": "claude plugin marketplace add KenseiTheOne/agent-hub && claude plugin install agent-hub@agent-hub"},
   "peer": {"class":"cli","reason":null}
 }
 ```
+`registryKeys` — **"the registry key changed"** (the plugins service; `null` — no such service): registries whose
+`publicKey` in `config.json` is not the key the hub accepted. `registryLabel` — the registry's name for display, the
+same value as in the `428` window of `POST /registry/key/accept`: `null` while the default registry is the only one
+configured, otherwise the registry name (an older daemon has no field). `was` — the accepted key, `now` — the one in the
+file (`null` — the file's value is not a minisign key or was removed), `keyId` — the minisign key id (16 hex, what
+`minisign` prints), `fingerprint` — 32 hex of sha256 over the key, `since` — when the hub first saw the new one. While
+an entry is here the hub keeps verifying that registry with the accepted key, refuses catalogs signed with the new one
+and waits for a human: `POST /registry/key/accept` (app) or `agenthub plugins trust-key`
+([`plugins-registry.md`](plugins-registry.md), "The registry key is remembered"). On a change — the
+`plugins.registry-keys` event.
+`damagedFiles` — state files this daemon could not read when it started and went on without (below, "Other files in the
+state directory" → "Damaged state files"): `file` and `backup` are names inside the state directory (`backup` — the kept
+copy, `<file>.bad`, or `null` if the copy could not be made), `detail` — the parse error (≤ 200 characters), `at` — when
+it was found. The list stays until the daemon restarts, so the shell can say which file to look at; an older daemon has
+no field.
+`limits` — the limits a client shows next to what it starts: `actionTimeoutMs` — how long one plugin action may run
+before the hub kills it, in milliseconds (`config.json` → `plugins.actionTimeoutMs`, 30000 by default; background jobs
+are not bound by it). An older daemon has no field.
+`hook` — the Claude Code hook as this hub sees it: `{installed, lastEventAt, reason?, installCommand}`. The hub does not
+read Claude Code's settings or its plugin list (the user installs the hook, [`hook.md`](hook.md)), so the answer rests
+on the events themselves: `installed: true` — a verified hook event (`POST /hook` that passed the peer and session
+checks) has reached this hub, the last one at `lastEventAt` (ISO 8601; kept across daemon restarts in
+`<home>/hook-seen.json`); `installed: false`, `lastEventAt: null`, `reason: "no-events"` — none ever has: the hook is
+not installed, the daemon does not take its script for the hook (`peer.hookPaths`), or no Claude Code session has run
+since the hub was set up — the hub cannot tell which. `reason` is present only with `installed: false`; it is a code,
+and `no-events` ("the hub has never heard from the hook") is the only one so far — new codes may be added, and each will
+be listed here. A hook that was removed later still reads `installed: true` with an old `lastEventAt`. `installCommand`
+— always present, a string: the command the user runs in a terminal to install the hook for good (the "Permanently"
+commands of [`claude-plugin/README.md`](../claude-plugin/README.md) joined with `&&`); a client shows it as is instead
+of keeping its own copy. An older daemon has no `hook` field.
+Sections of services: `pluginUpdates`, `ownPlugins`, `registryKeys`, `hubUpdate`, `idle`, `connections` and `bridge` are
+each filled by its service (`ctx.provideState`, [`extension-points.md`](extension-points.md)) and are `null` without it;
+the service also adds its fields to `launchAtLogin` (`launchAgent`) and `notifications` (`channels`). A service or an
+approved extension may register a section of its own: it comes after `hook`, so a client must ignore keys it does not
+know.
 `hubUpdate` — updating the hub itself (the hub-update service, section "Hub updates" below and
 [`hub-updates.md`](hub-updates.md); `null` — no such service).
 `idle` — **can the computer be shut down** (the idle service, `daemon/lib/idle.mjs`; `null` — no such service): one daemon
@@ -412,6 +486,7 @@ always below the new instance's start, so after a daemon restart the client gets
 | `plugins.own` | `{plugin, status}` — the state of an own plugin's folder changed (`ok`, `update`, `paused`, `missing`, `broken`) |
 | `plugins.own-updated` | `{plugin, version, from, files}` — an own plugin's folder changed without new permissions, and the hub installed the new copy by itself (no consent window); the push service shows "Plugin updated — "<title>" updated to <version>" (`@hub:plugin-own-updated:<id>:<version>`, kind `updates`) |
 | `plugins.updates` | `{pluginUpdates: <as in /state>}` — something in `pluginUpdates` changed: the list of available updates, a check error, the next check time (including a retry after the same error), the switch or the hub language (titles) |
+| `plugins.registry-keys` | `{changed: [<as /state.registryKeys>]}` — a registry's key in `config.json` stopped matching the accepted one, was accepted or was put back |
 | `plugins.update-available` | `{plugin, title, installed, version, permissionsGrow}` — a new version of an installed plugin, **once** per "id@version" (also across restarts: `Registry/updates.json`); the push service → a macOS notification "Update available: Builder 0.4.1" — the title from the verified catalog in the hub language, as in the popover (`@hub:plugin-update:<id>:<version>`, no flap window) |
 | `bridge.connected` / `bridge.disconnected` / `bridge.op` / `bridge.launch.registered` / `bridge.launch.timeout` | the cmux bridge and session launches ([`bridge/README.md`](../bridge/README.md)); `bridge.disconnected` with `reason: "stale"` — the bridge stopped polling without `bye`, `bridge.connected` with `reason: "resumed"` — it is polling again |
 | `usage.updated` | `{ok, error}` — the usage service refreshed the quota cache (`error` — a code or `null`; no rows and no token) |
@@ -489,10 +564,14 @@ cli gets `403 peer:cli`, not `400 args:…` (UI pass 2026-11-05).
   pattern, version or plugin tier changed (the file was replaced before a rescan, updated, demoted) —
   `409 facts:action-changed`. The command is argv without a shell, the argument value is a separate element. `result`:
   `code`, `timedOut`, `durationMs`, `reason` (the action's last stdout line `reason=<code>` — the plugin's own
-  machine-readable refusal reason) and `message` (contract 2: a `message=<text>` line among the last 5 stdout lines — an
-  explanation for the human in the hub language, the plugin gets `AGENTHUB_LANG`; cleaned like `activity=` phrases, up to
-  120 graphemes). The shell shows a refusal as ""<button>": <message>"; without `message` — "the plugin refused
-  (<reason>)". The hub has no texts of its own for specific plugins' codes.
+  machine-readable refusal reason), `message` (contract 2: a `message=<text>` line among the last 5 non-empty stdout
+  lines — an explanation for the human in the hub language, the plugin gets `AGENTHUB_LANG`; cleaned like `activity=`
+  phrases, up to 120 graphemes) and, since hub 0.1.6, the optional refusal details `hint`, `session` and `facts` (the
+  `hint=` / `session=` / `fact=` lines among the last 12 non-empty stdout lines of a foreground action; `facts` — up to
+  three `"<label>: <value>"` strings, the only list a result carries). The shell shows a refusal in its own window:
+  `message` is the headline (without it — "The plugin refused", the reason code in small print), then the "Action" row,
+  the session's tab, the `facts` rows and the `hint` — see [`extension-points.md`](extension-points.md), "Refusal
+  details". The hub has no texts of its own for specific plugins' codes.
 
 ### `POST /estop` — app, cli (hub pause)
 In the UI it is «Пауза хаба» / "Pause hub", lifting it — «Снять паузу» / "Resume hub" (the button, the banner, the icon
@@ -839,7 +918,7 @@ window (as a red line).
 
 | Route | Body | 200 |
 |---|---|---|
-| `POST /terminal/read-screen` | `{sessionId, lines?}` (1…30) | `{ok, sessionId, terminal, idle, foreground, promptFound, promptEmpty, busy, ready}` — flags only, no screen text |
+| `POST /terminal/read-screen` | `{sessionId, lines?}` (1…30) | `{ok, sessionId, terminal, idle, foreground, promptFound, promptEmpty, busy, bound, ready}` — flags only, no screen text; `bound` — the tab is confirmed to belong to this very session process (`false` — `send-text` would answer `terminal:binding-unknown`, and `ready` is `false`) |
 | `POST /terminal/send-text` | `{sessionId, text}` | `{ok, sessionId, terminal}` |
 
 Checks in order: the plugin and permission (`403 terminal:not-a-plugin|untrusted|not-declared`), the plugin's overall
@@ -848,7 +927,12 @@ request rate (`429`, `scope: requests`), the pause (`423 estop`), the body (`400
 the line against the permission (`403 terminal:text-not-declared`), the session in the registry
 (`409 terminal:unknown-session`; a non-Claude agent session — `409 terminal:external-session`), the Claude Code signature now and the same start time (`409 terminal:unverified`), the
 terminal knows the tab and it belongs to the same pid and start time (`409 terminal:no-tab|pid-mismatch`), the terminal
-supports the operation (`409 terminal:unsupported`, with `terminal` and `capability`), for typing —
+supports the operation (`409 terminal:unsupported`, with `terminal` and `capability`), for typing — the binding
+session → process → tab is **confirmed**, not merely "not contradicted" (`409 terminal:binding-unknown` with `part`:
+`process` — the start time of the session's process is missing in the registry or in the verification just made, so a
+reused pid cannot be ruled out; `tab` — the terminal's record of the tab carries no start time to match, with
+`terminal`; nothing is typed, the plugin tries again on a later frame; `read-screen` still answers, with
+`bound: false`),
 the session is free (`409 terminal:session-busy`: the registry status, without it — the terminal's), the process is not
 stopped and is in the foreground of its terminal (`409 terminal:not-foreground|process-unknown`) and the typing rate per
 plugin and per tab (`429`, `scope: plugin|tab`). Then the terminal:
@@ -858,11 +942,17 @@ plugin and per tab (`429`, `scope: plugin|tab`). Then the terminal:
 daemon puts into the operation; a late bridge answer is `bridge-op-late` in the journal). No service —
 `503 terminal:disabled`. Journal: `terminal-send {plugin, sessionId, surfaceId, workspaceId, terminal, tab, len, sha, head,
 ok, error}` (`surfaceId`/`workspaceId` — cmux only, `tab` — the adapter's tab key) (head — the declared slash command at the start of the line, sha — 12 characters of the line's sha256, only
-together with head; for a line under the `*` permission both are `null`; duplicated in the audit log),
+together with head; for a line under the `*` permission both are `null`; in the main journal only — it is a routine
+record, up to `sendPerMin` a minute, and the audit log is kept for rare ones),
 `bridge-op-late {op, opId, sessionId, surfaceId, ok, error, lateMs}` (also in the audit log) and
-`terminal-denied {plugin, op, sessionId, error}` (a refusal by the overall rate — at most once a minute per plugin); bus —
+`terminal-denied {plugin, op, sessionId, error, part?, repeats?}` — refusals, collapsed: `part` — only with
+`terminal:binding-unknown`, the `part` of the reply (`"process"` \| `"tab"`: which half of the session → process → tab
+binding could not be confirmed), in the first line and in the counted one; the first refusal of a kind (the same
+plugin, operation, session, reason and `part`; for the overall request rate — the plugin alone) is written at once, the same
+one again within `deniedWindowMs` is only counted, and when the window ends one more line with `repeats: N` says how
+many there were (a plugin polling a screen it may not read no longer writes a line per request); bus —
 `terminal.send {plugin, sessionId, ok, error}`. The whole line and the screen text never go anywhere. Settings —
-`services.terminal`: `requestsPerMin` (60), `sendPerMin` (12), `sendPerTabPerMin` (4).
+`services.terminal`: `requestsPerMin` (60), `sendPerMin` (12), `sendPerTabPerMin` (4), `deniedWindowMs` (60000).
 
 ### Hub updates — `GET /hub-update` (app, cli), `POST /hub-update/check|install|rollback|switch` (app only)
 Auto-update of the hub itself (daemon + app) by releases — `vX.Y.Z` tags in origin; design, installation steps, rollback
@@ -1071,6 +1161,7 @@ still `{}`). The journal gets `hook_event_name`, `session_id`, `claudePid`, `han
 | `POST /registry/own/request` | app, cli | a request for an own plugin from a local folder `{path}` (absolute or `~/…`; a repository root — the plugin from `agenthub/<id>/`) → `200 {pending, requestId, id, title, version, path, pathShort, fingerprint, permissions, migrate}` or `{already}`; it installs nothing. Without a pinned app — `409 own:no-app`; the check failed — `422 own:lint` with `errors` (in the hub language); the plugin needs a newer contract than the hub (`<agenthub.contract>`) — `409 own:hub-too-old` with `need` and `have`; path problems — `own:not-found`, `own:not-dir`, `own:no-plugin`, `own:ambiguous` (`ids`); a request for the same id from another folder is waiting — `409 own:request-conflict` (`pending: {requestId, path, pathShort}`); 10 are already waiting — `429 own:too-many-requests`. `migrate.from: "catalog"` (`tier`, `title`) — the id matches a catalog plugin that is not installed. Requests survive daemon restarts |
 | `POST /registry/own/approve`, `/registry/own/decline` | app | `{requestId}` → always `428 consent-required` with a consent window (`source: {kind:"own", path, pathShort, fingerprint, writable: {mine, others, parentOpen, acl}, warnings}`, `migrate`, `changedSinceRequest`); the request folder was replaced — `409 own:path-changed`; `{requestId, consentToken}` → installs exactly the bytes shown in the window; while paused — 423. `decline` drops the request. A diagnostic shell run (`--snapshot-consent`) gets only the window and does not reset the human's window |
 | `POST /registry/fetch`, `/registry/install`, `/registry/remove` | app | the plugin manager; installation — `428 consent-required` with a permissions window, then `consentToken` (the catalog changed the sha256 or the tier while the window was open — `409 registry:catalog-changed`; the plugin needs a newer contract than the hub — `409 registry:hub-too-old` with `need`/`have`, and the catalog marks such an entry `needsHub: {need, have}`; the consent window carries the `icon` from the archive metadata); `{id, source: "registry"}` — from the catalog over an own plugin (a window with `migrate.from: "own"`). A diagnostic shell run (`peer.diagnostic`: `--snapshot-consent` and the other `APP_DIAGNOSTIC_ARGS` flags) changes nothing: any non-GET route gives `403 peer:diagnostic`, except `install` and `own/approve` — those return only the window (`428` or `409 consent:nothing`). Without a signed app — `agenthub plugins install|remove <id>` from your own terminal: a TTY is required, and Claude Code must not be among the process ancestors (by signature or name; `CLAUDECODE` in the environment is also refused, `terminal:agent`) |
+| `POST /registry/key/accept` | app | accept a registry's changed public key: `{registry}` → `428 consent-required` with both key ids and fingerprints, then `{registry, consentToken}` → `200 {ok, registry, key, fetched, fetchError?}`; a diagnostic shell run (`peer.diagnostic`) gets the window only — the same `428` body with a token nothing accepts, `403 peer:diagnostic` with any `consentToken` — [`plugins-registry.md`](plugins-registry.md), "The registry key is remembered" |
 | `POST /bridge/hello`, `GET /bridge/next`, `POST /bridge/result/:id`, `POST /bridge/bye` | bridge | the cmux bridge channel — [`bridge/README.md`](../bridge/README.md) |
 | `POST /terminal/read-screen`, `POST /terminal/send-text` | a trusted plugin process (cli by pid) | terminal, contract 3 — above, "Terminal" |
 | `GET /secrets/:plugin`, `PUT /secrets/:plugin/:key`, `DELETE /secrets/:plugin/:key` | app | a plugin's declared secrets: state without values, set (`{value}`, via stdin of `security -i`) and delete, then the plugin restarts with a fresh environment — above, "Secrets" |
@@ -1147,13 +1238,21 @@ explains a refusal of such an action itself (`message=`, see `POST /actions/:id`
 One JSON line per record, mode 0600, rotated at 8 MB into `journal.jsonl.1`. `type` and other codes are stable; human
 text (`detail` of `warning`, the `[hidden]`/`[скрыто]` placeholder) is rendered in the hub language when the record is
 written, so older records keep the language they were written in. The records `estop`, `estop-set`,
-`app-requirement-changed`, `shutdown-requested` and `app-restart-stopped` are duplicated into `journal-audit.jsonl`
-(0600, rotated at 1 MB into `.1`): a flood of other records cannot push them out. Plugin warnings (`warning`) — at most
+`app-requirement-changed`, `app-pin-path-changed`, `shutdown-requested`, `app-restart-stopped`, `hub-update-cli`,
+`hub-update-tag-moved`, `bridge-op-late`, `registry-key-pinned`, `registry-key-changed` and `registry-key-accepted` are
+duplicated into `journal-audit.jsonl` (0600, rotated at 1 MB into `.1`): a flood of other records cannot push them out.
+Only rare records are audit types — the file is a single 1 MB generation; `terminal-send` (every line a plugin types
+into a tab) is **not** one and lives in the main journal only. Plugin warnings (`warning`) — at most
 20 per minute from one plugin (an exact repeat — once per 10 min); beyond that, one `warning` record with
 `suppressed: N` at the next warning after the minute changes. Types: `start`, `stop`, `plugin-add`, `plugin-remove`,
 `plugin-exit`, `warning`, `action`, `action-denied`, `action-confirm-requested`, `denied`, `estop`, `estop-set`,
 `app-requirement-changed`, `shutdown-requested`, `hook`, `hook-denied`, `service-start`, `service-error`, `load-error`
-(`stop` carries `reason`: `shutdown`, `login-off`, `SIGTERM`, `SIGINT`) and extension types: app supervision (the app
+(`stop` carries `reason`: `shutdown`, `login-off`, `SIGTERM`, `SIGINT`; `denied {route, peer, pid, error, detail?}` —
+`detail` says why a process running the bridge script was not taken for the bridge, "The bridge class" above), the
+daemon's own state — `state-file-damaged {file, backup, detail}` (a state file could not be read at start, once per
+file; below, "Damaged state files"), `plugin-throttled {plugin, maxFramesPerSec, dropped}` (a streamable plugin prints
+frames faster than `plugins.maxFramesPerSec`: one record when frames start being dropped, then at most one a minute
+with the number dropped since; below, "Frame rate of a streamable plugin") — and extension types: app supervision (the app
 service) — `app-supervise` (`on`, `testMode`, `launch`), `app-lost`, `app-launch` (`reason`:
 `start`/`lost`/`verify`/`lost-later`/`relaunch`, `ok`, `code`, `path`, `restarts`), `app-launch-skipped` (`reason`,
 `why`), `app-restart-stopped` (`restarts`, `windowMs`, `why?`), `app-supervise-resumed`, `app-supervise-error`,
@@ -1169,11 +1268,14 @@ now?, skipped?}`, `extension-denied {path, kind, sha256, status: pending|changed
 `extension-error {path, kind, sha256, error, detail?}`, `extension-approved {path, kind, sha256, pid}`,
 `extension-approve-refused {path, sha256, now, pid}`, `extension-revoked {path, pid}`, and `service-start` of an
 extension service carries `extension: true`; answers — `hook-session`, `hook-session-end`, `hook-card`,
-`hook-answer`, `hook-cancel`, `hook-skip`, `hook-paused`; bridge — `bridge-op`, `bridge-stale`; quota — `usage-fetch`
+`hook-answer`, `hook-cancel`, `hook-skip` (`reason`, among them `session-ended` — [`hook.md`](hook.md)), `hook-paused`; bridge — `bridge-op`, `bridge-stale`; quota — `usage-fetch`
 (when the outcome changes: `ok`, the `error` code, the number of rows), `usage-write-error`, `usage-error`; models —
 `models-fetch` (when the outcome or the list changes: `ok`, the `error` code, the number of models),
 `models-write-error`, `models-error`; registry —
-`registry-*`, `plugin-installed`, `plugin-consent-requested`, `plugin-removed-by-user`, `plugin-installed-terminal`,
+`registry-*` (among them the registry key: `registry-key-pinned`, `registry-key-changed`, `registry-key-accepted`,
+`registry-key-restored`, `registry-key-consent-requested`, `registry-key-declined`, `registry-key-pin-error`, and
+catalog freshness: `registry-no-expiry`, `registry-expired`, `registry-cache-rejected` —
+[`plugins-registry.md`](plugins-registry.md)), `plugin-installed`, `plugin-consent-requested`, `plugin-removed-by-user`, `plugin-installed-terminal`,
 `plugin-consent-declined`, `plugin-blocked`, `plugin-unblocked`, `plugin-quarantined`, `registry-update-check`
 (background check: `ok`, `error`, `failures`; when the outcome changes), `plugin-update-available` (`plugin`, `from`,
 `version`, `permissionsGrow` — once per version; for an own plugin — on every new folder content); own sources —
@@ -1186,7 +1288,9 @@ ms, cancelled?, reason?, error?}` (`reason: "orphaned"` — a cancelled job whos
 hub), `job-cancel {plugin, actionId, job, peer, pid}`, `job-orphan-killed {plugin, job, actionId, pid}` /
 `job-orphan-skipped {plugin, pid, reason}` (at start: job groups left in `<home>/jobs.json` by a daemon that crashed — killed
 only when pid and start time still match), `jobs-persist-error {detail}`, and `action` carries `background`,
-`job`; `stdin-backlog {plugin}` — a streamable process stopped reading stdin, messages to it are dropped (once a minute); input actions — `action` carries `inputLength` (never the text); `plugin-restart {plugin, reason}` — a service
+`job`; streamable processes — `stream-orphan-killed {plugin, pid}` / `stream-orphan-skipped {plugin, pid, reason}` (at
+start: streamable plugin processes left in `<home>/streams.json` by a daemon that died without stopping them — killed
+only when pid and start time still match, `reason: "unverified"` otherwise), `streams-persist-error {detail}`; `stdin-backlog {plugin}` — a streamable process stopped reading stdin, messages to it are dropped (once a minute); input actions — `action` carries `inputLength` (never the text); `plugin-restart {plugin, reason}` — a service
 restarted a plugin with a fresh environment (`ctx.restartPlugin`, e.g. `SecretChanged`); a plugin process pressing a
 button over the socket — `action`, `action-denied`, `action-confirm-requested` carry `byPlugin` (the plugin id the server
 found for the peer) next to `peer: cli`; event subscriptions — `subscribe-dropped {plugin, dropped}` (over 600 messages a
@@ -1260,8 +1364,59 @@ builtin, official and own); the permission is
 `<agenthub.watch>$AGENTHUB_CLAUDE_SESSIONS_FILE` runs the plugin right after a write. The switch is
 `services.sessions.enabled: false` (then there is no variable).
 
+`daemon.lock` (0600) — **one daemon per state directory.** A daemon claims the directory before it reads or writes
+anything in it (`daemon/lib/instance.mjs`, `bin/agenthubd`): the file is created exclusively and holds
+`{pid, startSec, lstart, at}` — the daemon's pid and its start time from two sources. A second `agenthubd` on the same
+directory prints one line ("a daemon is already running on this directory (pid N): <home>", or "a daemon is already
+listening on <socket>" when a daemon that writes no lock — an older version — still answers on `hub.sock`), exits with
+code 1 and touches nothing:
+otherwise it would take the live daemon's background jobs for orphans and kill them, rewrite `jobs.json` and "finish" a
+hub update that is still running. The holder counts as alive while that pid exists **with the same start time** (a pid
+reused after a crash or a reboot is not the daemon); a lock whose holder is gone is removed and taken, so nothing has
+to be cleaned by hand after `kill -9`. The file is removed on a regular exit. Running two hubs side by side still works
+the usual way — a different `AGENTHUB_HOME` each.
+
+`hook-seen.json` (0600, atomic writes) — `{version: 1, lastEventAt}`: when the daemon last received a verified hook
+event (`/state.hook`, `daemon/lib/hook/seen.mjs`). Hook events come with every tool call, so the file is written at
+most once a minute and on a regular stop; a file that cannot be read counts as "no events yet" and is replaced by the
+next write (no `.bad` copy).
+
+`streams.json` (0600, atomic writes) — the live processes of streamable plugins,
+`{streams: [{plugin, pid, pgid, startSec}]}`, rewritten on every start and exit of such a process. A daemon that dies
+without stopping them (SIGKILL, a crash) leaves them running in their own process groups, and the next daemon would
+start a second copy next to each. At start the daemon reads the file and stops what is left before any plugin starts:
+SIGTERM to the group, SIGKILL a second later — only when the process is provably the same (pid and start time match;
+`stream-orphan-killed`), otherwise it is left alone (`stream-orphan-skipped`, `reason: "unverified"`). The same guard
+as for background jobs in `jobs.json`.
+
+**Damaged state files (`<file>.bad`).** A state file that cannot be parsed, is empty or is not a JSON object is not
+silently replaced by defaults (`daemon/lib/statefile.mjs`, `loadStateJson`): the daemon copies its bytes to
+`<file>.bad` next to it (0600, the previous copy is replaced), writes `state-file-damaged {file, backup, detail}` to
+the journal once per file and lists it in `/state.damagedFiles` until it restarts. What happens to the file itself is
+up to its owner:
+
+| File | With a damaged file the daemon… |
+|---|---|
+| `config.json` | **starts on the defaults and leaves the file for a human to fix** (it never rewrites `config.json` on its own); a line in `daemon.log` says so. It does not refuse to start: launchd would restart it every 10 s forever with nothing in the journal. Because whatever was switched off in the file is now unknown, the parts that let code other than the hub's own act are **closed** until the file is fixed and the daemon restarted: `requirements.app` stays empty (the `app` class is unreachable — nothing app-only can be done, and the pin watcher raises no "pin removed" alarm for it), `extensions.enabled = false` (`<home>/Extensions` is not scanned), `services.terminal.enabled = false` (plugins neither read nor type into tabs). Everything else runs on the defaults — a service that had been disabled with `services.<name>.enabled: false` starts again. The CLI is stricter: `agenthub …` refuses to run on a `config.json` it cannot parse and names the error — except `agenthub restart`, which does not read the file (after fixing it, that is the command to run) |
+| `settings.json` | runs on the default settings (language `system`, update checks on, launch at login on, default notifications); the next settings change writes a fresh file |
+| `jobs.json`, `streams.json` | cannot tell which processes the previous daemon left, so none are killed; the file is replaced by the current (empty) table |
+| `app-pin.json` | forgets which pin it had seen: the current one is recorded as a change from `unknown` — the alert errs on the loud side |
+
+Every write of a state file is atomic (a temp file `<file>.tmp-<pid>` in the same directory + rename, the mode kept; a
+reader never sees a half-written file), and `config.json` — which several processes write (the daemon, the CLI, the
+hub-update builder and watchdog) — is changed read-modify-write under a cross-process lock file, so one writer's change
+is not lost under another's.
+
+**Frame rate of a streamable plugin (`plugins.maxFramesPerSec`, 10).** Parsing a frame and rebuilding the state is work
+the daemon does on its only thread, so per plugin at most `plugins.maxFramesPerSec` frames a second are applied, with a
+second's worth of burst (a plugin that prints a few frames in a row is not slowed down). Above that the frames are
+coalesced, not queued: the latest frame waits for the next free slot and replaces the one that waited before it, so the
+state always ends up at the last frame printed. Journal: `plugin-throttled` (above). `0` — no limit. Standard plugins
+are not affected (their runs are limited by `plugins.minIntervalMs`).
+
 `push-state.json` (0600) — what was sent and the digest queue (the push service); `launch/` (0700) — `session.launch`
 prompt files (0600, deleted after reading; the actions service cleans up abandoned ones older than 10 min); `Registry/` —
-the registry catalog, quarantine, disabled plugins ([`plugins-registry.md`](plugins-registry.md));
+the registry catalog, quarantine, disabled plugins, accepted registry keys (`Registry/registry-keys.json`)
+([`plugins-registry.md`](plugins-registry.md));
 `Registry/updates.json` (0600, atomic) — which "id@version" the background check has already announced (`notified`) and
 the time of the last successful check.

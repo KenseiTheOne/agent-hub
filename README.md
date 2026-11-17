@@ -30,7 +30,7 @@ read by the built-in `agents` and `quota` plugins, and three throwaway local plu
   your consent, never from the plugin's own metadata. Plugins can declare their own actions, notification rules,
   icons and connections; the hub builds the UI from those declarations and knows no plugin by name.
 - **The app** `AgentHub.app`:
-  - popover: plugin tiles, "Waiting for you", a "Can I shut down" verdict, Panel / Session / Pause hub;
+  - popover: plugin tiles, "Needs you", a "Can I shut down" verdict, Panel / Session / Pause hub;
   - panel: sessions with "go to tab / interrupt / stop", answer cards for permission requests and questions
     (allow once / deny, options, multi-select, "Other"), a session launch form, the plugin manager with a
     permissions window, the journal, settings;
@@ -55,11 +55,12 @@ brew install KenseiTheOne/tap/agent-hub
 agenthub setup
 ```
 
-`brew install` puts the release source tree (into `$(brew --prefix)/opt/agent-hub/libexec`) and the `agenthub` command in
-place; Homebrew installs Node.js itself. `agenthub setup`, run in your own Terminal, finishes the install with the same
-builder that installs updates: it checks the Command Line Tools (swift, clang, macOS 26 SDK — `xcode-select --install`),
-builds the app from the Homebrew tree (2–5 min), pins the build, copies the built-in plugins, adds the launchd job and
-starts the hub. It asks for confirmation ("y"); `agenthub setup --plan` only shows the plan.
+`brew install` puts the release source tree (into `$(brew --prefix)/opt/agent-hub/libexec`) and the `agenthub` command
+(on `PATH`, in `$(brew --prefix)/bin`) in place; Homebrew installs Node.js itself. `agenthub setup`, run in your own
+Terminal, finishes the install with the same builder that installs updates: it checks the Command Line Tools (swift,
+clang, macOS 26 SDK — `xcode-select --install`), builds the app from the Homebrew tree (2–5 min), pins the build, copies
+the built-in plugins, adds the launchd job and starts the hub. It asks for confirmation ("y"); `agenthub setup --plan`
+only shows the plan.
 
 A Homebrew-installed hub does not look at git tags — new versions come from Homebrew:
 
@@ -178,14 +179,20 @@ contract in [`docs/extension-points.md`](docs/extension-points.md); registry, co
 
 ```sh
 ./scripts/build-native.sh                                   # peercred addon: clang from the CLT, node headers, no node-gyp
-cd daemon && env -u NODE_OPTIONS node --test 'test/*.test.mjs'   # daemon, plugins, bridge, hook, push, registry
+(cd daemon && npm test)                                     # daemon, plugins, bridge, hook, push, registry
 scripts/app-test.sh                                         # AgentHubKit tests (Swift Testing)
 scripts/bundle.sh                                           # release + AgentHub.app, ad hoc, not pinned
 scripts/bundle.sh --home <dir>                              # and pin it in a test state directory
 ```
 
-Clear `NODE_OPTIONS` if your terminal sets a preload (cmux does, and it crashes child node processes). The tests build
-the addon themselves if it is missing; they run in temporary directories, install nothing and do not use the network.
+`npm test` is `env -u NODE_OPTIONS node --test --test-concurrency=3 --test-timeout=300000 'test/*.test.mjs'`
+([`daemon/package.json`](daemon/package.json)). Keep all three parts when you run it by hand: the glob — a bare
+`node --test` also picks up the fixtures under `test/` and hangs on them; three test files at a time — every file
+starts real daemons and child processes; the timeout (five minutes per test, the longest take a few seconds) — so that
+a hung test fails instead of blocking the run forever. One
+file: `env -u NODE_OPTIONS node --test --test-timeout=300000 test/<name>.test.mjs`. `NODE_OPTIONS` is cleared because a
+terminal may set a preload there (cmux does, and it crashes child node processes). The tests build the addon themselves
+if it is missing; they run in temporary directories, install nothing and do not use the network.
 The built app is `app/build/AgentHub.app`. Building without Xcode is described in [`app/README.md`](app/README.md).
 
 ## Running against a test directory
@@ -238,18 +245,39 @@ itself. An optional certificate mode suits those who do not want to re-pin after
 
 ## CLI
 
-`agenthub status [--json]`, `agenthub logs [-n N] [-f] [--json]`, `agenthub refresh <plugin>`,
-`agenthub pause` (hub pause: answers to sessions, launches, stops and plugin actions are off; lift it with "Resume" in
-the app or by deleting the file `<AGENTHUB_HOME>/ESTOP`; old name — `agenthub estop on`),
-`agenthub lang` (the hub language: setting and effective value; change it only from the app),
-`agenthub pin-app <AgentHub.app>`, `agenthub install …`, `agenthub uninstall [--purge]`,
-`agenthub plugins install|remove <id>`, `agenthub plugins install --from <folder>` (a request for an own plugin — a
-human installs it in the app), `agenthub hub [status|install|migrate|rollback]`.
+| Command | What it does |
+|---|---|
+| `agenthub status [--json]` | plugin statuses and sessions (a table), or the `GET /state` snapshot |
+| `agenthub logs [-n N] [-f] [--json]` | the journal (metadata); `-f` follows it |
+| `agenthub refresh <plugin>` | restart a plugin |
+| `agenthub pause` | hub pause: answers to sessions, launches, stops and plugin actions are off; lift it with "Resume hub" in the app or by deleting the file `<AGENTHUB_HOME>/ESTOP` (old name — `agenthub estop on`) |
+| `agenthub lang` | the hub language: setting and effective value; change it only from the app |
+| `agenthub restart` | restart the hub daemon: `launchctl kickstart -k` on the hub's launchd job (a job that is not loaded is loaded from `~/Library/LaunchAgents`), then wait until the new daemon answers. Works with a `config.json` the other commands refuse to parse; a daemon that could not read a state file is named. A test directory (`AGENTHUB_HOME`) is refused — its daemon is started by hand. Exit code 0 only when a new daemon answered |
+| `agenthub version [--json]` | this code's version, where it runs from (install, Homebrew package, working folder) and the plugin contract version |
+| `agenthub pin-app <AgentHub.app> [--dry-run]` | pin a build by hand (`scripts/bundle.sh` calls it itself) |
+| `agenthub builtin [status]` | where the hub takes built-in plugins from and whether the `<home>/Builtin` copy is up to date |
+| `agenthub builtin update [--dry-run] [--from <dir>]` | refresh the `<home>/Builtin` copy (after editing built-in plugins) |
+| `agenthub install [--apply] [--no-launchd] [--app-cert-sha1 SHA1] [--registry-pubkey FILE] [--registry-url URL]` | the LaunchAgent, `config.json` and the built-in plugin copy from a working folder; without `--apply` — the plan only |
+| `agenthub uninstall [--apply] [--purge]` | remove the hub: daemon, app, launchd job, versions; `--purge` also removes settings, the journal and plugin data. `agenthub hub uninstall` is the same command |
+| `agenthub plugins install <id>` | install a plugin from the signed registry (a permission window in the terminal; TTY only) |
+| `agenthub plugins install --from <folder>` | a request for an own plugin — a human installs it in the app |
+| `agenthub plugins remove <id> [--purge]` | remove a plugin (`--purge` — with its data) |
+| `agenthub plugins trust-key [<registry>]` | accept a registry signing key that changed in `config.json` (both fingerprints are shown; TTY only) — until then the hub keeps verifying with the key it accepted before |
+| `agenthub setup [--plan]` | after `brew install`: install the hub from the Homebrew tree; `--plan` only shows the plan |
+| `agenthub hub [status]` | the standalone install: current and previous versions |
+| `agenthub hub install [--apply] [--origin <url\|path>] [--no-launchd]` | install from scratch — `scripts/install.sh` calls it |
+| `agenthub hub migrate [--apply] [--from <repo>] [--allow-dirty] [--no-launchd]` | move a hub that runs from a working folder into `Versions` |
+| `agenthub hub rollback [--apply]` | emergency: switch back to the previous version without the daemon |
+
+`agenthub` without a command prints the same list in one line. `hub build` and `hub watch` are internal: the daemon
+runs them during an update ([`docs/hub-updates.md`](docs/hub-updates.md)).
 The CLI speaks the hub language (English unless the hub language — the setting in the app, or the macOS language for
 "System" — is Russian); `--json` output, error codes and paths are the same in both languages.
-The CLI is not put on `PATH`: the full path is `<repository>/daemon/bin/agenthub`, and after the installer
-`~/Library/Application Support/AgentHub/Versions/current/src/daemon/bin/agenthub` (the plugin manager in the app shows
-the registry connect command with that path).
+
+Where the command is: a Homebrew install puts `agenthub` on `PATH` (a wrapper in `$(brew --prefix)/bin`). The installer
+and a working folder do not: call it by its full path — `<repository>/daemon/bin/agenthub` in a clone,
+`~/Library/Application Support/AgentHub/Versions/current/src/daemon/bin/agenthub` after the installer (the plugin
+manager in the app shows the registry connect command with that path).
 
 ## License
 

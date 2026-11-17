@@ -14,7 +14,8 @@
 import { createHash } from "node:crypto";
 import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
-import { readJsonFile, REPO_DIR } from "./config.mjs";
+import { REPO_DIR } from "./config.mjs";
+import { updateConfig, writeJsonAtomic } from "./statefile.mjs";
 import { myUid, samePath, usesFileModes } from "./platform.mjs";
 import { msg } from "./i18n.mjs";
 
@@ -157,31 +158,18 @@ export function syncBuiltin({ src = REPO_PLUGINS, home, dryRun = false, now = ()
   for (const rel of st.removed) rmSync(join(dest, ...rel.replace(/\/$/, "").split("/")), { recursive: true, force: true });
   removeStaleTemps(dest);
   const manifest = { source: resolve(src), copiedAt: now().toISOString(), files: manifestFiles };
-  const mtmp = join(dest, `${MANIFEST}.tmp-${process.pid}`);
-  writeFileSync(mtmp, JSON.stringify(manifest, null, 2) + "\n", { mode: 0o600 });
-  if (MODES) chmodSync(mtmp, 0o600);
-  renameSync(mtmp, join(dest, MANIFEST));
+  writeJsonAtomic(join(dest, MANIFEST), manifest, { mode: 0o600, space: 2 });
   return { ...st, skipped, manifest };
 }
 
-// config.json: builtinPluginsDir → the copy. Other keys are kept; the write is atomic, 0600.
-// → { changed, before }
+// config.json: builtinPluginsDir → the copy. Other keys are kept; the write is atomic, 0600, under the config lock
+// (lib/statefile.mjs updateConfig). → { changed, before }
 export function pointConfigAtCopy(configPath, dir) {
-  let cfg = {};
-  if (existsSync(configPath)) {
-    try {
-      cfg = readJsonFile(configPath);
-    } catch (e) {
-      throw new Error(msg("err.config.parseKeep", { why: e.message }));
-    }
-  }
-  const before = cfg.builtinPluginsDir ?? null;
-  if (before === dir) return { changed: false, before };
-  cfg.builtinPluginsDir = dir;
-  mkdirSync(dirname(configPath), { recursive: true, mode: 0o700 });
-  const tmp = `${configPath}.tmp-${process.pid}`;
-  writeFileSync(tmp, JSON.stringify(cfg, null, 2) + "\n", { mode: 0o600 });
-  if (MODES) chmodSync(tmp, 0o600);
-  renameSync(tmp, configPath);
-  return { changed: true, before };
+  let before = null;
+  const r = updateConfig(configPath, (cfg) => {
+    before = cfg.builtinPluginsDir ?? null;
+    if (before === dir) return false;
+    cfg.builtinPluginsDir = dir;
+  });
+  return { changed: r.written, before };
 }
