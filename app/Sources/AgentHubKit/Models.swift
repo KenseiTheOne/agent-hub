@@ -744,7 +744,10 @@ public struct HubState: Codable, Sendable, Hashable {
     }
 
     /// Plugins for the menu: those needing attention first (by descending severity), otherwise in the daemon's order.
-    public var pluginsByAttention: [PluginState] {
+    public var pluginsByAttention: [PluginState] { Self.byAttention(plugins) }
+
+    /// Those needing attention first (by descending severity), otherwise in the order given.
+    public static func byAttention(_ plugins: [PluginState]) -> [PluginState] {
         plugins.enumerated()
             .sorted { a, b in
                 a.element.status != b.element.status ? a.element.status > b.element.status : a.offset < b.offset
@@ -1427,6 +1430,62 @@ public struct ConfirmLayout: Sendable, Hashable {
     }
 }
 
+/// A plugin action's confirmation by parts (`parts` in a 428): the window lays these out itself — the action as the title,
+/// the plugin, where the button is, the plugin's own warning apart from the hub's cost words, the command in small print.
+public struct ConfirmParts: Decodable, Sendable, Hashable {
+    public var plugin: String
+    public var tier: String
+    public var title: String?
+    public var command: String
+    public var arg: String?
+    /// The row that carries the button and the row it hangs under (a child button "Fix" under a tab row).
+    public var row: String?
+    public var parentRow: String?
+    /// The hub's words about network or quota — only for `confirm-cost`.
+    public var costNet: String?
+    /// The action's `cost=` words; `notePlugin` — they are a plugin author's, not the hub's.
+    public var note: String?
+    public var notePlugin: Bool
+    public var input: String?
+    public var background: Bool
+
+    public init(plugin: String, tier: String, title: String? = nil, command: String, arg: String? = nil, row: String? = nil, parentRow: String? = nil,
+                costNet: String? = nil, note: String? = nil, notePlugin: Bool = false, input: String? = nil, background: Bool = false) {
+        self.plugin = plugin; self.tier = tier; self.title = title; self.command = command; self.arg = arg; self.row = row; self.parentRow = parentRow
+        self.costNet = costNet; self.note = note; self.notePlugin = notePlugin; self.input = input; self.background = background
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        plugin = try c.decode(String.self, forKey: .plugin)
+        tier = (try? c.decodeIfPresent(String.self, forKey: .tier)) ?? "?"
+        title = try? c.decodeIfPresent(String.self, forKey: .title)
+        command = (try? c.decodeIfPresent(String.self, forKey: .command)) ?? ""
+        arg = try? c.decodeIfPresent(String.self, forKey: .arg)
+        row = try? c.decodeIfPresent(String.self, forKey: .row)
+        parentRow = try? c.decodeIfPresent(String.self, forKey: .parentRow)
+        costNet = try? c.decodeIfPresent(String.self, forKey: .costNet)
+        note = try? c.decodeIfPresent(String.self, forKey: .note)
+        notePlugin = (try? c.decodeIfPresent(Bool.self, forKey: .notePlugin)) ?? false
+        input = try? c.decodeIfPresent(String.self, forKey: .input)
+        background = (try? c.decodeIfPresent(Bool.self, forKey: .background)) ?? false
+    }
+
+    enum CodingKeys: String, CodingKey { case plugin, tier, title, command, arg, row, parentRow, costNet, note, notePlugin, input, background }
+
+    /// Where the button is, in words: the tab of a session the argument names, else the row (the parent row when the
+    /// button row only names the button). nil — nothing to add to the title.
+    public func place(sessions: [SessionInfo], actionLabel: String) -> (value: String, note: String?)? {
+        if let arg, let s = sessions.first(where: { $0.sessionId.caseInsensitiveCompare(arg) == .orderedSame }) {
+            let project = s.cwd.map { URL(fileURLWithPath: $0).lastPathComponent }.flatMap { $0.isEmpty ? nil : $0 }
+            let name = s.name.map { tr("«\($0)»", "\"\($0)\"") } ?? s.displayName
+            return (project.map { "\($0) · \(name)" } ?? name, s.terminalInfo?.label ?? s.terminal)
+        }
+        let candidates = [parentRow, row].compactMap { $0 }.filter { !$0.isEmpty && $0 != title && $0 != actionLabel }
+        return candidates.first.map { ($0, nil) }
+    }
+}
+
 public struct ConfirmRequest: Decodable, Sendable, Hashable {
     public var token: String
     public var level: ActionLevel
@@ -1447,6 +1506,11 @@ public struct ConfirmRequest: Decodable, Sendable, Hashable {
     public var input: OfferInput? = nil
     /// G6: pressing starts a background job.
     public var background: Bool? = nil
+    /// A plugin action's confirmation by parts (the core sends it next to `text`); the window lays it out when present.
+    public var parts: ConfirmParts? = nil
+    /// Where the button is, resolved by the store against its sessions (`ConfirmParts.place`); never decoded.
+    public var place: String? = nil
+    public var placeNote: String? = nil
 
     public init(token: String, level: ActionLevel, text: String, cost: String? = nil, expiresInMs: Int? = nil, title: String? = nil, button: String? = nil, details: String? = nil,
                 row: String? = nil, input: OfferInput? = nil) {
@@ -1454,7 +1518,16 @@ public struct ConfirmRequest: Decodable, Sendable, Hashable {
         self.title = title; self.button = button; self.details = details; self.row = row; self.input = input
     }
 
-    enum CodingKeys: String, CodingKey { case token, level, text, cost, expiresInMs, row, input, background }
+    enum CodingKeys: String, CodingKey { case token, level, text, cost, expiresInMs, row, input, background, parts }
+
+    /// The same request with `place` filled from the store's sessions (a plugin action's confirmation only).
+    public func placed(sessions: [SessionInfo], actionLabel: String) -> ConfirmRequest {
+        guard let parts, let p = parts.place(sessions: sessions, actionLabel: actionLabel) else { return self }
+        var r = self
+        r.place = p.value
+        r.placeNote = p.note
+        return r
+    }
 
     /// The row to show under the text: nil when the core already quoted it in `text`, or when it only repeats the
     /// button title (the core leaves it out of `text` then, and the window already names the button).

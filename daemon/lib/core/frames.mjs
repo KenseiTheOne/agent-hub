@@ -380,7 +380,10 @@ export class CoreFrames {
     let row = cleanPhrase(item.title || "") || null;
     const actionTitle = spec.kind === "action" ? pickLang(spec.action.title, spec.action.i18n, "title", this.lang()) : null;
     if (parentTitle && (!row || row === spec.label || (actionTitle && row === cleanPhrase(String(actionTitle))))) row = cleanPhrase(parentTitle) || row;
-    const offer = { id, pluginId: pl.id, ...spec, row };
+    // the parent row on its own too: the confirmation window names where the button sits even when the button row has
+    // its own text ("Fix" under a tab row)
+    const parent = parentTitle ? cleanPhrase(parentTitle) || null : null;
+    const offer = { id, pluginId: pl.id, ...spec, row, ...(parent && parent !== row ? { parentRow: parent } : {}) };
     this.offers.set(id, offer);
     return offer;
   }

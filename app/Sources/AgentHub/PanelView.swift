@@ -213,14 +213,24 @@ struct Sidebar: View {
             ScrollView(.vertical) {
                 VStack(alignment: .leading, spacing: 2) {
                     let live = store.connection.isLive
-                    section(tr("Агенты", "Agents"))
-                    row(.sessions, icon: "terminal", title: tr("Сессии", "Sessions"),
-                        status: SidebarStatus.sessions(store.sessions, waiting: store.waitingCount,
-                                                       cardSessions: store.visibleCards.map(\.sessionId),
-                                                       plugin: store.plugin(NotifyTarget.sessionsPlugin), live: live))
-                    ForEach(plugins) { p in
-                        row(.plugin(p.id), icon: pluginSymbol(p), title: p.title, status: SidebarStatus.plugin(p, live: live))
+                    agentsHeader
+                    if isArranging {
+                        pinnedSessionsRow
+                    } else {
+                        row(.sessions, icon: "terminal", title: tr("Сессии", "Sessions"),
+                            status: SidebarStatus.sessions(store.sessions, waiting: store.waitingCount,
+                                                           cardSessions: store.visibleCards.map(\.sessionId),
+                                                           plugin: store.plugin(NotifyTarget.sessionsPlugin), live: live))
                     }
+                    let list = plugins
+                    ForEach(Array(list.enumerated()), id: \.element.id) { i, p in
+                        if isArranging {
+                            arrangeRow(p, at: i, of: list.count)
+                        } else {
+                            row(.plugin(p.id), icon: pluginSymbol(p), title: p.title, status: SidebarStatus.plugin(p, live: live))
+                        }
+                    }
+                    if isArranging { defaultOrderButton }
                     section(tr("Хаб", "Hub")).padding(.top, 10)
                     row(.journal, icon: "doc.text", title: tr("Журнал", "Log"))
                     // the number of available plugin updates (the daemon's background check every 6 h) — as a capsule, in words — as a second line
@@ -242,8 +252,123 @@ struct Sidebar: View {
         .containerShape(RoundedRectangle(cornerRadius: PanelMetrics.cardRadius, style: .continuous))
     }
 
+    /// Plugins under "Agents": alphabetical, or in the order the human arranged (task 120); the sessions plugin has its own row.
     private var plugins: [PluginState] {
-        (store.state?.plugins ?? []).filter { $0.id != NotifyTarget.sessionsPlugin }
+        store.orderedPlugins.filter { $0.id != NotifyTarget.sessionsPlugin }
+    }
+
+    // MARK: arranging plugins (task 120)
+
+    /// The rearranging mode: rows get arrows and a handle and can be dragged; "Default" brings back the alphabet.
+    /// (State without the macro: see the note on `State` at the top of this file.)
+    private let arrangingStore = State(initialValue: LaunchOptions.current.arrangePlugins)
+    private var arranging: Bool { get { arrangingStore.wrappedValue } nonmutating set { arrangingStore.wrappedValue = newValue } }
+    /// The row a dragged plugin is over right now.
+    private let dropTargetStore = State<String?>(initialValue: nil)
+    private var dropTarget: String? { get { dropTargetStore.wrappedValue } nonmutating set { dropTargetStore.wrappedValue = newValue } }
+
+    /// Nothing to rearrange with fewer than two plugins — the mode ends by itself.
+    private var isArranging: Bool { arranging && plugins.count > 1 }
+
+    /// "Agents" with the rearrange button on the right; in the mode — "Done".
+    private var agentsHeader: some View {
+        HStack(spacing: 4) {
+            Text(tr("Агенты", "Agents")).font(.system(size: 11, weight: .semibold)).foregroundStyle(.white.opacity(0.45))
+            Spacer(minLength: 4)
+            if plugins.count > 1 {
+                Button { arranging = !isArranging; dropTarget = nil } label: {
+                    Group {
+                        if isArranging { Text(tr("Готово", "Done")).font(.system(size: 11, weight: .semibold)) }
+                        else { Image(systemName: "arrow.up.arrow.down").font(.system(size: 11, weight: .semibold)) }
+                    }
+                    .frame(minWidth: 18, minHeight: 14)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(isArranging ? hexColor(0x4DA3FF) : .white.opacity(0.45))
+                .hoverHelp(isArranging ? nil : tr("Изменить порядок плагинов", "Rearrange plugins"))
+                .accessibilityLabel(isArranging ? tr("Готово", "Done") : tr("Изменить порядок плагинов", "Rearrange plugins"))
+            }
+        }
+        .padding(.horizontal, PanelMetrics.rowPadding).padding(.bottom, 4)
+    }
+
+    /// "Sessions" in the rearranging mode: the hub's own row, always first — a pin instead of arrows and a handle, and a
+    /// thin line under it, so it is clear the alphabet and the arranging are about the plugins below.
+    private var pinnedSessionsRow: some View {
+        VStack(spacing: 6) {
+            HStack(spacing: 9) {
+                Image(systemName: "terminal").font(.system(size: 14)).frame(width: 20, height: 16).foregroundStyle(.white.opacity(0.75))
+                Text(tr("Сессии", "Sessions")).font(.system(size: 13)).lineLimit(1)
+                Spacer(minLength: 4)
+                Image(systemName: "pin.fill").font(.system(size: 11)).foregroundStyle(.white.opacity(0.45))
+                    .accessibilityHidden(true)
+            }
+            .padding(.horizontal, PanelMetrics.rowPadding)
+            .frame(minHeight: 34)
+            .hoverHelp(tr("Сессии всегда первые — порядок меняется только у плагинов ниже", "Sessions always come first — only the plugins below can be rearranged"))
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel(tr("Сессии, всегда первые", "Sessions, always first"))
+            Rectangle().fill(Color.white.opacity(0.12)).frame(height: 0.5).padding(.horizontal, PanelMetrics.rowPadding)
+        }
+        .padding(.bottom, 2)
+    }
+
+    /// A plugin row in the rearranging mode: up/down arrows and a handle; drop another row onto it to put that one here.
+    private func arrangeRow(_ p: PluginState, at i: Int, of n: Int) -> some View {
+        HStack(spacing: 9) {
+            Image(systemName: pluginSymbol(p)).font(.system(size: 14)).frame(width: 20, height: 16).foregroundStyle(.white.opacity(0.75))
+            Text(p.title).font(.system(size: 13)).lineLimit(1).truncationMode(.tail)
+            Spacer(minLength: 4)
+            stepButton("chevron.up", tr("Выше", "Move up"), enabled: i > 0) { arrange(PluginOrder.step(p.id, by: -1, in: visibleIds)) }
+            stepButton("chevron.down", tr("Ниже", "Move down"), enabled: i < n - 1) { arrange(PluginOrder.step(p.id, by: 1, in: visibleIds)) }
+            Image(systemName: "line.3.horizontal").font(.system(size: 12)).foregroundStyle(.white.opacity(0.45))
+                .accessibilityHidden(true)
+        }
+        .padding(.horizontal, PanelMetrics.rowPadding)
+        .frame(minHeight: 34)
+        .background(SidebarCard.row.fill(Color.white.opacity(dropTarget == p.id ? 0.16 : 0.05)))
+        .contentShape(SidebarCard.row)
+        .draggable(p.id)
+        .dropDestination(for: String.self) { ids, _ in
+            dropTarget = nil
+            guard let id = ids.first, visibleIds.contains(id) else { return false }
+            arrange(PluginOrder.move(id, onto: p.id, in: visibleIds))
+            return true
+        } isTargeted: { over in
+            if over { dropTarget = p.id } else if dropTarget == p.id { dropTarget = nil }
+        }
+        .hoverHelp(tr("Перетащите строку или нажмите стрелку", "Drag the row or press an arrow"))
+    }
+
+    private func stepButton(_ symbol: String, _ label: String, enabled: Bool, run: @escaping () -> Void) -> some View {
+        Button(action: run) {
+            Image(systemName: symbol).font(.system(size: 11, weight: .semibold)).frame(width: 18, height: 18).contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(.white.opacity(enabled ? 0.75 : 0.2))
+        .disabled(!enabled)
+        .accessibilityLabel(label)
+    }
+
+    /// "Default": alphabetical again (nothing to do — dimmed).
+    private var defaultOrderButton: some View {
+        let custom = store.pluginOrderIsCustom
+        return Button { store.resetPluginOrder() } label: {
+            Label(tr("По умолчанию (по алфавиту)", "Default (alphabetical)"), systemImage: "textformat.abc")
+                .font(.system(size: 11.5)).frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, PanelMetrics.rowPadding).frame(minHeight: 28).contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(custom ? hexColor(0x4DA3FF) : .white.opacity(0.3))
+        .disabled(!custom)
+    }
+
+    private var visibleIds: [String] { plugins.map(\.id) }
+
+    /// Save the sidebar's new order into the full one (the hidden sessions plugin keeps its place).
+    private func arrange(_ visible: [String]) {
+        store.arrangePlugins(PluginOrder.replacing(visible: visible, in: store.orderedPlugins.map(\.id)))
     }
 
     /// Space for the window's traffic lights on the left of their row.

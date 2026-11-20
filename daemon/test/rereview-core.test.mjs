@@ -428,3 +428,45 @@ test("71: href= / effect=open.url with a scheme the hub won't open is refused at
     cleanup(plugins);
   }
 });
+
+test("t100: a 428 also carries the confirmation by parts — the action, plugin, row and its parent row, the hub's cost words apart from the plugin's", async () => {
+  const plugins = tempHome("ah-t100-");
+  writePlugin(plugins, "p.sh", `#!/bin/sh
+# <agenthub.title>Parts</agenthub.title>
+# <agenthub.action id="ok" level="confirm" title="Approve" arg="id:^r[0-9]{1,3}$">p.sh --action ok</agenthub.action>
+# <agenthub.action id="pay" level="confirm-cost" title="Spend" cost="can't be undone">p.sh --action pay</agenthub.action>
+[ "$1" = "--action" ] && exit 0
+echo "Parts | status=ok"
+echo "---"
+echo "Tab alpha"
+echo "--Fix | action=ok arg=r9"
+echo "Spend now | action=pay"
+`);
+  const h = await startHub({ pluginsDir: plugins });
+  try {
+    await waitFor(() => h.core.pluginState("p")?.body.length);
+    const body = h.core.pluginState("p").body;
+    const fix = await h.core.invoke({ id: body.find((x) => x.title === "Fix").offer.id, peer: APP });
+    assert.equal(fix.status, 428);
+    const p = fix.body.parts;
+    assert.equal(p.plugin, "Parts");
+    assert.equal(p.title, "Approve");
+    assert.equal(p.row, "Fix");
+    assert.equal(p.parentRow, "Tab alpha", "the row the button hangs under is named even when the button has its own text");
+    assert.equal(p.arg, "r9");
+    assert.match(p.command, /--action ok r9/);
+    assert.equal(p.costNet, null, "plain confirm: no cost line");
+    assert.equal(p.note, null);
+    assert.equal(typeof fix.body.text, "string", "the whole text stays for older shells");
+    const pay = await h.core.invoke({ id: body.find((x) => x.title === "Spend now").offer.id, peer: APP });
+    assert.equal(pay.body.parts.note, "can't be undone", "the plugin's own words, without the hub's prefix");
+    // the test hub loads its plugins folder as built-in: the hub vouches for those words, so they are not marked as a plugin's
+    assert.equal(pay.body.parts.notePlugin, h.core.plugins.get("p").source !== "builtin");
+    assert.equal(pay.body.parts.costNet, null, "no hosts declared and the plugin said its cost itself: no generic network line");
+    assert.match(pay.body.cost, /can't be undone/, "the whole cost line stays for older shells");
+    assert.equal(pay.body.parts.parentRow, null);
+  } finally {
+    await h.stop();
+    cleanup(plugins);
+  }
+});

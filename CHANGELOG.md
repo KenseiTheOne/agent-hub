@@ -4,6 +4,22 @@ Releases are git tags `vX.Y.Z` (also published as GitHub releases); the current 
 The plugin contract has its own version history in
 [`docs/extension-points.md`](docs/extension-points.md#contract-versions).
 
+## 0.1.8 — 2026-11-20
+
+### Added
+
+- **Plugins in the order you choose.** The panel's sidebar lists plugins alphabetically by default. The ⇅ button next to
+  "Agents" switches to rearranging: drag a row onto another, or use the arrows; "Default (alphabetical)" brings the
+  alphabet back. "Sessions" stays pinned on top. The order is kept between launches (per hub) and the menu's tiles follow it after the plugins that need
+  attention. A plugin installed later goes after the arranged ones (task 120).
+
+### Changed
+
+- **A plugin action's confirmation is laid out.** The window's title is the action itself, under it the plugin; rows
+  say where the button is (the tab by project and session name, not a session id), the plugin's own warning (marked as
+  its words) and the cost only when there is network or quota to speak of. The command goes to the small print. The
+  core sends these parts in the 428 as `parts`, next to the whole `text` for older shells (task 100).
+
 ## 0.1.7 — 2026-11-17
 
 ### Security

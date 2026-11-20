@@ -100,7 +100,8 @@ struct PopoverView: View {
             connectionLine
             // "Safe to shut down?" — above the tiles (mockup F)
             IdleVerdictCard(store: store, router: router)
-            if let plugins = store.state?.pluginsByAttention, !plugins.isEmpty {
+            let plugins = store.pluginsByAttention
+            if !plugins.isEmpty {
                 Grid(horizontalSpacing: 8, verticalSpacing: 8) {
                     ForEach(Array(stride(from: 0, to: plugins.count, by: 3)), id: \.self) { i in
                         GridRow {
@@ -353,7 +354,7 @@ struct PopoverView: View {
     private var needs: [Need] {
         var out: [Need] = []
         // plugin blockers first: they won't resolve without you
-        for p in store.state?.pluginsByAttention ?? [] where p.status >= .block {
+        for p in store.pluginsByAttention where p.status >= .block {
             let (title, sub) = p.attentionLines
             out.append(Need(id: "p:\(p.id)", status: p.status, title: title, sub: sub,
                             action: tr("Показать", "Show"), red: true, panel: .plugin(p.id), run: { router.open(.plugin(p.id)) }))

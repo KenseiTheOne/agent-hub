@@ -155,6 +155,41 @@ public final class HubStore {
         self.client = client
     }
 
+    // MARK: - plugin order (task 120)
+
+    /// The human's order of plugins (ids); empty — alphabetical. Kept in UserDefaults per hub once `rememberPluginOrder` was called.
+    public private(set) var pluginOrder: [String] = []
+    @ObservationIgnored private var orderMemory: (defaults: UserDefaults, key: String)?
+
+    /// Read the saved order and keep saving changes to it (`pluginOrder:<socket>`).
+    public func rememberPluginOrder(in defaults: UserDefaults = .standard) {
+        let key = HubDefaults.key(PluginOrder.defaultsBase, socketPath: client.socketPath)
+        orderMemory = (defaults, key)
+        pluginOrder = PluginOrder.decode(defaults.string(forKey: key) ?? "")
+    }
+
+    /// All plugins in the panel's order: the human's, or alphabetical.
+    public var orderedPlugins: [PluginState] { PluginOrder.apply(pluginOrder, to: state?.plugins ?? []) }
+
+    /// For the menu: those needing attention first, otherwise in the panel's order.
+    public var pluginsByAttention: [PluginState] { HubState.byAttention(orderedPlugins) }
+
+    /// The order the human arranged (ids of all plugins); the alphabetical one is kept as "default".
+    public func arrangePlugins(_ ids: [String]) {
+        let raw = PluginOrder.toSave(ids, plugins: state?.plugins ?? [])
+        pluginOrder = PluginOrder.decode(raw)
+        guard let m = orderMemory else { return }
+        if raw.isEmpty { m.defaults.removeObject(forKey: m.key) } else { m.defaults.set(raw, forKey: m.key) }
+    }
+
+    /// Back to alphabetical.
+    public func resetPluginOrder() { arrangePlugins(PluginOrder.alphabetical(state?.plugins ?? []).map(\.id)) }
+
+    /// Whether the order is the human's (the "Default" button has something to do).
+    public var pluginOrderIsCustom: Bool {
+        orderedPlugins.map(\.id) != PluginOrder.alphabetical(state?.plugins ?? []).map(\.id)
+    }
+
     /// For previews and tests: a ready snapshot without a daemon.
     public init(client: HubClient, preview: HubState) {
         self.client = client

@@ -32,10 +32,11 @@ import SwiftUI
 ///   --snapshot-popover <png>  show the popover as a window (like --show-popover), wait for a live snapshot, save an image
 ///                             (own window, no screen recording permission) and quit
 ///   --idle-expanded           the "Can I shut down" card in the popover starts expanded (snapshots)
+///   --arrange-plugins         the panel sidebar starts in the plugin rearranging mode (snapshots)
 ///   --open-tile <plugin id>   the popover starts with that plugin's tile expanded (its detail card; snapshots)
 ///   --snapshot-report <png>   draw the "It didn't work" window with sample content and quit (synthetic; nothing is run)
 ///   --snapshot-confirm <png>  draw the "Update the hub?" confirmation with sample content and quit (synthetic); with
-///                             --confirm-sample <cost|input|prompt|rollback|registry-key|expired> another window of the same kind instead:
+///                             --confirm-sample <plugin|cost|input|prompt|rollback|registry-key|expired> another window of the same kind instead:
 ///                             a core confirmation with a cost and a live countdown, the same with a text field, the
 ///                             text field alone, a plugin rollback, the "accept the new registry key?" window with
 ///                             two sample keys (--confirm-cost is the old spelling of `cost`)
@@ -63,6 +64,7 @@ struct LaunchOptions {
     var demoSessions = false
     var popoverSnapshot: String?
     var idleExpanded = false
+    var arrangePlugins = false
     var openTile: String?
     var settingsFocus: String?
     var consentSnapshot: String?
@@ -91,6 +93,7 @@ struct LaunchOptions {
         o.menubarSnapshot = d.snapshotMenubar
         o.printStatusItem = d.printStatusItem
         o.idleExpanded = a.contains("--idle-expanded")
+        o.arrangePlugins = a.contains("--arrange-plugins")
         if let i = a.firstIndex(of: "--open-tile"), i + 1 < a.count { o.openTile = a[i + 1] }
         o.confirmSnapshot = d.snapshotConfirm
         o.reportSnapshot = d.snapshotReport
@@ -165,6 +168,7 @@ final class AppModel {
         // language without a daemon connection: the last effective one for this hub, not the macOS language
         L10n.shared.remember(socketPath: socketPath)
         store = HubStore(client: HubClient(socketPath: socketPath))
+        store.rememberPluginOrder()
         store.presenter = presenter
         statusMenu = StatusItemMenu(store: store, router: router)
         router.section = LaunchOptions.current.section
@@ -444,6 +448,17 @@ final class AppModel {
                                   cost: tr("тратит квоту Claude", "uses Claude quota"), expiresInMs: 60_000, row: tr("T-1 · починить вход", "T-1 · fix sign-in"))
         let field = OfferInput(placeholder: tr("Что сделать", "What to do"), maxLength: 80)
         switch LaunchOptions.current.confirmSample {
+        case "plugin":
+            // a plugin action by parts: the title is the action, rows say where and what the plugin warns about
+            var req = ConfirmRequest(token: "", level: .confirmCost, text: "", expiresInMs: 104_000)
+            req.parts = ConfirmParts(plugin: tr("Пример плагина", "Sample plugin"), tier: tr("официальный плагин", "official plugin"),
+                                     title: tr("Привести вкладку к базе: набрать /model и /effort", "Bring the tab to the base: type /model and /effort"),
+                                     command: "sample.30s.mjs --action apply 0f3c1a2b-5d6e-4f70-8a9b-c0d1e2f3a4b5",
+                                     note: tr("из хаба не отменить: прежние модель и effort вкладки вернёте только вы", "can't be undone from the hub: only you can bring back the tab's previous model and effort"),
+                                     notePlugin: true)
+            req.place = tr("my-project · «релиз»", "my-project · \"release\"")
+            req.placeNote = tr("терминал, вкладка 3", "terminal, tab 3")
+            await snapshotWindow(to: path) { [presenter] in _ = await presenter.confirm(req, actionLabel: tr("Привести", "Fix")) }
         case "cost":
             await snapshotWindow(to: path) { [presenter] in _ = await presenter.confirm(cost, actionLabel: action) }
         case "input":

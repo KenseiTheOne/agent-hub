@@ -147,6 +147,8 @@ export class CoreInvoke {
             // G10: the row carrying the button (sanitized, also quoted in text); G1: the field to show in the sheet when the text
             // was not sent yet; G6: pressing starts a background job
             ...(d.row ? { row: d.row } : {}),
+            // the same confirmation by parts (plugin actions): the shell lays its window out from these
+            ...(d.parts ? { parts: d.parts } : {}),
             ...(target.inputOpen ? { input: { ...offer.input } } : {}),
             ...(target.action?.background ? { background: true } : {}),
           },
@@ -271,9 +273,11 @@ export class CoreInvoke {
       const a = target.action || target.offer.action;
       const pl = this.pluginMeta.get(target.offer.pluginId);
       const parts = [];
+      let netHosts = false;
       if (target.level === "confirm-cost") {
         // net="none" (G2): the action promised no network — only its own cost= is left to show
         const net = a.net === "none" ? [] : (pl?.meta?.net || []).map((n) => splitWhy(n).what).filter(Boolean);
+        netHosts = net.length > 0;
         parts.push(net.length ? t(lang, "cost.net", { hosts: net.slice(0, 3).join(", ") }) : t(lang, "cost.generic"));
       }
       // builtin plugin — our code, its words about cost are shown as is
@@ -293,7 +297,26 @@ export class CoreInvoke {
       const row = target.offer.row && target.offer.row !== p.title && target.offer.row !== target.offer.label ? target.offer.row : null;
       if (row) text.push(t(lang, "action.row", { row }));
       if (a.background) text.push(t(lang, "action.background"));
-      return { text: text.join(" "), cost: parts.length ? parts.join("; ") : null, row: target.offer.row || null };
+      // the same by parts, for a shell that lays the window out itself; `text` and `cost` stay whole for older shells.
+      // costNet — the hub's own words (confirm-cost only); note — the action's cost= words, notePlugin — they are a
+      // plugin author's (not the hub's) and are shown as such
+      const layout = {
+        plugin,
+        tier,
+        title: p.title || null,
+        command: p.command,
+        arg: arg || null,
+        row: target.offer.row || null,
+        parentRow: target.offer.parentRow || null,
+        // the generic "may use resources or the network" only when nothing else is said: a plugin that named no host but
+        // explained its cost in its own words gets those words, not a line about a network it doesn't use
+        costNet: target.level === "confirm-cost" && (netHosts || !cost) ? parts[0] : null,
+        note: cost ? String(cost).slice(0, 200) : null,
+        notePlugin: Boolean(cost) && pl?.source !== "builtin",
+        input: a.input ? (target.input !== undefined ? cleanPhrase(target.input) : null) : null,
+        background: Boolean(a.background),
+      };
+      return { text: text.join(" "), cost: parts.length ? parts.join("; ") : null, row: target.offer.row || null, parts: layout };
     }
     try {
       const d = target.prim.describe?.(target.args, this.facts, lang);

@@ -146,7 +146,11 @@ struct ConfirmSheet: View {
     private var kind: ConfirmStyle { style ?? (request.level == .confirmCost ? .costly : .regular) }
     private var costly: Bool { kind != .regular }
     private var title: String {
-        request.title ?? (kind == .costly ? tr("Подтвердите: действие тратит квоту или выходит в сеть", "Confirm: this uses quota or the network")
+        // a plugin action by parts: the title is the action itself
+        if request.title == nil, request.layout == nil, let parts = request.parts {
+            return parts.title.flatMap { $0.isEmpty ? nil : $0 } ?? actionLabel
+        }
+        return request.title ?? (kind == .costly ? tr("Подтвердите: действие тратит квоту или выходит в сеть", "Confirm: this uses quota or the network")
                                           : tr("Подтвердите действие", "Confirm the action"))
     }
     private var details: String? { request.details.flatMap { $0.isEmpty ? nil : $0 } }
@@ -164,6 +168,8 @@ struct ConfirmSheet: View {
                     Text(title).font(.system(size: 16, weight: .bold)).fixedSize(horizontal: false, vertical: true)
                     if let sub = request.layout?.subtitle {
                         Text(sub).font(.system(size: 12.5, design: .monospaced)).foregroundStyle(.white.opacity(0.72))
+                    } else if request.layout == nil, let parts = request.parts {
+                        Text("\(parts.plugin) · \(parts.tier)").font(.system(size: 12.5)).foregroundStyle(.white.opacity(0.72))
                     }
                 }
                 .frame(minHeight: 34, alignment: .center)
@@ -203,6 +209,8 @@ struct ConfirmSheet: View {
                         Text(note).font(.system(size: 12.5)).foregroundStyle(.white.opacity(0.86)).fixedSize(horizontal: false, vertical: true)
                     }
                 }
+            } else if let parts = request.parts {
+                partsRows(parts)
             } else {
                 Text(request.text).font(.system(size: 12.5)).foregroundStyle(.white.opacity(0.86))
                     .fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
@@ -225,14 +233,15 @@ struct ConfirmSheet: View {
                 if let details {
                     Text(details).font(.system(size: 10.5, design: .monospaced)).foregroundStyle(.white.opacity(0.38))
                         .lineLimit(1).truncationMode(.middle).textSelection(.enabled).help(details)
-                } else if let until {
-                    // how long the core still accepts this confirmation; at zero the window closes by itself
-                    TimelineView(CountdownSchedule(end: until)) { ctx in
-                        Text(WindowExpiry.confirmText(until: until, now: ctx.date))
-                            .font(.system(size: 10.5, design: .monospaced)).monospacedDigit()
-                            .foregroundStyle(WindowExpiry.isLast(until: until, now: ctx.date) ? orange : .white.opacity(0.38))
-                            .lineLimit(1)
+                } else if request.layout == nil, let parts = request.parts, !parts.command.isEmpty {
+                    // the command in small print (whole on hover), the countdown under it
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(parts.command).font(.system(size: 10.5, design: .monospaced)).foregroundStyle(.white.opacity(0.38))
+                            .lineLimit(1).truncationMode(.middle).textSelection(.enabled).help(parts.command)
+                        if let until { countdown(until) }
                     }
+                } else if let until {
+                    countdown(until)
                 }
                 Spacer(minLength: 8)
                 let action = request.button ?? tr("Выполнить", "Run")
@@ -259,6 +268,47 @@ struct ConfirmSheet: View {
             }
         }
         .padding(22)
+    }
+
+    /// How long the core still accepts this confirmation; at zero the window closes by itself.
+    private func countdown(_ until: Date) -> some View {
+        TimelineView(CountdownSchedule(end: until)) { ctx in
+            Text(WindowExpiry.confirmText(until: until, now: ctx.date))
+                .font(.system(size: 10.5, design: .monospaced)).monospacedDigit()
+                .foregroundStyle(WindowExpiry.isLast(until: until, now: ctx.date) ? orange : .white.opacity(0.38))
+                .lineLimit(1)
+        }
+    }
+
+    /// A plugin action by parts: where the button is, the typed text, the plugin's warning (its own words, marked as
+    /// such), the hub's cost words only when there is network or quota to speak of, a background job.
+    @ViewBuilder
+    private func partsRows(_ parts: ConfirmParts) -> some View {
+        let rows: [(String, String, String?)] = [
+            request.place.map { (tr("Где", "Where"), $0, request.placeNote) },
+            parts.input.map { (tr("Текст", "Text"), $0, nil) },
+            parts.note.map { (tr("Внимание", "Note"), $0, parts.notePlugin ? tr("слова плагина", "the plugin's words") : nil) },
+            parts.costNet.map { (tr("Чем обойдётся", "Cost"), $0, nil) },
+            parts.background ? (tr("Как пойдёт", "How"), tr("Фоновой задачей — окно ждать не будет", "As a background job — no need to wait"), nil) : nil,
+        ].compactMap { $0 }
+        if !rows.isEmpty {
+            VStack(spacing: 0) {
+                ForEach(Array(rows.enumerated()), id: \.offset) { i, r in
+                    if i > 0 { Rectangle().fill(.white.opacity(0.09)).frame(height: 0.5) }
+                    HStack(alignment: .firstTextBaseline, spacing: 10) {
+                        Text(r.0).foregroundStyle(.white.opacity(0.45)).frame(width: 116, alignment: .leading).fixedSize(horizontal: false, vertical: true)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(r.1).fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
+                            if let n = r.2 { Text(n).font(.system(size: 11)).foregroundStyle(.white.opacity(0.45)) }
+                        }
+                        Spacer(minLength: 0)
+                    }
+                    .font(.system(size: 12.5))
+                    .padding(.horizontal, 14).padding(.vertical, 9)
+                }
+            }
+            .background(RoundedRectangle(cornerRadius: 14).fill(.white.opacity(0.06)))
+        }
     }
 
     private func line(_ label: String, _ value: String) -> some View {

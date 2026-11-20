@@ -549,7 +549,13 @@ cli gets `403 peer:cli`, not `400 args:…` (UI pass 2026-11-05).
   derived from the base id and its position (not from the text), so ids stay stable when a row text changes every frame
   (a time in it) and when a later copy appears or disappears. When a copy appears before it, the id moves to that
   copy — the same action and arguments, so an open confirmation still runs (re-review 64, review 3);
-  `input` (above); `background: true` — the action starts a job.
+  `input` (above); `background: true` — the action starts a job; `parts` (plugin actions, task 100) — the same
+  confirmation by parts for a shell that lays the window out itself: `plugin`, `tier`, `title`, `command`, `arg`,
+  `row`, `parentRow` (the row a child button hangs under, even when the button has its own text), `costNet` (the hub's
+  words about network or quota; only for `confirm-cost`, and the generic line only when no host is declared and the
+  action says nothing about its cost), `note` (the action's `cost=` words, without the hub's prefix), `notePlugin`
+  (`note` is a plugin author's words, not a built-in plugin's), `input` (the typed text, if sent), `background`.
+  `text` and `cost` stay whole for older shells.
 - Success: `200 {"ok":true|false,"result":{…scalars only…}}`. After the action a standard plugin is restarted, a
   streamable one gets `{"type":"actionResult","id","actionId","primitive","arg","ok","code","inputLength"?,"job"?}` on
   stdin (`arg` — the checked argument value from the offer or `null`).

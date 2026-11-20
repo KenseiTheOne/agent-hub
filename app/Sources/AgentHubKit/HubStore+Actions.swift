@@ -51,7 +51,7 @@ extension HubStore {
                         guard let t = await presenter.prompt(InputPrompt(actionLabel: label, input: req.input ?? spec, confirm: req, text: text ?? "")) else { return false }
                         text = t
                     } else {
-                        guard await presenter.confirm(req, actionLabel: label) else { return false }
+                        guard await presenter.confirm(req.placed(sessions: sessions, actionLabel: label), actionLabel: label) else { return false }
                     }
                     token = req.token
                     asked = req
@@ -127,7 +127,7 @@ extension HubStore {
                         guard let t = await presenter.prompt(InputPrompt(actionLabel: label, input: field, confirm: req)) else { return false }
                         outcome = try await client.invoke(id, args: args, input: t, confirmToken: req.token)
                     } else {
-                        guard let presenter, await presenter.confirm(req, actionLabel: label) else { return false }
+                        guard let presenter, await presenter.confirm(req.placed(sessions: sessions, actionLabel: label), actionLabel: label) else { return false }
                         outcome = try await client.invoke(id, args: args, confirmToken: req.token)
                     }
                 }
