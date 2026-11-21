@@ -15,7 +15,7 @@ struct ConnectionPill: View {
         }
         .padding(.horizontal, 10).frame(height: 26)
         .background(Capsule().fill(Color.white.opacity(0.08)))
-        .help({ if case .offline(let why) = store.connection { return why } else { return store.client.socketPath } }())
+        .tip({ if case .offline(let why) = store.connection { return why } else { return store.client.socketPath } }())
     }
 }
 
@@ -39,7 +39,7 @@ struct PanelBanners: View {
                        detail: store.canAct ? tr("Снять паузу можно и без приложения: удалите файл \(estopPath)", "You can also resume without the app: delete the file \(estopPath)")
                                             : tr("Снять паузу можно из закреплённой сборки или удалив файл \(estopPath)", "Resume from the pinned build, or delete the file \(estopPath)"),
                        buttons: store.canAct ? [(tr("Снять паузу", "Resume hub"), true, { Task { await store.setEstop(false) } })] : [])
-                    .help(pauseHubHelp)
+                    .tip(pauseHubHelp)
             }
             if case .offline(let why) = store.connection {
                 // no daemon: the app brings it up itself (launchctl kickstart); no job — "agenthub install"

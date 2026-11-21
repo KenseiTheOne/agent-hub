@@ -47,7 +47,7 @@ struct LaunchSessionView: View {
                 Text(tr("Remote Control — ответить можно с телефона", "Remote Control — reply from your phone")).font(.system(size: 12.5))
                 Spacer()
                 Toggle("", isOn: draftBinding.remoteControl).toggleStyle(.switch).tint(.green).labelsHidden()
-                    .help(tr("Выключено — сессия запустится без Remote Control: ответить с телефона не получится",
+                    .tip(tr("Выключено — сессия запустится без Remote Control: ответить с телефона не получится",
                              "Off — the session starts without Remote Control: you can't reply from your phone"))
             }
             Text(TerminalText.launchNote(store.state?.terminals == nil ? "cmux" : store.launchTerminal?.label))
@@ -77,7 +77,7 @@ struct LaunchSessionView: View {
                 }
                 .buttonStyle(CapsuleStyle(fill: hexColor(0x0A84FF), stroke: .clear, height: 32, expand: false))
                 .disabled(!available || block != nil || !draft.isValid || store.busyAction != nil)
-                .help(block == .noBridge ? BridgeText.launchHelp(store) : block?.help ?? "")
+                .tip(block == .noBridge ? BridgeText.launchHelp(store) : block?.help ?? "")
             }
         }
         .padding(20)

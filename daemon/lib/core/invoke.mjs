@@ -301,16 +301,18 @@ export class CoreInvoke {
       // costNet — the hub's own words (confirm-cost only); note — the action's cost= words, notePlugin — they are a
       // plugin author's (not the hub's) and are shown as such
       const layout = {
-        plugin,
+        plugin: cleanPhrase(plugin) || target.offer.pluginId,
         tier,
-        title: p.title || null,
+        // the plugin's words become the window's title: control and format characters out (task 123)
+        title: cleanPhrase(p.title) || null,
         command: p.command,
         arg: arg || null,
         row: target.offer.row || null,
         parentRow: target.offer.parentRow || null,
-        // the generic "may use resources or the network" only when nothing else is said: a plugin that named no host but
-        // explained its cost in its own words gets those words, not a line about a network it doesn't use
-        costNet: target.level === "confirm-cost" && (netHosts || !cost) ? parts[0] : null,
+        // the generic "may use resources or the network" is the hub's own warning: only a built-in plugin (our code) that
+        // named no host but explained its cost itself goes without it. A third-party plugin's cost= words cannot vouch it
+        // stays off the network, so the hub keeps its line next to them (task 124)
+        costNet: target.level === "confirm-cost" && (netHosts || !cost || pl?.source !== "builtin") ? parts[0] : null,
         note: cost ? String(cost).slice(0, 200) : null,
         notePlugin: Boolean(cost) && pl?.source !== "builtin",
         input: a.input ? (target.input !== undefined ? cleanPhrase(target.input) : null) : null,

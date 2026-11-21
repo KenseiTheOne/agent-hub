@@ -125,13 +125,13 @@ struct ConnectionCard: View {
                 }
                 .buttonStyle(CapsuleStyle(height: 26, expand: false))
                 .disabled(busy || block != nil)
-                .help(block ?? "")
+                .tip(block ?? "")
             }
             if conn.canDisconnect {
                 Button(ConnectionsText.disconnectTitle) { askState.wrappedValue = true }
                     .buttonStyle(CapsuleStyle(height: 26, expand: false))
                     .disabled(busy || !store.connection.isLive || !store.canAct)
-                    .help(!store.canAct ? ActionBlock.notPinned.help : "")
+                    .tip(!store.canAct ? ActionBlock.notPinned.help : "")
             }
             if busy { ProgressView().controlSize(.small) }
         }

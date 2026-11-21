@@ -47,7 +47,7 @@ struct HubUpdatePopoverLine: View {
                         .buttonStyle(PillStyle(fill: hexColor(0x0A84FF)))
                         .fixedSize()
                         .disabled(!can)
-                        .help(info.blocked == "estop" ? tr("Хаб на паузе", "Hub is paused")
+                        .tip(info.blocked == "estop" ? tr("Хаб на паузе", "Hub is paused")
                               : !(store.peer?.isApp ?? false) ? tr("Только закреплённая сборка приложения", "Pinned app build only")
                               : line.kind == .ready ? tr("Перезапустить хаб в собранную версию сейчас: карточки ответа, если есть, уйдут в терминал", "Restart the hub into the built version now: answer cards, if any, fall back to the terminal")
                               : tr("Собрать новую версию отдельно и перезапустить хаб в неё; при ошибке хаб останется на текущей", "Build the new version separately and restart the hub into it; on error the hub stays on the current one"))
@@ -99,13 +99,13 @@ struct HubUpdateSettings: View {
                        isOn: Binding(get: { info.setting }, set: { v in Task { await store.setCheckHubUpdates(v) } }))
                     .toggleStyle(.switch).font(.system(size: 12.5))
                     .disabled(!live || !info.config || !isApp)
-                    .help(!isApp ? ActionBlock.notPinned.help : "")
+                    .tip(!isApp ? ActionBlock.notPinned.help : "")
                 Text(HubUpdateText.checkExplain(for: info))
                     .font(.system(size: 11.5)).foregroundStyle(.white.opacity(0.55)).fixedSize(horizontal: false, vertical: true)
                 let check = HubUpdateText.checkLine(info)
                 Text(check.text).font(.system(size: 11.5)).foregroundStyle(check.warn ? hexColor(0xFFC56B) : .white.opacity(0.55))
                     .fixedSize(horizontal: false, vertical: true)
-                    .help(info.config && !info.configured ? HubUpdateText.remoteKeyHelp : "")
+                    .tip(info.config && !info.configured ? HubUpdateText.remoteKeyHelp : "")
             }
             // "What's new" only for a hub from Versions: a hub from a working folder has neither a version nor a button,
             // and the notes of a previously found release from check.json would hang there without context
@@ -173,7 +173,7 @@ struct HubUpdateSettings: View {
                 Button(HubUpdateText.restartButton(info.install)) { Task { await store.switchHubUpdate() } }
                     .buttonStyle(.borderedProminent)
                     .disabled(!can)
-                    .help(HubUpdateText.readyDetail(info.install))
+                    .tip(HubUpdateText.readyDetail(info.install))
                     .fixedSize()
             } else if HubUpdateText.showInstallButton(info), let title = HubUpdateText.installButton(info) {
                 Button(title) { Task { await store.installHubUpdate() } }
@@ -186,7 +186,7 @@ struct HubUpdateSettings: View {
             if let title = HubUpdateText.previousButton(info) {
                 Button(title) { Task { await store.rollbackHub() } }
                     .disabled(!can || !HubUpdateText.canRollback(info))
-                    .help(HubUpdateText.canRollback(info)
+                    .tip(HubUpdateText.canRollback(info)
                           ? tr("Переключиться на прежнюю собранную версию без сборки; хаб перезапустится", "Switch to the previous built version without building; the hub will restart")
                           : tr("Собранная версия ждёт перезапуска — сначала перезапустите хаб в неё", "A built version is waiting to restart — restart the hub into it first"))
                     .fixedSize()

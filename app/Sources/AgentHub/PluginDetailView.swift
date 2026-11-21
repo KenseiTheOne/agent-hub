@@ -140,7 +140,7 @@ struct PluginDetailView: View {
                 .frame(maxWidth: .infinity)
                 Button { Task { await store.refresh(plugin: plugin.id) } } label: { Image(systemName: "arrow.clockwise") }
                     .buttonStyle(CapsuleStyle(height: 28, expand: false))
-                    .help(tr("Обновить плагин", "Refresh plugin"))
+                    .tip(tr("Обновить плагин", "Refresh plugin"))
                     .frame(maxHeight: .infinity, alignment: .top)
             }
             .fixedSize(horizontal: false, vertical: true)
@@ -201,7 +201,7 @@ struct PluginDetailView: View {
                 .layoutPriority(1)
                 Button { Task { await store.refresh(plugin: plugin.id) } } label: { Image(systemName: "arrow.clockwise") }
                     .buttonStyle(CapsuleStyle(height: 28, expand: false))
-                    .help(tr("Обновить плагин", "Refresh plugin"))
+                    .tip(tr("Обновить плагин", "Refresh plugin"))
             }
             let offers = plugin.header.compactMap { it in it.offer.map { (it, $0) } }
             if !offers.isEmpty {

@@ -86,6 +86,7 @@ export const T = {
     // the header is always the current state: the week's percent and the reset; the forecast "by the reset it'll be ≈…" — only as an event line in the body
     headNow: (w, r) => `Неделя ${w}${r ? ` · сброс ${r}` : ""}`,
     headBlock: (r) => (r ? `Лимит исчерпан до ${r}` : "Лимит исчерпан"),
+    headScopeBlock: (m, r, w) => `Лимит ${m} исчерпан${r ? ` до ${r}` : ""}${w ? ` · неделя ${w}` : ""}`,
     headOff: "Квота недоступна: служба квоты хаба выключена или демон не перезапущен",
     offHint: "Служба квоты — services.usage.enabled в config.json демона (не в «Настройках»); после обновления плагинов перезапустите демон",
     tail: (why, when) => ` · не обновляется${why ? `: ${why}` : ""}${when ? ` · данные ${when}` : ""}`,
@@ -131,6 +132,7 @@ export const T = {
     used: (p) => `${p} used`,
     headNow: (w, r) => `Week ${w}${r ? ` · resets ${r}` : ""}`,
     headBlock: (r) => (r ? `Limit reached until ${r}` : "Limit reached"),
+    headScopeBlock: (m, r, w) => `${m} limit reached${r ? ` until ${r}` : ""}${w ? ` · week ${w}` : ""}`,
     headOff: "Quota unavailable: the hub's quota service is off or the daemon wasn't restarted",
     offHint: "The quota service is services.usage.enabled in the daemon's config.json (not in Settings); restart the daemon after updating plugins",
     tail: (why, when) => ` · not updating${why ? `: ${why}` : ""}${when ? ` · data from ${when}` : ""}`,
@@ -201,6 +203,8 @@ export function parseUsage(j) {
     rows.push({
       kind: r.kind,
       label,
+      // what a narrower limit covers (a model): null for the overall ones — the week and the 5-hour window
+      scope: isSession || r.kind === "weekly_all" ? null : model || own || clean(r.kind, 30),
       group,
       percent: r.percent,
       resetsMs: Number.isFinite(resetsMs) ? resetsMs : null,
@@ -280,12 +284,17 @@ export function render(u, nowMs, lang = envLang()) {
     if (wp && wp.hitMs !== null && week.percent < PACE_WARN) events.push({ key: `pace-85${weekTag}`, text: L.paceHit(PACE_WARN, when(wp.hitMs), when(week.resetsMs)) });
   }
   if (events.length || tokenLost) status = "wait";
-  const full = liveRows.find((r) => r.percent >= 100) || null;
+  // Only an overall limit (the week, the 5-hour window) stops the work; a full per-model limit leaves the other models
+  // available, so it is a warning that names the model, not "Limit reached".
+  const full = liveRows.find((r) => r.percent >= 100 && !r.scope) || null;
+  const scopeFull = full ? null : liveRows.find((r) => r.percent >= 100 && r.scope) || null;
   if (full) status = "block";
+  else if (scopeFull) status = "wait";
   if (stale && status === "ok") status = "unknown";
   const agoText = u.fetchedMs ? L.ago(Math.max(0, Math.round((nowMs - u.fetchedMs) / 60_000))) : null;
   let head;
   if (full) head = L.headBlock(full.resetsMs ? when(full.resetsMs) : null);
+  else if (scopeFull) head = L.headScopeBlock(scopeFull.scope, scopeFull.resetsMs ? when(scopeFull.resetsMs) : null, week ? pct(week.percent) : null);
   // fresh numbers are always the current state; with old numbers we show the figure only if the week is already high (the week's percent
   // only grows until the reset), with the reason and data age appended; otherwise an honest "not updating" without a figure
   else if (week && (!stale || events.length)) head = L.headNow(pct(week.percent), !stale && week.resetsMs ? when(week.resetsMs) : null);
@@ -317,7 +326,7 @@ export function render(u, nowMs, lang = envLang()) {
     }
     // a card with a bar: "Week — 31% used", "reset …" on the right
     const note = r.resetsMs ? ` note="${clean(L.reset(when(r.resetsMs)), 60)}"` : "";
-    out.push(`${clean(`${label} — ${L.used(pct(r.percent))}`, 120)} | gauge=${Math.round(Math.min(100, Math.max(0, r.percent)))}${note} sfimage=${icon}${r.percent >= 100 ? " status=block color=red" : r.percent >= WEEK_WARN ? " color=orange" : ""}`);
+    out.push(`${clean(`${label} — ${L.used(pct(r.percent))}`, 120)} | gauge=${Math.round(Math.min(100, Math.max(0, r.percent)))}${note} sfimage=${icon}${r.percent >= 100 ? ` status=${r.scope ? "wait" : "block"} color=red` : r.percent >= WEEK_WARN ? " color=orange" : ""}`);
     const p = stale ? null : pace(r, nowMs);
     if (p) out.push(`--${L.pace(pct(Math.min(p.forecast, 999)))}`);
     const done = passed(r, nowMs);

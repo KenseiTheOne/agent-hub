@@ -240,3 +240,33 @@ test("quota: 5 h = 100% with reset at 12:00, stale cache (now 22:00) → not a b
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("quota: a full per-model week names the model and waits; it is not the overall limit (task 126)", () => {
+  const now = Date.parse(NOW);
+  const resets = new Date(now + 3 * 86_400_000).toISOString();
+  const usage = (fable) => Q.parseUsage({
+    version: 1, fetched_at: now / 1000, checked_at: now / 1000,
+    rows: [
+      { kind: "weekly_all", group: "weekly", percent: 61, resets_at: resets },
+      { kind: "weekly_model", group: "weekly", percent: fable, resets_at: resets, scope: { model: { display_name: "Fable" } } },
+    ],
+  });
+  const ru = parseOutput(Q.render(usage(100), now, "ru"));
+  assert.equal(ru.status, "wait");
+  assert.match(ru.header[0].title, /^Лимит Fable исчерпан до .+ · неделя 61%$/);
+  assert.equal(ru.header[0].params.tile, "61%");
+  const ruText = Q.render(usage(100), now, "ru");
+  assert.doesNotMatch(ruText, /^Лимит исчерпан/m);
+  assert.doesNotMatch(ruText, /status=block/);
+  const en = parseOutput(Q.render(usage(100), now, "en"));
+  assert.match(en.header[0].title, /^Fable limit reached until .+ · week 61%$/);
+  assert.doesNotMatch(en.header[0].title, /^Limit reached/);
+  // the overall week full as well: that is the real block
+  const both = Q.parseUsage({ version: 1, fetched_at: now / 1000, rows: [
+    { kind: "weekly_all", group: "weekly", percent: 100, resets_at: resets },
+    { kind: "weekly_model", group: "weekly", percent: 100, resets_at: resets, scope: { model: { display_name: "Fable" } } },
+  ] });
+  const b = parseOutput(Q.render(both, now, "ru"));
+  assert.equal(b.status, "block");
+  assert.match(b.header[0].title, /^Лимит исчерпан до /);
+});

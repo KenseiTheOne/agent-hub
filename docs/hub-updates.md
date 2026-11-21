@@ -562,7 +562,7 @@ commit and push the tap. Brew-managed hubs see the version after `brew upgrade a
   it is the same commit the check saw (a move only with explicit confirmation), the jump is at most one major version,
   and before building there is a confirmation window with the tag and commit. A tag signature (`git verify-tag`) is not
   required: whoever can push to `main` with the user's credentials can also cut a release. Closing this gap means signed
-  annotated tags with a Touch ID-protected key (a user decision, not done).
+  annotated tags with a pinned key — the user decided against it (2026-11-21).
 - `history.json`, `install.json` and `Versions/` have the same UID as the agents: they are tripwires (every pin is in
   the journal and audit log, a foreign change triggers a push), not protection against a process that rewrites the
   daemon too.

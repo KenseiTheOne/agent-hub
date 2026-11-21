@@ -195,7 +195,9 @@ struct BarChartPlot: View {
         VStack(spacing: 6) {
             Canvas { ctx, size in drawPlot(ctx, size, layout) }
                 .frame(height: CGFloat(chart.height))
-                .overlay(ChartTips(tips: chart.bars.map(\.tip), gap: layout.gap))
+                // the card stands over the bar and its value caption, not over the whole plot
+                .overlay(ChartTips(tips: chart.bars.map(\.tip), tops: chart.bars.map { height($0) + (hasValueLabels && $0.valueLabel != nil ? 16 : 0) },
+                                   gap: layout.gap))
             if chart.bars.contains(where: { $0.label != nil }) {
                 Canvas { ctx, size in drawLabels(ctx, size, layout) }
                     .frame(height: Self.labelsHeight)
@@ -334,83 +336,88 @@ struct BarChartDescriptor: AXChartDescriptorRepresentable {
     }
 }
 
-/// Tooltips of a bar chart: one transparent AppKit view with a tooltip rectangle per bar column (`addToolTip`), instead of
-/// a `HoverTip` view per bar. Same behavior as `HoverTip`: instant, multi-line, shown in an inactive app, transparent to
-/// the mouse.
+/// Hints of a bar chart: one transparent view that knows the bar columns, instead of a `HoverTip` view per bar. The
+/// card (`TipWindow`, task 127) stands centered above the bar under the pointer and moves from bar to bar at once.
 struct ChartTips: NSViewRepresentable {
     let tips: [String?]
+    /// Each bar's top (with its value caption), from the plot's bottom.
+    let tops: [CGFloat]
     let gap: CGFloat
 
     func makeNSView(context: Context) -> ChartTipsView {
-        HoverTip.enableInstantTips()
         let v = ChartTipsView()
         v.setAccessibilityElement(false)
-        v.update(tips: tips, gap: gap)
+        v.update(tips: tips, tops: tops, gap: gap)
         return v
     }
 
     func updateNSView(_ v: ChartTipsView, context: Context) {
-        v.update(tips: tips, gap: gap)
+        v.update(tips: tips, tops: tops, gap: gap)
     }
 }
 
 final class ChartTipsView: NSView {
     private var tips: [String?] = []
+    private var tops: [CGFloat] = []
     private var gap: CGFloat = 0
-    private var laidOut: (NSSize, [String?], CGFloat)?
-    /// The tooltip owners, held for as long as their tooltip rectangles exist.
-    private var owners: [NSString] = []
 
     override func hitTest(_ point: NSPoint) -> NSView? { nil }
     override var isOpaque: Bool { false }
 
-    func update(tips: [String?], gap: CGFloat) {
-        guard tips != self.tips || gap != self.gap else { return }
+    func update(tips: [String?], tops: [CGFloat], gap: CGFloat) {
+        guard tips != self.tips || tops != self.tops || gap != self.gap else { return }
         self.tips = tips
+        self.tops = tops
         self.gap = gap
-        rebuild()
+        if TipWindow.shared.isOwned(by: self) { TipWindow.shared.hide(for: self) }
     }
 
-    // SwiftUI sizes the view by setting its frame, which does not always call `layout()`
-    override func setFrameSize(_ newSize: NSSize) {
-        super.setFrameSize(newSize)
-        rebuild()
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        trackingAreas.forEach(removeTrackingArea)
+        addTrackingArea(NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .mouseMoved, .activeAlways, .inVisibleRect],
+                                       owner: self, userInfo: nil))
     }
 
-    override func layout() {
-        super.layout()
-        rebuild()
-    }
+    override func mouseEntered(with event: NSEvent) { present(event) }
+    override func mouseMoved(with event: NSEvent) { present(event) }
+    override func mouseExited(with event: NSEvent) { TipWindow.shared.hide(for: self) }
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
-        guard let w = window else { return }
-        if !w.allowsToolTipsWhenApplicationIsInactive { w.allowsToolTipsWhenApplicationIsInactive = true }
-        laidOut = nil
-        rebuild()
+        if window == nil { TipWindow.shared.hide(for: self) }
     }
 
-    /// The tooltip rectangles follow the bar columns of `BarChartPlot.BarLayout`; rebuilt only when the size or the texts change.
-    private func rebuild() {
-        let key = (bounds.size, tips, gap)
-        if let l = laidOut, l.0 == key.0, l.1 == key.1, l.2 == key.2 { return }
-        laidOut = key
-        removeAllToolTips()
-        owners = []
-        guard window != nil, !tips.isEmpty, bounds.width > 0 else { return }
+    /// The bar columns of `BarChartPlot.BarLayout` with their texts; the gap belongs half to each neighbor, so the
+    /// pointer between bars still finds a hint.
+    /// Where the card of column `r` stands: over bar `i`'s top (the view is not flipped: y grows upward).
+    func barTop(_ i: Int, in r: NSRect) -> NSRect {
+        let top = i < tops.count ? min(bounds.height, tops[i]) : bounds.height
+        return NSRect(x: r.minX, y: 0, width: r.width, height: top)
+    }
+
+    func columns() -> [(rect: NSRect, text: String, bar: Int)] {
+        guard !tips.isEmpty, bounds.width > 0 else { return [] }
         let n = CGFloat(tips.count)
         let w = max(0, (bounds.width - gap * (n - 1)) / n)
-        for (i, t) in tips.enumerated() {
-            guard let t, !t.isEmpty else { continue }
-            // the gap belongs half to each neighbor, so the pointer between bars still finds a tooltip
+        return tips.enumerated().compactMap { i, t in
+            guard let t, !t.isEmpty else { return nil }
             let x0 = max(0, CGFloat(i) * (w + gap) - gap / 2)
             let x1 = min(bounds.width, CGFloat(i) * (w + gap) + w + gap / 2)
-            // AppKit does not retain a tooltip owner: a short string bridged to a tagged/temporary NSString would be freed
-            // right after this call (a crash or another bar's text on hover), so the view keeps every owner alive
-            let owner = NSString(string: t)
-            owners.append(owner)
-            addToolTip(NSRect(x: x0, y: 0, width: x1 - x0, height: bounds.height), owner: owner, userData: nil)
+            return (NSRect(x: x0, y: 0, width: x1 - x0, height: bounds.height), t, i)
         }
+    }
+
+    private func present(_ event: NSEvent) {
+        guard let w = window else { return }
+        let p = convert(event.locationInWindow, from: nil)
+        guard let hit = columns().first(where: { $0.rect.contains(p) }) else {
+            TipWindow.shared.hide(for: self)
+            return
+        }
+        let col = w.convertToScreen(convert(hit.rect, to: nil))
+        let bar = w.convertToScreen(convert(barTop(hit.bar, in: hit.rect), to: nil))
+        TipWindow.shared.offer(hit.text, owner: self, region: col, key: hit.bar + 1, anchor: .above(bar))
     }
 }
 

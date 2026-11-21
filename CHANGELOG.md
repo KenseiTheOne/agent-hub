@@ -4,6 +4,32 @@ Releases are git tags `vX.Y.Z` (also published as GitHub releases); the current 
 The plugin contract has its own version history in
 [`docs/extension-points.md`](docs/extension-points.md#contract-versions).
 
+## 0.1.9 — 2026-11-21
+
+### Changed
+
+- **Hints appear at once, as the hub's own card.** Hovering a chart bar, a stat card, a row or a button shows the hint
+  immediately instead of after the system tooltip's delay, also while the hub is not the active app. The card is glass
+  (the panel shows through, blurred), fades in quickly and glides from bar to bar; a multi-line hint reads as a heading
+  and details, and a chart bar's card stands over the bar and points at it (task 127).
+
+### Fixed
+
+- **A full per-model limit is no longer shown as the overall one.** When only a model's weekly limit (for example Fable)
+  is used up, the quota header names it — "Fable limit reached until Mon 04:59 · week 61%" — and warns instead of
+  blocking; "Limit reached" stays for the overall week and the 5-hour window (task 126).
+- **A confirmation that asks for text names where the button is again.** 0.1.8 laid out the plain confirmation but not
+  the one with a field (its first window, the retry after the core refused the text, a banner button): the "Where" row
+  was empty, so the tab a text goes to was only in the command's small print (task 125).
+- **One button under two tabs is two offers.** The same "Fix" under "Tab alpha" and "Tab beta" was one offer, so the
+  window under "Tab beta" said "Tab alpha"; the parent row is now part of what tells copies apart (task 122).
+- **The window's title is the plugin's words, said as such.** The action's name is quoted and cleaned of control and
+  format characters (in the core and in the shell); the line under it always says whose action it is (task 123).
+- **The hub's network and resources line stays.** A third-party plugin's own `cost=` words no longer replace it; only a
+  built-in plugin that explained its cost itself goes without it. A confirmation whose parts this shell can't read opens
+  with the whole text instead of failing (task 124).
+- The hidden "hook not heard" banner is forgotten together with a removed test hub, like the plugin order (0.1.8).
+
 ## 0.1.8 — 2026-11-20
 
 ### Added

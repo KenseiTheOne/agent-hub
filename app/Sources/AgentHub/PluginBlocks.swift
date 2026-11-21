@@ -295,12 +295,12 @@ struct SessionTag: View {
     var body: some View {
         switch session.verified {
         case .some(true):
-            Image(systemName: "checkmark.seal.fill").font(.system(size: 11)).foregroundStyle(.green).help(tr("Подпись Claude Code проверена хабом", "Claude Code signature verified by the hub"))
+            Image(systemName: "checkmark.seal.fill").font(.system(size: 11)).foregroundStyle(.green).tip(tr("Подпись Claude Code проверена хабом", "Claude Code signature verified by the hub"))
         case .some(false):
             Text(session.label ?? tr("подпись не подтверждена", "signature not verified")).font(.caption2.bold()).foregroundStyle(.red)
                 .padding(.horizontal, 5).background(Capsule().fill(Color.red.opacity(0.12)))
         case .none:
-            ProgressView().controlSize(.mini).help(tr("Хаб проверяет подпись", "The hub is checking the signature"))
+            ProgressView().controlSize(.mini).tip(tr("Хаб проверяет подпись", "The hub is checking the signature"))
         }
     }
 }
@@ -342,7 +342,7 @@ struct OfferButton: View {
                 }
             }
             .buttonStyle(style)
-            .help(block.map { BridgeText.help($0, primitive: offer.primitive, store) } ?? helpText)
+            .tip(block.map { BridgeText.help($0, primitive: offer.primitive, store) } ?? helpText)
             .disabled(store.busyAction != nil || block != nil)
             if offer.background { BackgroundMark() }
         }

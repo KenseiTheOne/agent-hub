@@ -68,7 +68,7 @@ struct PluginManagerView: View {
                     .buttonStyle(CapsuleStyle(height: 28, expand: false))
                     .fixedSize()
                     .disabled(store.registryBusy != nil || store.estop || !isApp)
-                    .help(store.estop ? tr("Хаб на паузе", "Hub is paused")
+                    .tip(store.estop ? tr("Хаб на паузе", "Hub is paused")
                           : !isApp ? tr("Только закреплённая сборка приложения", "Pinned app build only")
                           : tr("Свой плагин из локальной папки (например, <репозиторий>/agenthub/<id>): проверю её и покажу окно согласия",
                                "Your own plugin from a local folder (e.g. <repository>/agenthub/<id>): I'll check it and show the consent window"))
@@ -86,7 +86,7 @@ struct PluginManagerView: View {
                         .foregroundStyle(hexColor(0x7EE29B))
                         .padding(.horizontal, 10).padding(.vertical, 4)
                         .background(Capsule().fill(Color(red: 48 / 255, green: 209 / 255, blue: 88 / 255).opacity(0.14)))
-                        .help(catalog?.generatedAt.map { tr("Каталог собран \($0.prefix(10)), подпись проверена ключом реестра", "Catalog built \($0.prefix(10)), signature checked with the registry key") } ?? "")
+                        .tip(catalog?.generatedAt.map { tr("Каталог собран \($0.prefix(10)), подпись проверена ключом реестра", "Catalog built \($0.prefix(10)), signature checked with the registry key") } ?? "")
                 }
                 if catalog?.configured == true {
                     Button { Task { await store.fetchCatalog() } } label: {
@@ -98,7 +98,7 @@ struct PluginManagerView: View {
                     }
                     .buttonStyle(.plain)
                     .disabled(store.registryBusy != nil || !isApp)
-                    .help(isApp ? tr("Обновить каталог: скачать index.json и проверить подпись", "Refresh catalog: download index.json and check its signature")
+                    .tip(isApp ? tr("Обновить каталог: скачать index.json и проверить подпись", "Refresh catalog: download index.json and check its signature")
                                 : tr("Обновлять каталог может только закреплённая сборка приложения", "Only the pinned app build can refresh the catalog"))
                 }
             }
@@ -169,7 +169,7 @@ struct PluginManagerView: View {
                 }
                 Text(tr("из папки \(q.shownPath)", "from folder \(q.shownPath)"))
                     .font(.system(size: 11.5)).foregroundStyle(.white.opacity(0.62)).lineLimit(1).truncationMode(.middle)
-                    .help(q.path ?? "")
+                    .tip(q.path ?? "")
                 if let m = q.migrate {
                     Text(m.text(title: q.displayTitle)).font(.system(size: 11.5)).foregroundStyle(hexColor(0xFFC56B)).fixedSize(horizontal: false, vertical: true)
                 }
@@ -179,7 +179,7 @@ struct PluginManagerView: View {
                 .buttonStyle(CapsuleStyle(fill: hexColor(0x0A84FF), stroke: .clear, height: 28, expand: false))
                 .fixedSize()
                 .disabled(store.registryBusy != nil || store.estop || !isApp)
-                .help(store.estop ? tr("Хаб на паузе", "Hub is paused") : !isApp ? tr("Только закреплённая сборка приложения", "Pinned app build only")
+                .tip(store.estop ? tr("Хаб на паузе", "Hub is paused") : !isApp ? tr("Только закреплённая сборка приложения", "Pinned app build only")
                       : tr("Покажу окно согласия: папка, версия, отпечаток содержимого, права", "Shows the consent window: folder, version, contents fingerprint, permissions"))
             Button(tr("Отклонить", "Decline")) { Task { await store.declineOwn(q.requestId) } }
                 .buttonStyle(CapsuleStyle(height: 28, expand: false))
@@ -266,7 +266,7 @@ struct PluginManagerView: View {
                 if !r.desc.isEmpty { Text(r.desc).font(.system(size: 12)).foregroundStyle(.white.opacity(0.62)).lineLimit(1) }
                 if let n = r.note {
                     Text(n).font(.system(size: 11.5)).foregroundStyle(.orange).fixedSize(horizontal: false, vertical: true)
-                        .help(r.own?.errors.joined(separator: "\n") ?? "")
+                        .tip(r.own?.errors.joined(separator: "\n") ?? "")
                 }
             }
             Spacer(minLength: 8)
@@ -294,7 +294,7 @@ struct PluginManagerView: View {
             .buttonStyle(CapsuleStyle(fill: hexColor(0xFF9F0A, 0.2), stroke: hexColor(0xFF9F0A, 0.45), text: hexColor(0xFFC56B), height: 28, expand: false))
             .fixedSize()
             .disabled(store.registryBusy != nil || store.estop || !isApp)
-            .help(tr("Новая версия из папки просит больше прав — покажу окно прав", "The new version in the folder asks for more permissions — you'll see the permissions window"))
+            .tip(tr("Новая версия из папки просит больше прав — покажу окно прав", "The new version in the folder asks for more permissions — you'll see the permissions window"))
     }
 
     /// The removal window, by the rule for every hub window (`HubWindow`): a task from the button handler awaits it.
@@ -318,7 +318,7 @@ struct PluginManagerView: View {
                         .font(.system(size: 11.5))
                         .foregroundStyle(r.error != nil ? hexColor(0xFFC56B) : .white.opacity(0.6))
                         .lineLimit(2)
-                        .help(r.tierLabel ?? "")
+                        .tip(r.tierLabel ?? "")
                 }
                 if !c.shadowed.isEmpty {
                     Text(tr("Скрыты как дубли: ", "Hidden as duplicates: ") + c.shadowed.map { "\($0.id) (\($0.registry) → \($0.by))" }.joined(separator: ", "))
@@ -414,13 +414,13 @@ struct PluginManagerView: View {
             VStack(alignment: .leading, spacing: 6) {
                 Text(tr("Установлен свой \(inst) · \(own.shown)", "Your own \(inst) is installed · \(own.shown)"))
                     .font(.system(size: 11.5)).foregroundStyle(hexColor(0xBF9BFF)).lineLimit(2).truncationMode(.middle)
-                    .help(tr("Каталог его не обновляет: обновления приходят из папки", "The catalog doesn't update it: updates come from the folder"))
+                    .tip(tr("Каталог его не обновляет: обновления приходят из папки", "The catalog doesn't update it: updates come from the folder"))
                 if p.blocked == nil, p.platformOk {
                     Button(tr("Вернуть из каталога", "Install from catalog")) { Task { await store.install(p.id, fromRegistry: true) } }
                         .buttonStyle(CapsuleStyle(height: 28, expand: false))
                         .fixedSize()
                         .disabled(store.registryBusy != nil || store.estop || !isApp)
-                        .help(store.estop ? tr("Хаб на паузе", "Hub is paused") : !isApp ? tr("Только закреплённая сборка приложения", "Pinned app build only")
+                        .tip(store.estop ? tr("Хаб на паузе", "Hub is paused") : !isApp ? tr("Только закреплённая сборка приложения", "Pinned app build only")
                               : tr("Заменит свой плагин плагином \(p.version) из каталога — сначала окно согласия", "Replaces your own plugin with \(p.version) from the catalog — consent window first"))
                 }
             }
@@ -458,7 +458,7 @@ struct PluginManagerView: View {
                     .buttonStyle(CapsuleStyle(fill: missing == nil ? hexColor(0x0A84FF) : Color.white.opacity(0.1), stroke: missing == nil ? .clear : Color.white.opacity(0.18),
                                               text: missing == nil ? .white : .white.opacity(0.6), height: 28, expand: false))
                     .disabled(store.registryBusy != nil || store.estop || !isApp)
-                    .help(store.estop ? tr("Хаб на паузе", "Hub is paused") : !isApp ? tr("Только закреплённая сборка приложения", "Pinned app build only") : missing?.missingHint ?? "")
+                    .tip(store.estop ? tr("Хаб на паузе", "Hub is paused") : !isApp ? tr("Только закреплённая сборка приложения", "Pinned app build only") : missing?.missingHint ?? "")
                 if let m = missing {
                     Text(m.missingHint).font(.system(size: 11)).foregroundStyle(.white.opacity(0.5)).fixedSize(horizontal: false, vertical: true)
                 }
@@ -482,7 +482,7 @@ struct PluginManagerView: View {
             Text(tr("Новая версия: нужен хаб новее", "New version: needs a newer hub")).font(.system(size: 12, weight: .semibold)).fixedSize()
                 .foregroundStyle(hexColor(0xFFC56B))
                 .padding(.horizontal, 14).frame(height: 28).background(Capsule().fill(Color.white.opacity(0.1)))
-                .help(need)
+                .tip(need)
         } else {
             Text(tr("Установлен", "Installed")).font(.system(size: 12, weight: .semibold)).fixedSize()
                 .padding(.horizontal, 14).frame(height: 28).background(Capsule().fill(Color.white.opacity(0.1)))
@@ -493,7 +493,7 @@ struct PluginManagerView: View {
             // in the catalog — like the other catalog buttons: disabled while the hub is paused and without a pinned build
             // (decision 2026-11-05; in the installed list removal is still available while paused — the daemon allows it)
             .disabled(store.registryBusy != nil || store.estop || !isApp)
-            .help(store.estop ? tr("Хаб на паузе", "Hub is paused")
+            .tip(store.estop ? tr("Хаб на паузе", "Hub is paused")
                   : !isApp ? tr("Только закреплённая сборка приложения", "Pinned app build only")
                   : tr("Удалить плагин (данные — по выбору в окне)", "Remove the plugin (its data — your choice in the dialog)"))
     }
@@ -522,7 +522,7 @@ struct PluginManagerView: View {
                                       stroke: grows ? hexColor(0xFF9F0A, 0.45) : kind.isRollback ? Color.white.opacity(0.18) : .clear,
                                       text: grows ? hexColor(0xFFC56B) : .white, height: 28, expand: false))
             .disabled(store.registryBusy != nil || store.estop || !isApp)
-            .help(store.estop ? tr("Хаб на паузе", "Hub is paused")
+            .tip(store.estop ? tr("Хаб на паузе", "Hub is paused")
                   : !isApp ? tr("Только закреплённая сборка приложения", "Pinned app build only")
                   : grows ? tr("Новая версия просит больше прав — покажу окно прав", "The new version asks for more permissions — you'll see the permissions window")
                   : kind == .rebuild ? tr("Архив той же версии в реестре пересобран", "The registry rebuilt the archive of the same version") : "")
@@ -618,7 +618,7 @@ struct RequirementLine: View {
                 .foregroundStyle(.white.opacity(0.5))
         }
         .font(.system(size: 11.5, weight: .semibold))
-        .help([requirement.note, requirement.check.map { tr("Проверяю: \($0)", "Checking: \($0)") }].compactMap { $0 }.joined(separator: "\n"))
+        .tip([requirement.note, requirement.check.map { tr("Проверяю: \($0)", "Checking: \($0)") }].compactMap { $0 }.joined(separator: "\n"))
     }
 }
 
@@ -633,7 +633,7 @@ struct AuthorLine: View {
             if let g = author.github {
                 if let url = author.profileURL {
                     Link("@\(g)", destination: url).foregroundStyle(hexColor(0x6CB4FF))
-                        .help(tr("Профиль автора на GitHub", "Author's GitHub profile"))
+                        .tip(tr("Профиль автора на GitHub", "Author's GitHub profile"))
                 } else {
                     Text("@\(g)").foregroundStyle(.white.opacity(0.7))
                 }
@@ -715,7 +715,7 @@ struct TierBadge: View {
             .background(Capsule().fill(color.opacity(0.18)))
             // an own plugin's path is truncated in the middle only if the row lacks room; other labels — in full
             .fixedSize(horizontal: path == nil, vertical: false)
-            .help(help)
+            .tip(help)
     }
 
     private var text: String {

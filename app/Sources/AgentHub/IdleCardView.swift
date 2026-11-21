@@ -58,7 +58,7 @@ struct IdleVerdictCard: View {
                                 rowLabel(glyph: "…", color: .white.opacity(0.6), text: IdleCard.moreLabel(card.hidden), textColor: accent.opacity(0.95))
                             }
                             .buttonStyle(.plain)
-                            .help(tr("Показать все строки здесь", "Show all rows here"))
+                            .tip(tr("Показать все строки здесь", "Show all rows here"))
                         }
                         if card.collapsible {
                             Button { expanded = false } label: {
@@ -90,7 +90,7 @@ struct IdleVerdictCard: View {
                 if let t = r.target, let section = PanelSection(argument: t) {
                     Button { router.open(section) } label: { label }
                         .buttonStyle(.plain)
-                        .help(r.hint.map { "\($0). " + tr("Открыть в панели", "Open in panel") }
+                        .tip(r.hint.map { "\($0). " + tr("Открыть в панели", "Open in panel") }
                               ?? r.plugin.map { tr("От плагина «\($0)» — открыть в панели", "From the \($0) plugin — open in panel") } ?? tr("Открыть в панели", "Open in panel"))
                 } else {
                     label.help(r.hint ?? r.plugin.map { tr("От плагина «\($0)»", "From the \($0) plugin") } ?? "")

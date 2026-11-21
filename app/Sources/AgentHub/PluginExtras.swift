@@ -68,7 +68,7 @@ struct OfferInputField: View {
                 }
                 .buttonStyle(CapsuleStyle(height: 26, expand: false))
                 .disabled(!canSend)
-                .help(block.map { BridgeText.help($0, primitive: offer.primitive, store) } ?? (offer.background ? JobsText.backgroundHelp : (offer.label ?? item.title)))
+                .tip(block.map { BridgeText.help($0, primitive: offer.primitive, store) } ?? (offer.background ? JobsText.backgroundHelp : (offer.label ?? item.title)))
                 if offer.background { BackgroundMark() }
             }
             if let p = problem {
@@ -100,7 +100,7 @@ enum FieldFocus {
 struct BackgroundMark: View {
     var body: some View {
         Image(systemName: "hourglass").font(.system(size: 10.5)).foregroundStyle(.white.opacity(0.5))
-            .help(JobsText.backgroundHelp)
+            .tip(JobsText.backgroundHelp)
             .accessibilityLabel(JobsText.backgroundHelp)
     }
 }
@@ -148,7 +148,7 @@ struct PluginJobsCard: View {
             }
             .buttonStyle(CapsuleStyle(height: 24, expand: false))
             .disabled(block != nil || store.busyAction != nil)
-            .help(block.map { BridgeText.help($0, primitive: "job.cancel", store) } ?? tr("Остановить задачу (SIGTERM, через 2 с — SIGKILL)", "Stop the job (SIGTERM, SIGKILL after 2 s)"))
+            .tip(block.map { BridgeText.help($0, primitive: "job.cancel", store) } ?? tr("Остановить задачу (SIGTERM, через 2 с — SIGKILL)", "Stop the job (SIGTERM, SIGKILL after 2 s)"))
         }
     }
 }
@@ -211,7 +211,7 @@ struct PluginSecretsCard: View {
                 Button(s.state == .set ? tr("Заменить…", "Replace…") : tr("Задать ключ…", "Set key…")) { enter(s) }
                     .buttonStyle(CapsuleStyle(height: 24, expand: false))
                     .disabled(locked)
-                    .help(locked && !store.canAct ? ActionBlock.notPinned.help : "")
+                    .tip(locked && !store.canAct ? ActionBlock.notPinned.help : "")
                 if s.state == .set {
                     Button(tr("Удалить", "Remove")) { remove(s) }
                         .buttonStyle(CapsuleStyle(height: 24, expand: false))
@@ -360,7 +360,7 @@ struct ExtensionsSection: View {
                 }
                 Text(item.statusText).font(.system(size: 11.5)).foregroundStyle(item.needsApproval ? hexColor(0xFFC56B) : .white.opacity(0.6))
                     .fixedSize(horizontal: false, vertical: true)
-                    .help(item.errorDetail ?? "")
+                    .tip(item.errorDetail ?? "")
                 if item.restartRequired {
                     Text(ExtensionItem.restartText).font(.system(size: 11)).foregroundStyle(.white.opacity(0.5)).fixedSize(horizontal: false, vertical: true)
                 }
@@ -371,7 +371,7 @@ struct ExtensionsSection: View {
                 Button(tr("Проверить…", "Review…")) { review(item, consent: consent) }
                     .buttonStyle(CapsuleStyle(height: 26, expand: false)).fixedSize()
                     .disabled(locked || item.sha256 == nil)
-                    .help(!store.canAct ? ActionBlock.notPinned.help : "")
+                    .tip(!store.canAct ? ActionBlock.notPinned.help : "")
             } else if item.status == .approved, !item.autoApproved {
                 Button(tr("Отозвать", "Revoke")) { revoke(item) }
                     .buttonStyle(CapsuleStyle(height: 26, expand: false)).fixedSize()

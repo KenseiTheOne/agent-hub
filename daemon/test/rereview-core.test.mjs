@@ -470,3 +470,50 @@ echo "Spend now | action=pay"
     cleanup(plugins);
   }
 });
+
+test("t122: one button under two parent rows is two offers — each confirmation names its own parent row", async () => {
+  const plugins = tempHome("ah-t122-");
+  writePlugin(plugins, "p.sh", `#!/bin/sh
+# <agenthub.title>Parts</agenthub.title>
+# <agenthub.action id="ok" level="confirm" title="Approve">p.sh --action ok</agenthub.action>
+[ "$1" = "--action" ] && exit 0
+echo "Parts | status=ok"
+echo "---"
+echo "Tab alpha"
+echo "--Fix | action=ok"
+echo "Tab beta"
+echo "--Fix | action=ok"
+`);
+  const h = await startHub({ pluginsDir: plugins });
+  try {
+    await waitFor(() => h.core.pluginState("p")?.body.length);
+    const fixes = [];
+    const walk = (items) => { for (const x of items || []) { if (x.title === "Fix") fixes.push(x); walk(x.children); } };
+    walk(h.core.pluginState("p").body);
+    assert.equal(fixes.length, 2);
+    assert.notEqual(fixes[0].offer.id, fixes[1].offer.id, "the same action under two tabs is two offers");
+    const parents = [];
+    for (const f of fixes) parents.push((await h.core.invoke({ id: f.offer.id, peer: APP })).body.parts.parentRow);
+    assert.deepEqual(parents, ["Tab alpha", "Tab beta"]);
+  } finally {
+    await h.stop();
+    cleanup(plugins);
+  }
+});
+
+test("t123/t124: parts — the title is cleaned of control characters; a non-builtin plugin's cost= keeps the hub's own line", async () => {
+  const h = await startHub();
+  try {
+    h.core.pluginMeta.set("o", { id: "o", source: "installed", meta: { net: [] } });
+    const offer = (cost) => ({ pluginId: "o", action: { id: "run", title: "Update‮the hub?\n", command: "node x.mjs run", ...(cost ? { cost } : {}) } });
+    const own = h.core.describeTarget({ kind: "action", level: "confirm-cost", offer: offer("free, local only") }).parts;
+    assert.equal(own.title, "Update the hub?");
+    assert.ok(own.costNet, "a third-party plugin's words don't replace the hub's warning");
+    assert.equal(own.note, "free, local only");
+    h.core.pluginMeta.set("o", { id: "o", source: "builtin", meta: { net: [] } });
+    const ours = h.core.describeTarget({ kind: "action", level: "confirm-cost", offer: offer("free, local only") }).parts;
+    assert.equal(ours.costNet, null, "a built-in plugin that explained its cost itself goes without the generic line");
+  } finally {
+    await h.stop();
+  }
+});

@@ -48,13 +48,13 @@ extension HubStore {
                     }
                     if req.input != nil || text == nil {
                         // the field is in the confirmation sheet; the token accepts any valid text typed there
-                        guard let t = await presenter.prompt(InputPrompt(actionLabel: label, input: req.input ?? spec, confirm: req, text: text ?? "")) else { return false }
+                        guard let t = await presenter.prompt(InputPrompt(actionLabel: label, input: req.input ?? spec, confirm: req.placed(sessions: sessions, actionLabel: label), text: text ?? "")) else { return false }
                         text = t
                     } else {
                         guard await presenter.confirm(req.placed(sessions: sessions, actionLabel: label), actionLabel: label) else { return false }
                     }
                     token = req.token
-                    asked = req
+                    asked = req.placed(sessions: sessions, actionLabel: label)
                     outcome = try await client.invoke(offer.id, input: text, confirmToken: token)
                 case .denied(400, let code) where code.hasPrefix("input:"):
                     // the core refused the text (its own pattern, for example): ask again with the reason; the token is
@@ -124,7 +124,7 @@ extension HubStore {
                 if case .needsConfirm(let req) = outcome {
                     // an input action reached without its field (a banner button): the confirmation sheet asks for the text
                     if let field = req.input, let presenter {
-                        guard let t = await presenter.prompt(InputPrompt(actionLabel: label, input: field, confirm: req)) else { return false }
+                        guard let t = await presenter.prompt(InputPrompt(actionLabel: label, input: field, confirm: req.placed(sessions: sessions, actionLabel: label))) else { return false }
                         outcome = try await client.invoke(id, args: args, input: t, confirmToken: req.token)
                     } else {
                         guard let presenter, await presenter.confirm(req.placed(sessions: sessions, actionLabel: label), actionLabel: label) else { return false }

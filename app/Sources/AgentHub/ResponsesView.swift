@@ -80,7 +80,7 @@ struct ResponseCard: View {
         if card.kind == .permission {
             Text("Claude Code ✓").font(.system(size: 10.5, weight: .bold)).foregroundStyle(hexColor(0x7EE29B)).lineLimit(1).fixedSize()
                 .padding(.horizontal, 7).padding(.vertical, 2).background(Capsule().fill(hexColor(0x30D158, 0.16))).padding(.top, top)
-                .help(tr("Подпись Claude Code проверена хабом", "Claude Code signature verified by the hub"))
+                .tip(tr("Подпись Claude Code проверена хабом", "Claude Code signature verified by the hub"))
         }
         if let until = card.expiresDate {
             TimelineView(.periodic(from: .now, by: 1)) { ctx in
@@ -138,7 +138,7 @@ struct ResponseCard: View {
             }
             .buttonStyle(.plain).font(.system(size: 12.5)).foregroundStyle(b == nil ? hexColor(0x4DA3FF) : .white.opacity(0.35))
             .disabled(b != nil)
-            .help(b.map { BridgeText.help($0, primitive: req.primitive, store) } ?? "")
+            .tip(b.map { BridgeText.help($0, primitive: req.primitive, store) } ?? "")
         }
     }
 

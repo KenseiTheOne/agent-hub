@@ -250,10 +250,11 @@ export class CoreFrames {
       byId.get(p.offer.id).push(p);
     }
     for (const [id, list] of byId) {
-      // distinct row texts in frame order → the id of that copy; copies with one text share it
+      // distinct row texts in frame order → the id of that copy; copies with one text share it. The parent row is part of
+      // the place too (task 122): one "Fix" under two tab rows is two offers, so each window names its own tab
       const ids = new Map();
       for (const p of list) {
-        const row = p.offer.row ?? "";
+        const row = `${p.offer.row ?? ""}\u0000${p.offer.parentRow ?? ""}`;
         if (!ids.has(row)) {
           const n = ids.size;
           const nid = n === 0 ? id : sha(`${id}|#${n}`).slice(0, 16);

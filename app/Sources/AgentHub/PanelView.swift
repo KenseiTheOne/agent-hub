@@ -148,7 +148,7 @@ struct PanelView: View {
                 Button { launching = true } label: { Label(tr("Новая сессия", "New session"), systemImage: "plus") }
                     .buttonStyle(CapsuleStyle(fill: hexColor(0x0A84FF), stroke: .clear, height: 30, expand: false))
                     .disabled(block != nil)
-                    .help(block?.help ?? "")
+                    .tip(block?.help ?? "")
             }
         }
     }

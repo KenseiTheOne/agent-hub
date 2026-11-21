@@ -25,7 +25,7 @@ struct EffortBadge: View {
             }
         }
         .fixedSize()
-        .help(tr("Effort по последнему ходу сессии — у простаивающей сессии может быть устаревшим", "Effort as of the session's last turn — may be out of date for an idle session"))
+        .tip(tr("Effort по последнему ходу сессии — у простаивающей сессии может быть устаревшим", "Effort as of the session's last turn — may be out of date for an idle session"))
     }
 }
 
@@ -154,7 +154,7 @@ struct ExternalSessionRow: View {
                 } label: { Label(FocusText.short, systemImage: "arrow.up.forward.app") }
                     .buttonStyle(CapsuleStyle(height: 26, expand: false))
                     .disabled(store.busyAction != nil || block != nil)
-                    .help(block.map { BridgeText.help($0, primitive: req.primitive, store) } ?? tr("Перейти во вкладку агента", "Go to the agent's tab"))
+                    .tip(block.map { BridgeText.help($0, primitive: req.primitive, store) } ?? tr("Перейти во вкладку агента", "Go to the agent's tab"))
             }
         }
         .padding(.horizontal, 14).padding(.vertical, 10)
@@ -195,7 +195,7 @@ struct SessionRow: View {
                 let b = block(req.primitive, "focus")
                 Button(FocusText.short) { focus(req) }
                     .buttonStyle(CapsuleStyle(height: 26, expand: false)).disabled(store.busyAction != nil || b != nil)
-                    .help(b.map { BridgeText.help($0, primitive: req.primitive, store) } ?? tr("Перейти во вкладку этой сессии", "Go to this session's tab"))
+                    .tip(b.map { BridgeText.help($0, primitive: req.primitive, store) } ?? tr("Перейти во вкладку этой сессии", "Go to this session's tab"))
             }
             if session.status == "busy", has("session.interrupt"), terminal != nil {
                 let b = block("session.interrupt", "send-esc")
@@ -205,7 +205,7 @@ struct SessionRow: View {
                 }
                 .buttonStyle(CapsuleStyle(fill: hexColor(0xFF9F0A, 0.2), stroke: hexColor(0xFF9F0A, 0.45), text: hexColor(0xFFC56B), height: 26, expand: false))
                 .disabled(store.busyAction != nil || b != nil)
-                    .help(b.map { BridgeText.help($0, primitive: "session.interrupt", store) }
+                    .tip(b.map { BridgeText.help($0, primitive: "session.interrupt", store) }
                           ?? tr("Прервать ход (как Esc во вкладке)", "Interrupt the turn (like Esc in the tab)"))
             }
             if has("session.stop") {
@@ -214,14 +214,14 @@ struct SessionRow: View {
                 }
                 .buttonStyle(CapsuleStyle(fill: hexColor(0xFF453A, 0.18), stroke: hexColor(0xFF453A, 0.4), text: hexColor(0xFF8A80), height: 26, expand: false))
                 .disabled(store.busyAction != nil || block("session.stop") != nil)
-                .help(block("session.stop")?.help ?? tr("Завершить сессию — продолжить позже можно через claude --resume", "End the session — resume later with claude --resume"))
+                .tip(block("session.stop")?.help ?? tr("Завершить сессию — продолжить позже можно через claude --resume", "End the session — resume later with claude --resume"))
             }
             }
             // one fixed width for every row, wide enough for Go to tab + Interrupt + End: effort capsules stay in a column
             .frame(width: 340, alignment: .trailing)
         }
         .padding(.horizontal, 14).padding(.vertical, 8)
-        .help(details)
+        .tip(details)
     }
 
     private var details: String {

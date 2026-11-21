@@ -1473,6 +1473,31 @@ public struct ConfirmParts: Decodable, Sendable, Hashable {
 
     enum CodingKeys: String, CodingKey { case plugin, tier, title, command, arg, row, parentRow, costNet, note, notePlugin, input, background }
 
+    /// The window's title: the action's name is the plugin's words, so it is quoted and stripped of control and format
+    /// characters (task 123) — a plugin can't make the hub's window say "Update the hub?" in the hub's own voice.
+    public func windowTitle(actionLabel: String) -> String {
+        let name = Self.clean(title ?? "").nonEmpty ?? Self.clean(actionLabel).nonEmpty ?? tr("Действие", "Action")
+        return tr("«\(name)»", "\u{201C}\(name)\u{201D}")
+    }
+
+    /// The line under the title: whose action this is, always said by the hub.
+    public var byline: String {
+        let name = Self.clean(plugin).nonEmpty ?? "?"
+        return tr("Действие плагина «\(name)» · \(tier)", "Action of the plugin \u{201C}\(name)\u{201D} · \(tier)")
+    }
+
+    /// Control, format and line-separator characters → one space; spaces collapsed; at most 80 characters.
+    static func clean(_ s: String) -> String {
+        let scalars = s.unicodeScalars.map { u -> String in
+            switch u.properties.generalCategory {
+            case .control, .format, .lineSeparator, .paragraphSeparator: return " "
+            default: return String(u)
+            }
+        }.joined()
+        let squeezed = scalars.split(whereSeparator: \.isWhitespace).joined(separator: " ")
+        return squeezed.count > 80 ? String(squeezed.prefix(79)) + "…" : squeezed
+    }
+
     /// Where the button is, in words: the tab of a session the argument names, else the row (the parent row when the
     /// button row only names the button). nil — nothing to add to the title.
     public func place(sessions: [SessionInfo], actionLabel: String) -> (value: String, note: String?)? {
@@ -1519,6 +1544,21 @@ public struct ConfirmRequest: Decodable, Sendable, Hashable {
     }
 
     enum CodingKeys: String, CodingKey { case token, level, text, cost, expiresInMs, row, input, background, parts }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        token = try c.decode(String.self, forKey: .token)
+        level = try c.decode(ActionLevel.self, forKey: .level)
+        text = try c.decode(String.self, forKey: .text)
+        cost = try? c.decodeIfPresent(String.self, forKey: .cost)
+        expiresInMs = try? c.decodeIfPresent(Int.self, forKey: .expiresInMs)
+        row = try? c.decodeIfPresent(String.self, forKey: .row)
+        input = try? c.decodeIfPresent(OfferInput.self, forKey: .input)
+        background = try? c.decodeIfPresent(Bool.self, forKey: .background)
+        // task 124: parts this shell can't read (a daemon of another version) leave the whole `text` — the window opens
+        // with it instead of the confirmation failing to decode
+        parts = try? c.decodeIfPresent(ConfirmParts.self, forKey: .parts)
+    }
 
     /// The same request with `place` filled from the store's sessions (a plugin action's confirmation only).
     public func placed(sessions: [SessionInfo], actionLabel: String) -> ConfirmRequest {
@@ -1710,4 +1750,9 @@ public struct HubUpdateInfo: Codable, Sendable, Hashable {
     enum CodingKeys: String, CodingKey {
         case installed, running, label, current, previous, enabled, setting, config, configured, checkedAt, nextCheckAt, error, checking, available, install, blocked, source, brew
     }
+}
+
+private extension String {
+    /// nil for an empty string.
+    var nonEmpty: String? { isEmpty ? nil : self }
 }

@@ -27,7 +27,7 @@ struct MenuBarLabel: View {
             if let t = look.labelText(test: store.testMark != nil) { Text(t).monospacedDigit() }
         }
         .accessibilityLabel(tip)
-        .help(tip)
+        .tip(tip)
         .onChange(of: tip, initial: true) { _, t in StatusItemTip.set(t) }
         .task {
             // openWindow exists only on a scene's view — hand it to the router (notifications, popover)
@@ -160,7 +160,7 @@ struct PopoverView: View {
                     .background(Circle().fill(Color.white.opacity(0.10)))
             }
             .buttonStyle(.plain)
-            .help(tr("Настройки", "Settings"))
+            .tip(tr("Настройки", "Settings"))
             .accessibilityLabel(tr("Настройки", "Settings"))
             Menu {
                 Button(tr("Плагины…", "Plugins…")) { router.open(.manager) }
@@ -190,7 +190,7 @@ struct PopoverView: View {
             .menuIndicator(.hidden)
             .buttonStyle(.plain)
             .fixedSize()
-            .help(tr("Плагины (удерживайте — журнал, язык, выход)", "Plugins (hold for log, language, quit)"))
+            .tip(tr("Плагины (удерживайте — журнал, язык, выход)", "Plugins (hold for log, language, quit)"))
             .accessibilityLabel(tr("Плагины", "Plugins"))
         }
     }
@@ -211,13 +211,13 @@ struct PopoverView: View {
         if case .offline(let why) = store.connection {
             Label(store.daemonLaunch.offlineTitle, systemImage: "bolt.horizontal.circle")
                 .font(.system(size: 11.5)).foregroundStyle(.orange).lineLimit(2).fixedSize(horizontal: false, vertical: true)
-                .help(store.daemonLaunch.offlineHint ?? why)
+                .tip(store.daemonLaunch.offlineHint ?? why)
         }
         if store.estop {
             // wraps instead of truncating: when paused in an open popover the line would otherwise be cut off with an ellipsis
             Label(tr("Хаб на паузе — ответы, запуски и действия выключены", "Hub paused — replies, launches and actions are off"), systemImage: "pause.circle.fill")
                 .font(.system(size: 11.5, weight: .medium)).foregroundStyle(hexColor(0xFFB3AD)).fixedSize(horizontal: false, vertical: true)
-                .help(pauseHubHelp)
+                .tip(pauseHubHelp)
         }
     }
 
@@ -425,7 +425,7 @@ struct PopoverView: View {
                         .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
-                    .help(tr("Открыть панель: там все, кто ждёт", "Open the panel: everything that needs you is there"))
+                    .tip(tr("Открыть панель: там все, кто ждёт", "Open the panel: everything that needs you is there"))
                 }
             }
         }
@@ -453,7 +453,7 @@ struct PopoverView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 Button(tr("Открыть", "Open")) { router.open(.manager) }
                     .buttonStyle(PillStyle(fill: hexColor(0xBF9BFF, 0.35)))
-                    .help(tr("«Плагины» → «Проверить и установить»: окно согласия с правами", "Plugins → Review and install: the consent window with permissions"))
+                    .tip(tr("«Плагины» → «Проверить и установить»: окно согласия с правами", "Plugins → Review and install: the consent window with permissions"))
             }
             .padding(8)
             .background(RoundedRectangle(cornerRadius: 10).fill(Color.white.opacity(0.05)))
@@ -494,7 +494,7 @@ struct PopoverView: View {
                 }
                 .buttonStyle(PillStyle(fill: line.grows ? hexColor(0xFF9F0A, 0.85) : line.single == nil ? Color.white.opacity(0.14) : hexColor(0x0A84FF)))
                 .disabled(line.single != nil && (store.estop || !store.connection.isLive || store.registryBusy != nil || !isApp))
-                .help(line.single == nil ? tr("Открыть «Плагины»: у каждого — своя кнопка «Обновить»", "Open Plugins: each one has its own Update button")
+                .tip(line.single == nil ? tr("Открыть «Плагины»: у каждого — своя кнопка «Обновить»", "Open Plugins: each one has its own Update button")
                       : store.estop ? tr("Хаб на паузе", "Hub is paused")
                       : !isApp ? tr("Только закреплённая сборка приложения", "Pinned app build only")
                       : tr("Обновить в «Плагинах» (при росте прав — окно прав)", "Update in Plugins (a permissions window if it asks for more)"))
@@ -516,7 +516,7 @@ struct PopoverView: View {
             Button { router.open(.launch) } label: { Label(tr("Сессия", "Session"), systemImage: "plus") }
                 .buttonStyle(CapsuleStyle())
                 .disabled(launchBlock != nil)
-                .help(launchBlock?.help ?? "")
+                .tip(launchBlock?.help ?? "")
             PauseHubButton(store: store)
         }
         .labelStyle(.titleAndIcon)
@@ -537,13 +537,13 @@ struct PauseHubButton: View {
                 .buttonStyle(CapsuleStyle(fill: Color(red: 1, green: 69 / 255, blue: 58 / 255).opacity(0.45), stroke: Color(red: 1, green: 120 / 255, blue: 110 / 255).opacity(0.5), text: .white, height: height, concentric: concentric))
                 .keyboardShortcut("e", modifiers: [.command, .shift])
                 .disabled(!store.canAct)
-                .help(store.canAct ? resumeHubHelp : ActionBlock.notPinned.help)
+                .tip(store.canAct ? resumeHubHelp : ActionBlock.notPinned.help)
         } else {
             Button { Task { await store.setEstop(true) } } label: { Label(tr("Пауза хаба", "Pause hub"), systemImage: "pause.circle") }
                 .buttonStyle(CapsuleStyle(fill: Color(red: 1, green: 69 / 255, blue: 58 / 255).opacity(0.16), stroke: Color(red: 1, green: 120 / 255, blue: 110 / 255).opacity(0.35), text: hexColor(0xFFB3AD), height: height, concentric: concentric))
                 .keyboardShortcut("e", modifiers: [.command, .shift])
                 .disabled(!store.connection.isLive)
-                .help(pauseHubHelp)
+                .tip(pauseHubHelp)
         }
     }
 }
@@ -599,7 +599,7 @@ struct TestBadge: View {
             .lineLimit(1).truncationMode(.middle)
             .padding(.horizontal, 7).padding(.vertical, 2)
             .background(Capsule().fill(hexColor(0xFFD60A)))
-            .help(tr("Тестовая копия: оболочка подключена не к хабу по умолчанию, а к \(text.components(separatedBy: " · ").last ?? "")",
+            .tip(tr("Тестовая копия: оболочка подключена не к хабу по умолчанию, а к \(text.components(separatedBy: " · ").last ?? "")",
                      "Test copy: this app is connected to a hub other than the default one: \(text.components(separatedBy: " · ").last ?? "")"))
     }
 }

@@ -148,7 +148,7 @@ struct ConfirmSheet: View {
     private var title: String {
         // a plugin action by parts: the title is the action itself
         if request.title == nil, request.layout == nil, let parts = request.parts {
-            return parts.title.flatMap { $0.isEmpty ? nil : $0 } ?? actionLabel
+            return parts.windowTitle(actionLabel: actionLabel)
         }
         return request.title ?? (kind == .costly ? tr("Подтвердите: действие тратит квоту или выходит в сеть", "Confirm: this uses quota or the network")
                                           : tr("Подтвердите действие", "Confirm the action"))
@@ -169,7 +169,7 @@ struct ConfirmSheet: View {
                     if let sub = request.layout?.subtitle {
                         Text(sub).font(.system(size: 12.5, design: .monospaced)).foregroundStyle(.white.opacity(0.72))
                     } else if request.layout == nil, let parts = request.parts {
-                        Text("\(parts.plugin) · \(parts.tier)").font(.system(size: 12.5)).foregroundStyle(.white.opacity(0.72))
+                        Text(parts.byline).font(.system(size: 12.5)).foregroundStyle(.white.opacity(0.72))
                     }
                 }
                 .frame(minHeight: 34, alignment: .center)
@@ -232,12 +232,12 @@ struct ConfirmSheet: View {
             HStack(spacing: 8) {
                 if let details {
                     Text(details).font(.system(size: 10.5, design: .monospaced)).foregroundStyle(.white.opacity(0.38))
-                        .lineLimit(1).truncationMode(.middle).textSelection(.enabled).help(details)
+                        .lineLimit(1).truncationMode(.middle).textSelection(.enabled).tip(details)
                 } else if request.layout == nil, let parts = request.parts, !parts.command.isEmpty {
                     // the command in small print (whole on hover), the countdown under it
                     VStack(alignment: .leading, spacing: 2) {
                         Text(parts.command).font(.system(size: 10.5, design: .monospaced)).foregroundStyle(.white.opacity(0.38))
-                            .lineLimit(1).truncationMode(.middle).textSelection(.enabled).help(parts.command)
+                            .lineLimit(1).truncationMode(.middle).textSelection(.enabled).tip(parts.command)
                         if let until { countdown(until) }
                     }
                 } else if let until {
@@ -557,7 +557,7 @@ struct ConsentSheet: View {
                     Text((request.source ?? ConsentSource(kind: "registry")).line + (request.registryLabel.map { " · " + RegistryText.from($0) } ?? ""))
                         .font(.system(size: 12)).foregroundStyle(.secondary)
                         .lineLimit(2).truncationMode(.middle).fixedSize(horizontal: false, vertical: true)
-                        .help(request.source?.path ?? "")
+                        .tip(request.source?.path ?? "")
                 }
             }
             if let m = request.migrate {
@@ -644,7 +644,7 @@ struct ConsentSheet: View {
                 Button(primary) { done(true) }
                     .buttonStyle(CapsuleStyle(fill: hexColor(0x0A84FF), stroke: .clear, height: 32, expand: false))
                     .disabled(!seenAll)
-                    .help(seenAll ? "" : tr("Сначала просмотрите все права — прокрутите список до конца", "Review all permissions first — scroll to the end of the list"))
+                    .tip(seenAll ? "" : tr("Сначала просмотрите все права — прокрутите список до конца", "Review all permissions first — scroll to the end of the list"))
             }
         }
         .padding(20)

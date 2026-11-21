@@ -12,8 +12,8 @@ import SwiftUI
 ///   --quit-after-snapshot     quit after the snapshot
 ///   --reopen-panel            with --open-panel/--snapshot-panel: once the state is live, close the panel and open it
 ///                             again (a reopen from the popover: the content exists at the window's first display)
-///   --tooltip <text part>     with --snapshot-panel: print the window's AppKit tooltips (`tooltip=x,y,w,h <text>`) and
-///                             show the real tooltip whose text contains this part in the snapshot (`HoverTip`,
+///   --tooltip <text part>     with --snapshot-panel: print the window's hints (`tooltip=x,y,w,h <text>`) and draw the
+///                             hint card whose text contains this part in the snapshot (`HoverTip`, `TipWindow`,
 ///                             `TooltipProbe`), under its element; if not found, `tooltip-error=not-found`
 ///   --panel-section <section> panel section on open: sessions | launch | manager | journal | settings | plugin:<id>
 ///   --manager-tab catalog     open "Catalog" in the plugin manager right away (screenshots)
@@ -36,7 +36,7 @@ import SwiftUI
 ///   --open-tile <plugin id>   the popover starts with that plugin's tile expanded (its detail card; snapshots)
 ///   --snapshot-report <png>   draw the "It didn't work" window with sample content and quit (synthetic; nothing is run)
 ///   --snapshot-confirm <png>  draw the "Update the hub?" confirmation with sample content and quit (synthetic); with
-///                             --confirm-sample <plugin|cost|input|prompt|rollback|registry-key|expired> another window of the same kind instead:
+///                             --confirm-sample <plugin|plugin-input|plugin-input-unplaced|plugin-fix:<parent row>|plugin-hostile|plugin-cost-community|cost|input|prompt|rollback|registry-key|expired> another window of the same kind instead:
 ///                             a core confirmation with a cost and a live countdown, the same with a text field, the
 ///                             text field alone, a plugin rollback, the "accept the new registry key?" window with
 ///                             two sample keys (--confirm-cost is the old spelling of `cost`)
@@ -447,6 +447,39 @@ final class AppModel {
                                   text: tr("Пример окна: «Запустить прогон» для задачи T-1. Ничего не запускается.", "A sample window: \"Start a run\" for task T-1. Nothing is run."),
                                   cost: tr("тратит квоту Claude", "uses Claude quota"), expiresInMs: 60_000, row: tr("T-1 · починить вход", "T-1 · fix sign-in"))
         let field = OfferInput(placeholder: tr("Что сделать", "What to do"), maxLength: 80)
+        let sample = LaunchOptions.current.confirmSample ?? ""
+        if sample == "plugin-cost-community" || sample == "plugin-cost-community-unwarned" {
+            // a community plugin's confirm-cost action that says "free, local only" about itself (task 124): the hub keeps
+            // its own warning next to those words; -unwarned draws it as 0.1.8 did, the hub's line gone
+            var req = ConfirmRequest(token: "", level: .confirmCost, text: "", expiresInMs: 104_000)
+            req.parts = ConfirmParts(plugin: "Handy Tools", tier: tr("плагин сообщества", "community plugin"),
+                                     title: tr("Синхронизировать заметки", "Sync the notes"), command: "handy.5m.mjs --action sync",
+                                     costNet: sample == "plugin-cost-community"
+                                         ? tr("Команда может тратить ресурсы или выходить в сеть", "The command may use resources or access the network") : nil,
+                                     note: tr("бесплатно, только локально", "free, local only"), notePlugin: true)
+            await snapshotWindow(to: path) { [presenter] in _ = await presenter.confirm(req, actionLabel: "Sync") }
+            return
+        }
+        if sample == "plugin-hostile" {
+            // a community plugin that names its action like the hub's own window (task 123): quoted, and said to be its
+            var req = ConfirmRequest(token: "", level: .confirm, text: "", expiresInMs: 104_000)
+            req.parts = ConfirmParts(plugin: "Handy Tools", tier: tr("плагин сообщества", "community plugin"),
+                                     title: "Update the hub?", command: "handy.5m.mjs --action run")
+            await snapshotWindow(to: path) { [presenter] in _ = await presenter.confirm(req, actionLabel: "Update") }
+            return
+        }
+        if sample.hasPrefix("plugin-fix:") {
+            // a "Fix" button under a tab row (task 122): "Where" is the parent row the core sent, resolved the way the
+            // store resolves it
+            let parent = String(sample.dropFirst("plugin-fix:".count))
+            var req = ConfirmRequest(token: "", level: .confirm, text: "", expiresInMs: 104_000)
+            let parts = ConfirmParts(plugin: tr("Пример плагина", "Sample plugin"), tier: tr("официальный плагин", "official plugin"),
+                                     title: tr("Починить", "Fix it"), command: "sample.30s.mjs --action fix", row: "Fix", parentRow: parent)
+            req.parts = parts
+            req = req.placed(sessions: [], actionLabel: "Fix")
+            await snapshotWindow(to: path) { [presenter] in _ = await presenter.confirm(req, actionLabel: "Fix") }
+            return
+        }
         switch LaunchOptions.current.confirmSample {
         case "plugin":
             // a plugin action by parts: the title is the action, rows say where and what the plugin warns about
@@ -459,6 +492,20 @@ final class AppModel {
             req.place = tr("my-project · «релиз»", "my-project · \"release\"")
             req.placeNote = tr("терминал, вкладка 3", "terminal, tab 3")
             await snapshotWindow(to: path) { [presenter] in _ = await presenter.confirm(req, actionLabel: tr("Привести", "Fix")) }
+        case "plugin-input", "plugin-input-unplaced":
+            // a plugin action that asks for text, by parts: "Where" names the session's tab (task 125); the -unplaced
+            // spelling draws it as 0.1.8 did, without the place, for a before/after
+            var req = ConfirmRequest(token: "", level: .confirm, text: "", expiresInMs: 104_000, input: field)
+            req.parts = ConfirmParts(plugin: tr("Пример плагина", "Sample plugin"), tier: tr("официальный плагин", "official plugin"),
+                                     title: tr("Отправить текст в сессию", "Send text to the session"),
+                                     command: "sample.30s.mjs --action send 0f3c1a2b-5d6e-4f70-8a9b-c0d1e2f3a4b5")
+            if LaunchOptions.current.confirmSample == "plugin-input" {
+                req.place = tr("my-project · «релиз»", "my-project · \"release\"")
+                req.placeNote = tr("терминал, вкладка 3", "terminal, tab 3")
+            }
+            await snapshotWindow(to: path) { [presenter] in
+                _ = await presenter.prompt(InputPrompt(actionLabel: tr("Отправить", "Send"), input: field, confirm: req, text: tr("запусти тесты", "run the tests")))
+            }
         case "cost":
             await snapshotWindow(to: path) { [presenter] in _ = await presenter.confirm(cost, actionLabel: action) }
         case "input":
@@ -531,14 +578,14 @@ final class AppModel {
         view.cacheDisplay(in: view.bounds, to: rep)
         var out: NSBitmapImageRep = rep
         if let probe = tooltip {
-            // the window's AppKit tooltips as a list; the one containing probe as a real tooltip window under its element
+            // the window's hints as a list; the one containing probe as its card under its element
             let tips = TooltipProbe.tips(in: w)
             // the window shows tooltips even in an inactive app (the stand runs in the background, like the panel over a terminal)
             print("tooltips-inactive=\(w.allowsToolTipsWhenApplicationIsInactive) app-active=\(NSApp.isActive)")
             for t in tips { print("tooltip=\(Int(t.rect.minX)),\(Int(view.bounds.height - t.rect.maxY)),\(Int(t.rect.width)),\(Int(t.rect.height)) \(t.text)") }
             // the first left to right, top to bottom: for identical texts this picks the sidebar item where the line is truncated
             let ordered = tips.sorted { ($0.rect.minX, -$0.rect.maxY) < ($1.rect.minX, -$1.rect.maxY) }
-            if let hit = ordered.first(where: { $0.text.contains(probe) }), let img = await TooltipProbe.render(hit.tip) {
+            if let hit = ordered.first(where: { $0.text.contains(probe) }), let img = TooltipProbe.render(hit.text, above: hit.above) {
                 let size = view.bounds.size
                 let k = CGFloat(rep.pixelsWide) / max(size.width, 1)
                 let canvas = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: rep.pixelsWide, pixelsHigh: rep.pixelsHigh, bitsPerSample: 8,
@@ -548,18 +595,15 @@ final class AppModel {
                     NSGraphicsContext.saveGraphicsState()
                     NSGraphicsContext.current = ctx
                     rep.draw(in: NSRect(x: 0, y: 0, width: CGFloat(rep.pixelsWide), height: CGFloat(rep.pixelsHigh)))
-                    // like with a cursor: slightly right of the element's start and below it
-                    var origin = NSPoint(x: hit.rect.minX + 14, y: hit.rect.minY - img.size.height - 2)
+                    // as `TipWindow` places it: centered above a bar column, or like at a pointer slightly right of the
+                    // element's start and below it
+                    let m = TipBubbleView.snapshotMargin
+                    var origin = hit.above ? NSPoint(x: hit.rect.midX - img.size.width / 2, y: hit.rect.maxY + 2 - m)
+                                           : NSPoint(x: hit.rect.minX + 14 - m, y: hit.rect.minY - img.size.height - 2 + m)
                     origin.x = min(origin.x, size.width - img.size.width - 4)
                     origin.y = max(origin.y, 4)
                     let box = NSRect(x: origin.x * k, y: origin.y * k, width: img.size.width * k, height: img.size.height * k)
-                    // the tooltip window background (cacheDisplay does not capture window glass): dark, like tooltips in dark mode
-                    let bg = NSBezierPath(roundedRect: box.insetBy(dx: -1 * k, dy: -1 * k), xRadius: 5 * k, yRadius: 5 * k)
-                    NSColor(white: 0.16, alpha: 0.97).setFill()
-                    bg.fill()
-                    NSColor(white: 1, alpha: 0.18).setStroke()
-                    bg.lineWidth = 0.5 * k
-                    bg.stroke()
+                    // the card draws its own background and border
                     img.draw(in: box)
                     NSGraphicsContext.restoreGraphicsState()
                     canvas.size = size

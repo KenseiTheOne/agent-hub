@@ -23,7 +23,7 @@ struct LanguagePicker: View {
                                           set: { i in Task { await store.setLang(LangSetting.allCases[i]) } }),
                        titles: LangSetting.allCases.map(Self.title))
             .disabled(!store.canAct || !store.connection.isLive)
-            .help(!store.canAct ? ActionBlock.notPinned.help : !store.connection.isLive ? ActionBlock.offline.help : "")
+            .tip(!store.canAct ? ActionBlock.notPinned.help : !store.connection.isLive ? ActionBlock.offline.help : "")
     }
 }
 
@@ -171,7 +171,7 @@ struct NotificationsSettings: View {
         Toggle(tr("Уведомления", "Notifications"),
                isOn: Binding(get: { n.enabled }, set: { v in Task { await store.setNotifications(.object(["enabled": .bool(v)])) } }))
             .toggleStyle(.switch).font(.system(size: 13, weight: .semibold))
-            .disabled(!canEdit).help(lockHelp)
+            .disabled(!canEdit).tip(lockHelp)
         if NotifyPermissionText.shows(NotifyPermissionModel.shared.status, hubEnabled: n.enabled) {
             HStack(alignment: .firstTextBaseline, spacing: 8) {
                 Image(systemName: "bell.slash").font(.system(size: 11)).foregroundStyle(hexColor(0xFFC56B))
@@ -245,7 +245,7 @@ struct NotificationsSettings: View {
         }
         .padding(.leading, 12)
         // the master switch is off — kinds aren't touched (their values are kept until it's turned back on)
-        .disabled(!canEdit || !n.enabled).opacity(n.enabled ? 1 : 0.55).help(lockHelp)
+        .disabled(!canEdit || !n.enabled).opacity(n.enabled ? 1 : 0.55).tip(lockHelp)
         Text(NotificationsText.mutedExplain)
             .font(.system(size: 11.5)).foregroundStyle(.white.opacity(0.55)).fixedSize(horizontal: false, vertical: true)
         Button(tr("Открыть журнал", "Open log"), action: openJournal).buttonStyle(.plain).font(.system(size: 12)).foregroundStyle(hexColor(0x4DA3FF))
@@ -275,14 +275,14 @@ struct NotificationsSettings: View {
         Toggle(tr("Тихие часы", "Quiet hours"),
                isOn: Binding(get: { q.enabled }, set: { v in Task { await store.setNotifications(.object(["quiet": .object(["enabled": .bool(v)])])) } }))
             .toggleStyle(.switch).font(.system(size: 12.5, weight: .semibold))
-            .disabled(!canEdit).help(lockHelp)
+            .disabled(!canEdit).tip(lockHelp)
         HStack(spacing: 8) {
             Text(tr("с", "from")).font(.system(size: 12))
             timePicker(q.start) { v in ["start": .string(v)] }
             Text(tr("до", "to")).font(.system(size: 12))
             timePicker(q.end) { v in ["end": .string(v)] }
         }
-        .disabled(!canEdit || !q.enabled).opacity(q.enabled ? 1 : 0.55).help(lockHelp)
+        .disabled(!canEdit || !q.enabled).opacity(q.enabled ? 1 : 0.55).tip(lockHelp)
         Text(NotificationsText.quietExplain)
             .font(.system(size: 11.5)).foregroundStyle(.white.opacity(0.55)).fixedSize(horizontal: false, vertical: true)
         if let src = NotificationsText.quietSource(q) {
@@ -319,7 +319,7 @@ struct PluginUpdatesSettings: View {
                    isOn: Binding(get: { info.setting }, set: { v in Task { await store.setCheckPluginUpdates(v) } }))
                 .toggleStyle(.switch).font(.system(size: 12.5))
                 .disabled(!store.connection.isLive || !info.config || !store.canAct)
-                .help(!store.canAct ? ActionBlock.notPinned.help : "")
+                .tip(!store.canAct ? ActionBlock.notPinned.help : "")
             // the interval — in the same wording as "Hub updates" (HubUpdateText.checkExplain)
             Text(tr("Несколько раз в день хаб скачивает подписанный каталог реестра и сообщает о новых версиях установленных плагинов — одним уведомлением на версию. Сам ничего не ставит: обновление — кнопкой «Обновить» в «Плагинах». Менять настройку может только закреплённая сборка приложения.",
                     "A few times a day the hub downloads the signed registry catalog and tells you about new versions of installed plugins — one notification per version. It never installs anything itself: update with the Update button in Plugins. Only the pinned app build can change this setting."))
@@ -331,7 +331,7 @@ struct PluginUpdatesSettings: View {
             Button(store.hubUpdateBusy == "plugins-check" ? tr("Проверяю…", "Checking…") : tr("Проверить сейчас", "Check now")) { Task { await store.checkPluginUpdatesNow() } }
                 .font(.system(size: 12))
                 .disabled(!store.connection.isLive || !store.canAct || !info.config || !info.setting || !info.configured || store.hubUpdateBusy != nil)
-                .help(!store.canAct ? ActionBlock.notPinned.help : "")
+                .tip(!store.canAct ? ActionBlock.notPinned.help : "")
         }
     }
 }
@@ -399,7 +399,7 @@ struct TerminalSettings: View {
                         .padding(.horizontal, 7).padding(.vertical, 2)
                         .background(Capsule().fill(on ? Color.white.opacity(0.10) : Color.clear))
                         .overlay(Capsule().strokeBorder(Color.white.opacity(on ? 0 : 0.12), lineWidth: 0.5))
-                        .help(on ? tr("\(a.label): поддерживается", "\(a.label): supported") : TerminalText.unsupported(terminal: a.label, capability: c))
+                        .tip(on ? tr("\(a.label): поддерживается", "\(a.label): supported") : TerminalText.unsupported(terminal: a.label, capability: c))
                 }
             }
             .padding(.leading, 15)
@@ -419,7 +419,7 @@ struct TerminalSettings: View {
                 Text(ActionBlock.noLaunchTerminal.help).font(.system(size: 12)).foregroundStyle(.orange)
             }
         }
-        .help(tr("Выбрать терминал: services.terminal.launch в config.json хаба (id терминала или auto).",
+        .tip(tr("Выбрать терминал: services.terminal.launch в config.json хаба (id терминала или auto).",
                  "To choose the terminal: services.terminal.launch in the hub's config.json (a terminal id or auto)."))
     }
 }
@@ -481,7 +481,7 @@ struct LaunchAtLoginSettings: View {
                        isOn: Binding(get: { info.setting }, set: { v in Task { await store.setLaunchAtLogin(v) } }))
                     .toggleStyle(.switch).font(.system(size: 13, weight: .semibold))
                     .disabled(!store.connection.isLive || !store.canAct || info.agentOutdated)
-                    .help(!store.canAct ? ActionBlock.notPinned.help : !store.connection.isLive ? ActionBlock.offline.help
+                    .tip(!store.canAct ? ActionBlock.notPinned.help : !store.connection.isLive ? ActionBlock.offline.help
                           : info.agentOutdated ? LaunchAgentHint.text(hub: store.state?.hub) : "")
             } else {
                 // the daemon stores the setting: without its answer it's unknown — don't draw a made-up "on"
@@ -490,7 +490,7 @@ struct LaunchAtLoginSettings: View {
                     Spacer()
                     Text(tr("неизвестно", "unknown")).font(.system(size: 12)).foregroundStyle(.white.opacity(0.55))
                 }
-                .help(store.connection.isLive ? "" : ActionBlock.offline.help)
+                .tip(store.connection.isLive ? "" : ActionBlock.offline.help)
             }
             Text(tr("Служба хаба и приложение запускаются вместе при входе в систему. Выключено — при входе не запускается ни то, ни другое; открытое вручную приложение само поднимает службу. Упавшее приложение хаб перезапускает в обоих случаях. Менять настройку может только закреплённая сборка приложения.",
                     "The hub service and the app start together when you log in. Off — neither starts at login; when you open the app yourself, it starts the service. The hub restarts a crashed app either way. Only the pinned app build can change this setting."))
