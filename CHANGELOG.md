@@ -4,6 +4,29 @@ Releases are git tags `vX.Y.Z` (also published as GitHub releases); the current 
 The plugin contract has its own version history in
 [`docs/extension-points.md`](docs/extension-points.md#contract-versions).
 
+## 0.1.13 — 2026-11-21
+
+### Changed
+
+- **Hub updates download a ready app instead of compiling it.** For every release tag CI builds AgentHub.app and
+  attaches it to the GitHub release with a manifest; the hub checks that the manifest's version
+  and commit are those of the tag it verified, then the zip's sha256 and the app's cdhash, and installs it — about a
+  second instead of minutes of swift. Hubs of any older version get it too, since they run the new tag's build script.
+  Without network, before the release job finishes, on an Intel Mac, or if any check fails, the hub builds locally as
+  before.
+- **Hub updates build in under a minute instead of 5–20.** Swift dependencies are no longer compiled again for every
+  version: the builder keeps a copy of the app sources at a fixed path (`Versions/.build-cache/app`) and rewrites only
+  the files that changed, so only the hub's own modules compile (measured: 20–50 s, against 2–5 min on an idle Mac and
+  up to the 30-min timeout under load). Swift 6.4's default build system recompiled the BoringSSL dependency on almost
+  every run, so the hub now builds with `--build-system native` and a fixed environment. The first update after this
+  one still builds everything. If a build fails with the cache, it is cleared and the build is retried from scratch
+  with fewer parallel jobs — this also covers the "Resource temporarily unavailable" failure.
+
+### Fixed
+
+- **A hint that wraps** kept the card at full width with an empty strip on the right; the card now fits the wrapped
+  text, its lines evened out.
+
 ## 0.1.12 — 2026-11-21
 
 ### Added

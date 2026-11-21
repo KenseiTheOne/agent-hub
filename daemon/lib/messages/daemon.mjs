@@ -149,6 +149,8 @@ export const DAEMON_MESSAGES = {
     "hub.log.tag": (p) => `тег ${p.tag} → ${p.commit} (${p.annotated ? `аннотированный, ${p.tagger}` : "лёгкий"}), в origin/${p.branch}: «${p.subject}»`,
     "hub.log.start": "== Agent Hub: сборка {label} ({at}) → {dir}",
     "hub.log.done": "== готово: {label}, cdhash {cdhash}",
+    "hub.log.cacheSync": "== кэш сборки swift: {dir}, изменено файлов: {n}",
+    "hub.log.cacheRetry": "== сборка с кэшем не удалась — очищаю кэш ({dir}) и собираю заново, не больше {jobs} задач параллельно",
     "hub.log.failed": (p) => `== ошибка: ${p.code}${p.detail ? ` — ${p.detail}` : ""}`,
     // hub update: the trial watchdog log (logs/hub-update-watch.log)
     "hub.watch.noRollback": "откат не нужен: установка уже подтверждена или сменилась",
@@ -327,6 +329,8 @@ export const DAEMON_MESSAGES = {
     "hub.log.tag": (p) => `tag ${p.tag} → ${p.commit} (${p.annotated ? `annotated, ${p.tagger}` : "lightweight"}), on origin/${p.branch}: "${p.subject}"`,
     "hub.log.start": "== Agent Hub: building {label} ({at}) → {dir}",
     "hub.log.done": "== done: {label}, cdhash {cdhash}",
+    "hub.log.cacheSync": "== swift build cache: {dir}, files changed: {n}",
+    "hub.log.cacheRetry": "== the build with the cache failed — clearing the cache ({dir}) and building again from scratch, at most {jobs} parallel jobs",
     "hub.log.failed": (p) => `== error: ${p.code}${p.detail ? ` — ${p.detail}` : ""}`,
     // hub update: the trial watchdog log (logs/hub-update-watch.log)
     "hub.watch.noRollback": "no rollback needed: the install is already confirmed or was replaced",

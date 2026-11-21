@@ -1,0 +1,86 @@
+# Prebuilt AgentHub.app for a release tag (scripts/prebuilt.mjs, docs/hub-updates.md).
+# A hub that updates to the tag downloads AgentHub-<version>.zip from this release instead of compiling swift, after
+# checking the manifest's version and commit against its sources and the zip's sha256 and the app's cdhash.
+# Until this job finishes (or if it fails) hubs build the app locally, as before.
+# The repository has release immutability on: the release is created as a draft, the assets are attached, then it is
+# published — after that nobody can swap them.
+name: release-app
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to (re)build, e.g. v0.1.13"
+        required: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-app-${{ github.event.inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  app:
+    # arm64, macOS 26 SDK: Package.swift requires macOS 26
+    runs-on: macos-26
+    timeout-minutes: 40
+    env:
+      TAG: ${{ github.event.inputs.tag || github.ref_name }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+          fetch-depth: 1
+
+      - name: Tag matches VERSION
+        run: |
+          V="$(cat VERSION)"
+          [ "v$V" = "$TAG" ] || { echo "tag $TAG, VERSION $V"; exit 1; }
+          echo "VERSION=$V" >> "$GITHUB_ENV"
+
+      - name: Newest Xcode on the runner
+        # the hub is developed with Swift 6.4 / the macOS 27 SDK; the image default is older
+        run: |
+          X="$(ls -d /Applications/Xcode_*.app 2>/dev/null | sort -V | tail -1)"
+          [ -n "$X" ] && sudo xcode-select -s "$X/Contents/Developer"
+          xcode-select -p
+
+      - name: Toolchain
+        run: |
+          sw_vers
+          xcodebuild -version || true
+          swift --version
+          node --version
+
+      - name: Build (from source, no download)
+        env:
+          AGENTHUB_PREBUILT: "0"
+        run: scripts/build-release.sh --out dist
+
+      - name: Check the bundle
+        run: |
+          /usr/bin/codesign --verify --strict dist/AgentHub.app
+          /usr/bin/codesign -dvvv dist/AgentHub.app 2>&1 | grep -E '^(Identifier|CDHash|Format)='
+          lipo -archs dist/AgentHub.app/Contents/MacOS/AgentHub
+
+      - name: Zip and manifest
+        run: |
+          /usr/bin/ditto -c -k --keepParent dist/AgentHub.app "dist/AgentHub-$VERSION.zip"
+          node scripts/prebuilt.mjs manifest --app dist/AgentHub.app --zip "dist/AgentHub-$VERSION.zip" --out dist
+
+      - name: Verify like a hub would
+        run: node scripts/prebuilt.mjs verify-local --dir dist
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$TAG" --json isDraft -q .isDraft 2>/dev/null | grep -qx false; then
+            echo "release $TAG is already published (immutable) — nothing to upload"; exit 1
+          fi
+          gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" --draft --verify-tag --notes-from-tag --title "$TAG"
+          gh release upload "$TAG" --clobber "dist/AgentHub-$VERSION.zip" "dist/AgentHub-$VERSION.json"
+          gh release edit "$TAG" --draft=false

@@ -19,13 +19,15 @@ User decisions (2026-11-06, do not change):
 │   ├── current  -> 0.2.0                                a relative symlink — the pointer to the current version
 │   ├── previous -> 0.1.0                                a symlink — where "Roll back to …" leads
 │   ├── 0.2.0/
-│   │   ├── src/              sources from the tag (git fetch refs/tags/v0.2.0 + the main branch), .build removed after building
+│   │   ├── src/              sources from the tag (git fetch refs/tags/v0.2.0 + the main branch)
 │   │   │   ├── daemon/…      the daemon runs from here (launchd → Versions/current/src/daemon/bin/agenthubd)
 │   │   │   └── plugins/…     this version's built-in plugins (the source of the <home>/Builtin copy)
 │   │   ├── AgentHub.app      built by scripts/build-release.sh from the same tag, signed ad hoc
 │   │   └── build.json        {version, label, tag, commit, origin, cdhash, requirement, builtAt, selfTest, …}
 │   ├── 0.1.0-dev.6ceb3d8/    a version created by migrating from a working folder without a tag (the label is the commit)
-│   └── .staging-0.3.0-<rnd>/ a build in progress; it enters Versions/<version> only as a whole (rename)
+│   ├── .staging-0.3.0-<rnd>/ a build in progress; it enters Versions/<version> only as a whole (rename)
+│   └── .build-cache/app/     a copy of the app sources with its swift .build, shared by all versions (hub 0.1.13+):
+│                             unchanged dependencies are not compiled again; only speeds the build up, wiped and rebuilt from scratch if a build fails with it
 ├── HubUpdate/                                           0700
 │   ├── check.json            the last check: the available version, when, which versions were already announced, which
 │   │                         commit the hub saw for each version's tag (commits) and which tags moved (moved)
@@ -121,7 +123,7 @@ not newer than the current one — `409 hub-update:not-newer`.
 | # | Step | Where | What is atomic | On error |
 |---|---|---|---|---|
 | 1 | `install.json` ← `{phase: building, step: clone}`, event `hub-update.status` | daemon | file: tmp + rename | — |
-| 2 | **Build in a separate process** `node <current daemon>/bin/agenthub hub build …` (the daemon is not blocked; the builder has an overall deadline — the sum of step deadlines with a margin, ≈ 51 min: each git network command — 5 min, `build-release.sh` — 30 min, self-test — 1 min; when a step deadline or the overall deadline passes, the process is killed **together with its descendants** (git-remote-https, swift-build, swift-frontend — from the `ps` table, `killProcessTree` in `lib/platform.mjs`; the process group does not change, so the installer's Ctrl-C and launchd reach them as before), the result is taken from the process exit, not from the closing of its streams that a grandchild could hold open; the node for the builder and the watchdog is the daemon's `argv0` (the `/opt/homebrew/bin/node` link from the plist), not the Cellar path that `brew upgrade node` removes; no node — `node-missing`; the origin address goes via stdin, not argv; the builder reports its step as `{"step": "clone|build|verify|selftest|promote"}` lines on stdout — the daemon writes it to `install.step`, the result is the last line): less than 1 GB free on the volume — `no-space` before starting; `git init` + `git fetch <origin> refs/tags/<tag> refs/heads/main` into `.staging-…/src` (not `clone --branch`: that would pick a branch with the same name; the origin address does not stay in the clone, and credentials in the address are replaced with `***` in the log), the tag commit is checked against `ls-remote`, **the tag commit must be in the history of `origin/main`** (`git merge-base --is-ancestor`, otherwise `not-on-main`: a tag on an unreviewed branch is not installed; the branch is `services.hubUpdate.branch`), `VERSION` is checked against the tag, `src/scripts/build-release.sh --out .staging-…` (from the **new** tag: `build-native.sh` + `bundle.sh --no-pin`), verification: the bundle, `codesign --verify --strict`, identifier `com.kensei.agenthub`, cdhash; **a self-test of the new daemon** `node src/daemon/bin/agenthubd --self-test` in a temporary directory (loads all core modules, opens the socket, `/health`, the peercred addon) — the version in the answer must match; `build.json`; `rename(.staging-…, Versions/<version>)` | child process, log `logs/hub-update-…log` | the version directory appears as a whole (rename) | `phase: failed`, `error: clone-failed / not-on-main / no-space / build-failed / verify-failed / selftest-failed / version-mismatch / commit-mismatch / build-timeout / node-missing` (if the builder did not start or was killed on deadline, the daemon writes the reason line to the log: "Show log" leads to the file), journal `hub-update-failed`, push; the live hub is untouched; the directory of a version that failed is deleted |
+| 2 | **Build in a separate process** `node <current daemon>/bin/agenthub hub build …` (the daemon is not blocked; the builder has an overall deadline — the sum of step deadlines with a margin, ≈ 51 min: each git network command — 5 min, `build-release.sh` — 30 min, self-test — 1 min; when a step deadline or the overall deadline passes, the process is killed **together with its descendants** (git-remote-https, swift-build, swift-frontend — from the `ps` table, `killProcessTree` in `lib/platform.mjs`; the process group does not change, so the installer's Ctrl-C and launchd reach them as before), the result is taken from the process exit, not from the closing of its streams that a grandchild could hold open; the node for the builder and the watchdog is the daemon's `argv0` (the `/opt/homebrew/bin/node` link from the plist), not the Cellar path that `brew upgrade node` removes; no node — `node-missing`; the origin address goes via stdin, not argv; the builder reports its step as `{"step": "clone|build|verify|selftest|promote"}` lines on stdout — the daemon writes it to `install.step`, the result is the last line): less than 1 GB free on the volume — `no-space` before starting; `git init` + `git fetch <origin> refs/tags/<tag> refs/heads/main` into `.staging-…/src` (not `clone --branch`: that would pick a branch with the same name; the origin address does not stay in the clone, and credentials in the address are replaced with `***` in the log), the tag commit is checked against `ls-remote`, **the tag commit must be in the history of `origin/main`** (`git merge-base --is-ancestor`, otherwise `not-on-main`: a tag on an unreviewed branch is not installed; the branch is `services.hubUpdate.branch`), `VERSION` is checked against the tag, `src/scripts/build-release.sh --out .staging-…` (from the **new** tag: `build-native.sh`, then **the prebuilt app** from the tag's GitHub release (`scripts/prebuilt.mjs`, §9a) — about a second instead of a swift build; when there is none or a check fails, `bundle.sh --no-pin`; swift builds a copy of `src/app` kept at a fixed path, `Versions/.build-cache/app` — `AGENTHUB_SWIFT_PACKAGE`; only files whose content changed are rewritten, so unchanged files keep their mtime and the copy's `.build` is reused: dependencies are taken ready and only the hub's changed modules compile (`bundle.sh` uses `--build-system native` and a fixed environment: with the swiftbuild default of Swift 6.4, or any change of environment, BoringSSL recompiled on almost every run); if the build fails, the cache is deleted and the build runs once more from scratch with parallelism limited to half the cores, `AGENTHUB_SWIFT_JOBS`; build scripts of older versions ignore both variables and build in `src/app/.build`, deleted afterwards), verification: the bundle, `codesign --verify --strict`, identifier `com.kensei.agenthub`, cdhash; **a self-test of the new daemon** `node src/daemon/bin/agenthubd --self-test` in a temporary directory (loads all core modules, opens the socket, `/health`, the peercred addon) — the version in the answer must match; `build.json`; `rename(.staging-…, Versions/<version>)` | child process, log `logs/hub-update-…log` | the version directory appears as a whole (rename) | `phase: failed`, `error: clone-failed / not-on-main / no-space / build-failed / verify-failed / selftest-failed / version-mismatch / commit-mismatch / build-timeout / node-missing` (if the builder did not start or was killed on deadline, the daemon writes the reason line to the log: "Show log" leads to the file), journal `hub-update-failed`, push; the live hub is untouched; the directory of a version that failed is deleted |
 | 3 | The daemon re-verifies the finished version itself: the expected cdhash and commit come **from the builder's answer** (the child process's stdout), not from `build.json` in the same writable directory; `build.json` and the cdhash of the bundle on disk (an asynchronous `codesign`, the daemon's event loop does not stall) must match it; the hub pause | daemon | — | as in step 2 |
 | 3a | **Someone is waiting for an answer**: the hub's PermissionRequest cards (a restart removes them — the questions fall back to the regular terminal dialog) or sessions waiting for an answer (a restart will not touch them, but interrupting is not nice): no switch, `phase: ready`, `install.waitingCards` / `waitingSessions`, event `hub-update.ready {waiting, notify}`; popover — "Hub X is built" · "Waiting for an answer: N — the restart will remove their cards" (sessions only — "Sessions waiting for an answer: N — better answer first") · "Restart" (`POST /hub-update/switch`: re-verify the bundle and the pause, then step 4). In `ready`, installing the same version and rolling back give `409 hub-update:ready` (a built and verified version is never silently thrown away); the shell hides "Update to X" and disables "Roll back". The first time for this version (`HubUpdate/check.json → readyNotified`, survives daemon restarts and repeated "Update"; installation only, not rollback) — one push notification "A new Agent Hub version is built — waiting for restart" (decision 2026-11-07). A daemon restart in `ready` — `failed: interrupted` (build again) | daemon + shell | — | — |
 | 4 | `install.json` ← `phase: switching` **together** with the snapshot `prev = {requirement, appPin, current, previous}` and `restorePin` — as one write, before the app leaves. If it is not written, the switch does not start (`failed: state-write`) | daemon | tmp + rename | — |
@@ -207,7 +209,7 @@ the journal and the audit log; if the daemon is alive, the CLI waits up to 5 s f
 - The daemon drops AgentHub.app connections when the pin changes — by then the old app has already quit.
 - **Hub pause** blocks starting an installation or rollback (`423`) and the switch (step 3: built, but paused — no
   switch, `failed: estop`, the built version is deleted together with the failed installation; after the pause is lifted
-  "Update" builds it again — another 2–5 min). The same if the pause was set while the app was leaving before the
+  "Update" builds it again — under a minute with the build cache). The same if the pause was set while the app was leaving before the
   switch.
 - **Permissions**: `install`, `rollback`, `check`, `PUT /settings/hub-updates` — `app` only; reading — `app` and `cli`.
 
@@ -542,11 +544,41 @@ git push origin main v0.2.0
 ```
 
 The hub sees the tag on the next check (≤ 6 h) or on "Check now", shows "A new hub version is available: 0.2.0" and
-installs it on "Update". If a tag was already published with a mistake, do not rewrite it — release `v0.2.1` instead.
+installs it on "Update". Hubs that update in the first minutes after the push, before the release job (§9a) has
+uploaded the app, build it locally. If a tag was already published with a mistake, do not rewrite it — release `v0.2.1` instead.
 
 Then the Homebrew formula (§8b), in `KenseiTheOne/homebrew-tap`: `url` = `…/archive/refs/tags/v0.2.0.tar.gz` and its
 `sha256` (`curl -fsSL <url> | shasum -a 256`) in `Formula/agent-hub.rb`, `brew audit --strict --formula KenseiTheOne/tap/agent-hub`,
 commit and push the tap. Brew-managed hubs see the version after `brew upgrade agent-hub`.
+
+## 9a. Prebuilt app from CI
+
+The tag push starts `.github/workflows/release-app.yml` on a GitHub macOS runner (arm64, the newest Xcode of the image):
+`build-release.sh` with `AGENTHUB_PREBUILT=0` (from source), `ditto -c -k` into `AgentHub-<version>.zip`, then
+`scripts/prebuilt.mjs manifest` writes `AgentHub-<version>.json` — `{format, version, commit, sha256 of the zip, cdhash,
+identifier, builtAt}`. `prebuilt.mjs verify-local` runs the hub's checks on these files; the release of the tag is created
+as a draft (notes from the tag message), the two files are attached, then it is published.
+
+On an update `build-release.sh` of the new tag calls `prebuilt.mjs fetch --out <staging>`: it downloads the manifest from
+`https://github.com/KenseiTheOne/agent-hub/releases/download/v<version>/`, requires its version = `VERSION` and its commit
+= `git rev-parse HEAD` of the sources (the tag the builder has already checked: on main, VERSION), downloads the zip
+(≤ 300 MB, 10 min), compares its sha256, unpacks it with `ditto -x -k` and compares the app's cdhash
+(`codesign --verify --strict`, `-dvvv`). Then the builder's usual checks run on it as on a local build: signature,
+identifier, cdhash pinning, self-test. Node's `fetch` sets no quarantine attribute, so Gatekeeper does not ask anything.
+
+**Trust.** The files come over HTTPS from this repository's release. The repository has *release immutability* on
+(Settings → General → Releases): once published, a release's assets and its tag cannot be changed, so a release cannot
+be swapped after hubs saw it. There is deliberately no signing key: its public half would live in this same repository,
+and anyone who can change releases could replace it too — a key would protect nothing that repository access does not.
+
+Anything wrong — offline, the release job not finished yet, a fork's tag (no such release), another commit or version,
+a swapped file — prints `prebuilt app not used: <reason> — building locally` and the local swift build follows, as
+before. `AGENTHUB_PREBUILT=0` turns the download off; `AGENTHUB_PREBUILT_BASE=<url>` takes the files from another place
+(tests). Brew installs (§8b) have no git commit and always build locally. The app is arm64-only (the runner's
+architecture); on an Intel Mac `prebuilt.mjs` skips the download and the app is built locally.
+
+**Older hubs get it too**: every hub builds a new version by running the *new* tag's `build-release.sh`, so a hub of any
+earlier version downloads the prebuilt app without changes on its side.
 
 ## 10. Limits
 
@@ -557,7 +589,8 @@ commit and push the tap. Brew-managed hubs see the version after `brew upgrade a
 - After migration, a hook started with `claude --plugin-dir <working folder>/claude-plugin` is not in the new daemon's
   `peer.hookPaths` (which has `Versions/current/src/…` and the real version directory). An installed Claude Code plugin
   (`~/.claude/plugins/**`) is not affected.
-- The build runs `swift build` in the background: 2–5 min of CPU; meanwhile the daemon and the app work as usual.
+- Without a prebuilt app (§9a) the build runs `swift build` in the background: 2–5 min of CPU for the first build, then 20–50 s — dependencies come
+  from the shared build cache `Versions/.build-cache` (a few hundred MB); meanwhile the daemon and the app work as usual.
 - Release provenance is verified like this: the tag is exactly `vX.Y.Z`, its commit is in the history of `origin/main`,
   it is the same commit the check saw (a move only with explicit confirmation), the jump is at most one major version,
   and before building there is a confirmation window with the tag and commit. A tag signature (`git verify-tag`) is not

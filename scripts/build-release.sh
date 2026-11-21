@@ -20,5 +20,12 @@ done
 echo "==> version $(cat "$ROOT/VERSION")"
 echo "==> peercred addon"
 "$ROOT/scripts/build-native.sh"
+# The prebuilt app from the tag's GitHub release (scripts/prebuilt.mjs): signed by CI, matched to this commit by
+# version, commit, sha256 and cdhash. Hubs of any version run this script from the new tag, so all of them get it.
+# Anything wrong (offline, no release yet, a fork, a bad signature) → the local swift build below, as before.
+NODE_BIN="${NODE:-$(command -v node || true)}"
+if [ -n "$NODE_BIN" ] && env -u NODE_OPTIONS "$NODE_BIN" "$ROOT/scripts/prebuilt.mjs" fetch --out "$OUT"; then
+  exit 0
+fi
 echo "==> AgentHub.app (not pinned)"
 "$ROOT/scripts/bundle.sh" --no-pin --out "$OUT"

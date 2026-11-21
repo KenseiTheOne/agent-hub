@@ -17,7 +17,7 @@ import { cdhashRequirement, pinFingerprint, requirementSha } from "../lib/app-pi
 import { VERSION, compareVersions, isLabel, parseSemver, readVersion, tagVersion } from "../lib/version.mjs";
 import { NOTES_LIMITS, cleanNotesText, fetchTagNotes, hasUserinfo, latestRelease, listTags, parseLsRemote, parseTagNotes, redactText, redactUrl, usableOrigin } from "../lib/hub-update/remote.mjs";
 import { HubUpdateChecker, validRelease } from "../lib/hub-update/checker.mjs";
-import { buildVersion, testCodeOf } from "../lib/hub-update/build.mjs";
+import { buildCacheDir, syncPackage, buildVersion, retryJobs, testCodeOf } from "../lib/hub-update/build.mjs";
 import { readBundleCodeAsync } from "../lib/app-sign.mjs";
 import { builderArgv, relaunchPrevious } from "../lib/services/hub-update.mjs";
 import { currentLabel, hubPaths, listVersions, pinnedCdhash, previousLabel, prune, readBuild, readHistory, readLink, rememberPin, setLink, versionApp } from "../lib/hub-update/layout.mjs";
@@ -44,11 +44,16 @@ const git = (cwd, ...args) => execFileSync(GIT, ["-C", cwd, ...args], { encoding
 // ---------- release sources double ----------
 // Version tree: VERSION, scripts/build-release.sh (a swift build double: a bundle with TEST-CDHASH), daemon/bin/agenthubd
 // (a self-test double), a built-in plugin. The doubles' behavior is set by options.
-function writeTree(dir, { version, cdhash = B, buildExit = 0, selfVersion = version, selfOk = true, plugin = "v" + version } = {}) {
+function writeTree(dir, { version, cdhash = B, buildExit = 0, selfVersion = version, selfOk = true, plugin = "v" + version, cacheAware = false } = {}) {
   mkdirSync(join(dir, "scripts"), { recursive: true });
   mkdirSync(join(dir, "daemon", "bin"), { recursive: true });
   mkdirSync(join(dir, "plugins", "demo"), { recursive: true });
   writeFileSync(join(dir, "VERSION"), `${version}\n`);
+  if (cacheAware) {
+    mkdirSync(join(dir, "app", "Sources"), { recursive: true });
+    writeFileSync(join(dir, "app", "Package.swift"), "// package\n");
+    writeFileSync(join(dir, "app", "Sources", "v.swift"), `// ${version}\n`);
+  }
   writeFileSync(
     join(dir, "scripts", "build-release.sh"),
     `#!/bin/bash
@@ -56,6 +61,12 @@ set -e
 [ "$1" = "--out" ] || exit 2
 echo "двойник сборки ${version}"
 mkdir -p app/.build && echo junk > app/.build/x
+${cacheAware ? `[ -n "$AGENTHUB_SWIFT_PACKAGE" ] && [ -f "$AGENTHUB_SWIFT_PACKAGE/Package.swift" ] || exit 4
+grep -q "${version}" "$AGENTHUB_SWIFT_PACKAGE/Sources/v.swift" || exit 5
+S="$AGENTHUB_SWIFT_PACKAGE/.build"
+echo "jobs=\${AGENTHUB_SWIFT_JOBS:-none}"
+if [ -f "$S/poison" ]; then echo "испорченный кэш" >&2; exit 1; fi
+mkdir -p "$S" && echo "${version}" >> "$S/built"` : ""}
 ${buildExit ? `echo "ошибка компиляции" >&2; exit ${buildExit}` : ""}
 mkdir -p "$2/AgentHub.app/Contents/MacOS"
 printf '#!/bin/sh\\n' > "$2/AgentHub.app/Contents/MacOS/AgentHub"
@@ -515,6 +526,83 @@ test("build: each error has its own code, staging is removed, Versions/<version>
   } finally {
     cleanup(root);
   }
+});
+
+test("build: the swift build directory is shared between versions; a build that fails with it is retried from scratch with limited parallelism", async () => {
+  const root = tempHome("ah-hu-bc-");
+  const home = join(root, "home");
+  mkdirSync(home, { recursive: true });
+  try {
+    const o = originWorld(join(root, "o"));
+    const cache = buildCacheDir(home);
+    assert.equal(cache, join(home, "Versions", ".build-cache"));
+    const built = join(cache, "app", ".build", "built");
+    const build = async (v, log) => {
+      const r = o.release(v, { cacheAware: true });
+      return buildVersion({ home, label: v, version: v, source: { kind: "tag", remote: o.bare, tag: r.tag, commit: r.commit }, logPath: log, codeOf: testCodeOf });
+    };
+    await build("0.6.0", join(home, "logs", "a.log"));
+    await build("0.6.1", join(home, "logs", "b.log"));
+    assert.equal(readFileSync(built, "utf8"), "0.6.0\n0.6.1\n", "both versions built in the same directory, the cache was kept");
+    assert.match(readFileSync(join(home, "logs", "b.log"), "utf8"), /jobs=none/, "no limit on the first attempt");
+    assert.deepEqual(listVersions(home), ["0.6.1", "0.6.0"], "the cache directory is not a version");
+    // a broken cache: the first attempt fails, the cache is wiped, the retry builds from scratch with -j
+    writeFileSync(join(cache, "app", ".build", "poison"), "x");
+    const log = join(home, "logs", "c.log");
+    const b = await build("0.6.2", log);
+    assert.equal(b.ok, true);
+    const text = readFileSync(log, "utf8");
+    assert.match(text, /испорченный кэш|clearing the cache|очищаю кэш/);
+    assert.match(text, new RegExp(`jobs=${retryJobs()}`));
+    assert.ok(!existsSync(join(cache, "app", ".build", "poison")), "the cache was wiped");
+    assert.equal(readFileSync(built, "utf8"), "0.6.2\n");
+    assert.deepEqual(readdirSync(join(home, "Versions")).filter((n) => n.startsWith(".staging")), [], "no staging left");
+    // a real failure fails after the retry too
+    const r = o.release("0.6.3", { cacheAware: true, buildExit: 3 });
+    await assert.rejects(buildVersion({ home, label: "0.6.3", version: "0.6.3", source: { kind: "tag", remote: o.bare, tag: r.tag, commit: r.commit }, codeOf: testCodeOf }), (e) => e.code === "hub-update:build-failed");
+  } finally {
+    cleanup(root);
+  }
+});
+
+test("build: syncPackage rewrites only changed files, keeps .build and mtimes, removes what is gone", () => {
+  const root = tempHome("ah-hu-sp-");
+  try {
+    const a = join(root, "a");
+    const b = join(root, "b");
+    mkdirSync(join(a, "Sources", "X"), { recursive: true });
+    writeFileSync(join(a, "Package.swift"), "p1");
+    writeFileSync(join(a, "Package.resolved"), "r1");
+    writeFileSync(join(a, "Sources", "X", "x.swift"), "x1");
+    writeFileSync(join(a, "Sources", "X", "gone.swift"), "g");
+    symlinkSync("X", join(a, "Sources", "L"));
+    mkdirSync(join(a, ".build"));
+    writeFileSync(join(a, ".build", "src-junk"), "j");
+    assert.equal(syncPackage(a, b), 5);
+    assert.ok(!existsSync(join(b, ".build", "src-junk")), "the source .build is not copied");
+    mkdirSync(join(b, ".build"));
+    writeFileSync(join(b, ".build", "obj"), "o");
+    const old = new Date(Date.now() - 3600e3);
+    utimesSync(join(b, "Package.resolved"), old, old);
+    const before = lstatSync(join(b, "Package.resolved")).mtimeMs;
+    writeFileSync(join(a, "Sources", "X", "x.swift"), "x2");
+    rmSync(join(a, "Sources", "X", "gone.swift"));
+    assert.equal(syncPackage(a, b), 2, "one rewritten, one removed");
+    assert.equal(lstatSync(join(b, "Package.resolved")).mtimeMs, before, "an unchanged file keeps its mtime");
+    assert.equal(readFileSync(join(b, "Sources", "X", "x.swift"), "utf8"), "x2");
+    assert.ok(!existsSync(join(b, "Sources", "X", "gone.swift")));
+    assert.equal(readlinkSync(join(b, "Sources", "L")), "X");
+    assert.equal(readFileSync(join(b, ".build", "obj"), "utf8"), "o", "the build directory survives");
+    assert.equal(syncPackage(a, b), 0);
+  } finally {
+    cleanup(root);
+  }
+});
+
+test("build: retryJobs — half the cores, at least 2", () => {
+  assert.equal(retryJobs(1), 2);
+  assert.equal(retryJobs(10), 5);
+  assert.equal(retryJobs(16), 8);
 });
 
 // ---------- switching and file rollback ----------

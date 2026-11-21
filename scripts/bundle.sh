@@ -31,6 +31,12 @@
 # The codesign key access dialog: "Allow", not "Always Allow". No certificate — the script fails with
 # a hint and does not silently fall back to ad hoc.
 #   AGENTHUB_SIGNING_KEYCHAIN — path to the keychain (default ~/Library/Keychains/agenthub-signing.keychain-db).
+#
+# Set by the update builder (lib/hub-update/build.mjs), not needed by hand:
+#   AGENTHUB_SWIFT_PACKAGE — the swift package to build instead of app/: a copy of these sources at a fixed path that
+#                            the builder keeps between versions (only changed files are rewritten), so its .build is
+#                            reused and dependencies that did not change are not compiled again.
+#   AGENTHUB_SWIFT_JOBS    — limit on parallel compile jobs (swift build -j), for a retry after a failed build.
 set -euo pipefail
 
 IDENTITY="AgentHub Local Signing"
@@ -82,11 +88,22 @@ EOF
   fi
 fi
 
+# The native build system, not the swiftbuild default of Swift 6.4: with swiftbuild an unchanged package recompiled
+# BoringSSL (a C dependency of swift-nio-ssl) on most runs — about 70 s of a build that had nothing to do, every hub
+# update. Native: about 1 s with nothing changed, 20–45 s for a change in the hub's own modules (measured 2026-11-21).
+SWIFT_ARGS=(-c release --build-system native --package-path "${AGENTHUB_SWIFT_PACKAGE:-$APP_PKG}")
+# swift build runs with a fixed environment: a variable that differs from the previous build (one more in the
+# daemon, another PATH) made even an unchanged build take 15 s instead of 1 s.
+SWIFT_ENV=(env -i HOME="$HOME" USER="${USER:-$(id -un)}" PATH=/usr/bin:/bin:/usr/sbin:/sbin LANG=en_US.UTF-8
+  TMPDIR="${TMPDIR:-/tmp/}")
+[ -n "${DEVELOPER_DIR:-}" ] && SWIFT_ENV+=(DEVELOPER_DIR="$DEVELOPER_DIR")
 if [ "$SKIP_BUILD" = 0 ]; then
-  echo "==> swift build -c release"
-  swift build -c release --package-path "$APP_PKG"
+  JOBS=()
+  [ -n "${AGENTHUB_SWIFT_JOBS:-}" ] && JOBS=(-j "$AGENTHUB_SWIFT_JOBS")
+  echo "==> swift build ${SWIFT_ARGS[*]} ${JOBS[*]:-}"
+  "${SWIFT_ENV[@]}" swift build "${SWIFT_ARGS[@]}" ${JOBS[@]+"${JOBS[@]}"}
 fi
-BIN_DIR="$(swift build -c release --package-path "$APP_PKG" --show-bin-path)"
+BIN_DIR="$("${SWIFT_ENV[@]}" swift build "${SWIFT_ARGS[@]}" --show-bin-path)"
 [ -x "$BIN_DIR/AgentHub" ] || { echo "bundle.sh: no $BIN_DIR/AgentHub — build without --skip-build" >&2; exit 1; }
 
 APP="$OUT/AgentHub.app"

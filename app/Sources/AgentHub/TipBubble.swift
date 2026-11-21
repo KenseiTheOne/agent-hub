@@ -312,14 +312,26 @@ final class TipWindow {
         panel.invalidateShadow()
     }
 
-    /// Sizes `view` in two passes: the first finds the text column's width (its one-line width up to `maxWidth`), the
-    /// second wraps the text at that width and gives the real height. One pass measured a long sentence as one line.
+    /// Sizes `view`: finds the text column's width, then gives the card's size at it. A long sentence measured with no
+    /// width came back one line tall and was cut off when it wrapped on screen; a wrapped hint sized to its one-line
+    /// width capped at `maxWidth` kept a strip of empty card on the right (both 2026-11-21). So a text that fits on its
+    /// lines keeps its natural width; a wrapped one gets the narrowest column that wraps it into no more lines than
+    /// `maxWidth` does. The search measures with SwiftUI itself: AppKit's text metrics wrap a word or so differently.
     private static func measure(_ view: inout TipBubbleView) -> NSSize {
-        view.width = nil
-        let wide = NSHostingView(rootView: view).fittingSize
+        func size(_ w: CGFloat?) -> NSSize {
+            view.width = w
+            return NSHostingView(rootView: view).fittingSize
+        }
         let pad: CGFloat = 24 + (view.forSnapshot ? 2 * TipBubbleView.snapshotMargin : 0)
-        view.width = min(max(wide.width - pad, 1), maxWidth)
-        return NSHostingView(rootView: view).fittingSize
+        let natural = size(nil).width - pad
+        if natural < maxWidth - 0.5 { return size(ceil(natural)) }
+        let height = size(maxWidth).height
+        var lo = maxWidth / 2, hi = maxWidth
+        for _ in 0..<7 {
+            let mid = (lo + hi) / 2
+            if size(mid).height <= height + 0.5 { hi = mid } else { lo = mid }
+        }
+        return size(ceil(hi))
     }
 
     /// The blur's mask: the card's outline (the window shows nothing outside it, so its shadow follows it too).

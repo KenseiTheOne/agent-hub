@@ -13,12 +13,20 @@
 //   4. verification: bundle, signature (codesign --verify --strict, identifier com.kensei.agenthub, cdhash);
 //   5. self-test of the new daemon: `node src/daemon/bin/agenthubd --self-test` in a temporary directory — loads all
 //      core modules, brings up the socket, /health; the version in the reply = the expected one;
-//   6. build.json, src/app/.build is deleted (hundreds of MB), rename into Versions/<label>.
-// An error at any step is HubUpdateError(code); staging is deleted.
+//   6. build.json, rename into Versions/<label>.
+// The swift build is shared between versions: Versions/.build-cache/app holds a copy of src/app at a fixed path
+// (syncPackage rewrites only files whose content changed and deletes removed ones), passed to the build script as
+// AGENTHUB_SWIFT_PACKAGE. Its .build survives, so a new version compiles only the hub's changed modules, and
+// dependencies whose Package.resolved is byte-identical are taken ready (minutes → under a minute). The path must be the
+// same every time and unchanged files must keep their mtime: swift rebuilds every dependency once Package.resolved
+// looks new, and a different package path invalidates the build too (measured 2026-11-21). The cache only speeds things
+// up: if the build fails with it, it is deleted and the build runs once more from scratch, with parallelism limited
+// (AGENTHUB_SWIFT_JOBS) — a clean build used to hit the user process limit ("Resource temporarily unavailable").
+// Older versions' build scripts ignore both variables and build in src/app/.build, which is deleted after the build.
 
 import { spawn } from "node:child_process";
-import { chmodSync, closeSync, copyFileSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { chmodSync, closeSync, copyFileSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, readlinkSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync, writeSync } from "node:fs";
+import { cpus, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { APP_BUNDLE_ID, cdhashRequirement } from "../app-pin.mjs";
 import { killProcessTree, standardPath } from "../platform.mjs";
@@ -38,6 +46,59 @@ export class HubUpdateError extends Error {
 
 const MIN = 60_000;
 // minFreeBytes — how much space is needed on the Versions volume before starting (sources + swift .build — hundreds of MB).
+// Shared swift build (see the header). A dot name: prune and the version list skip it, uninstall removes it with Versions.
+export const buildCacheDir = (home) => join(hubPaths(home).versions, ".build-cache");
+
+// Make dir `to` a copy of `from` without touching files that are already identical (their mtime stays, so swift
+// sees them as unchanged). `.build` in `to` is kept; symlinks are copied as links. → number of files written or removed.
+export function syncPackage(from, to) {
+  let n = 0;
+  const walk = (a, b) => {
+    mkdirSync(b, { recursive: true, mode: 0o700 });
+    const names = readdirSync(a).filter((x) => x !== ".build");
+    const keep = new Set(names);
+    for (const x of readdirSync(b)) {
+      if (x === ".build" && b === to) continue;
+      if (!keep.has(x)) {
+        rmSync(join(b, x), { recursive: true, force: true });
+        n++;
+      }
+    }
+    for (const x of names) {
+      const pa = join(a, x);
+      const pb = join(b, x);
+      const st = lstatSync(pa);
+      let cur = null;
+      try {
+        cur = lstatSync(pb);
+      } catch {}
+      if (st.isDirectory()) {
+        if (cur && !cur.isDirectory()) rmSync(pb, { recursive: true, force: true });
+        walk(pa, pb);
+      } else if (st.isSymbolicLink()) {
+        const target = readlinkSync(pa);
+        if (cur?.isSymbolicLink() && readlinkSync(pb) === target) continue;
+        if (cur) rmSync(pb, { recursive: true, force: true });
+        symlinkSync(target, pb);
+        n++;
+      } else if (st.isFile()) {
+        const data = readFileSync(pa);
+        if (cur?.isFile() && cur.size === data.length && readFileSync(pb).equals(data)) {
+          if ((cur.mode & 0o777) !== (st.mode & 0o777)) chmodSync(pb, st.mode & 0o777);
+          continue;
+        }
+        if (cur) rmSync(pb, { recursive: true, force: true });
+        writeFileSync(pb, data, { mode: st.mode & 0o777 });
+        n++;
+      }
+    }
+  };
+  walk(from, to);
+  return n;
+}
+// Parallel compile jobs for the retry from scratch.
+export const retryJobs = (n = cpus().length) => Math.max(2, Math.floor(n / 2));
+
 export const BUILD_DEFAULTS = Object.freeze({ cloneTimeoutMs: 5 * MIN, buildTimeoutMs: 30 * MIN, selfTestTimeoutMs: MIN, minFreeBytes: 1024 ** 3, branch: "main" });
 
 // Build log: every line goes to a file (0600), steps as headings.
@@ -347,7 +408,28 @@ export async function buildVersion(opts) {
     if (!existsSync(script)) throw new HubUpdateError("hub-update:build-failed", msg("hub.detail.noBuildScript"));
     const node = opts.node || process.execPath;
     log.write(`node: ${node}`);
-    const b = await runLogged(["/bin/bash", script, "--out", staging], { cwd: src, env: buildEnv(process.env, node), log, timeoutMs: t.buildTimeoutMs });
+    const env = buildEnv(process.env, node);
+    const cache = buildCacheDir(home);
+    const pkg = join(cache, "app");
+    const prepare = () => {
+      if (!existsSync(join(src, "app", "Package.swift"))) return;
+      const n = syncPackage(join(src, "app"), pkg);
+      log.write(msg("hub.log.cacheSync", { dir: pkg, n }));
+      env.AGENTHUB_SWIFT_PACKAGE = pkg;
+    };
+    const deadline = Date.now() + t.buildTimeoutMs;
+    const run = () => runLogged(["/bin/bash", script, "--out", staging], { cwd: src, env, log, timeoutMs: Math.max(MIN, deadline - Date.now()) });
+    prepare();
+    let b = await run();
+    if (!b.timedOut && b.code !== 0) {
+      const jobs = retryJobs();
+      log.write(msg("hub.log.cacheRetry", { dir: cache, jobs }));
+      rmSync(cache, { recursive: true, force: true });
+      rmSync(join(staging, "AgentHub.app"), { recursive: true, force: true });
+      prepare();
+      env.AGENTHUB_SWIFT_JOBS = String(jobs);
+      b = await run();
+    }
     if (b.timedOut) throw new HubUpdateError("hub-update:build-timeout", msg("hub.detail.minutes", { n: Math.round(t.buildTimeoutMs / MIN) }));
     if (b.code !== 0) throw new HubUpdateError("hub-update:build-failed", `build-release.sh → ${b.code}`);
     step("verify");
@@ -355,7 +437,7 @@ export async function buildVersion(opts) {
     const code = await verifyApp(app, opts.codeOf);
     step("selftest");
     const st = await selfTest(src, { version, requireNative: Boolean(opts.requireNative), log, timeoutMs: t.selfTestTimeoutMs, node });
-    // swift build intermediate files are hundreds of megabytes; the bundle has already been copied
+    // an older build script built in src/app/.build: hundreds of megabytes, the bundle has already been copied
     rmSync(join(src, "app", ".build"), { recursive: true, force: true });
     const build = {
       ok: true,
