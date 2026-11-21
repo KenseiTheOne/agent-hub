@@ -6,7 +6,7 @@ enum PanelWindow {
     static let id = "panel"
 }
 
-/// Panel sections (Panel.dc.html): "Agents" — Sessions and plugin pages; "Hub" — Log, Plugins, Settings.
+/// Panel sections (Panel.dc.html): the untitled top list — Sessions and plugin pages; "Hub" — Log, Plugins, Settings.
 /// Session replies are built into Sessions; launching is a modal over them.
 enum PanelSection: Hashable {
     case sessions
@@ -213,7 +213,7 @@ struct Sidebar: View {
             ScrollView(.vertical) {
                 VStack(alignment: .leading, spacing: 2) {
                     let live = store.connection.isLive
-                    agentsHeader
+                    listHeader
                     if isArranging {
                         pinnedSessionsRow
                     } else {
@@ -252,7 +252,7 @@ struct Sidebar: View {
         .containerShape(RoundedRectangle(cornerRadius: PanelMetrics.cardRadius, style: .continuous))
     }
 
-    /// Plugins under "Agents": alphabetical, or in the order the human arranged (task 120); the sessions plugin has its own row.
+    /// Plugins in the top list: alphabetical, or in the order the human arranged (task 120); the sessions plugin has its own row.
     private var plugins: [PluginState] {
         store.orderedPlugins.filter { $0.id != NotifyTarget.sessionsPlugin }
     }
@@ -270,10 +270,10 @@ struct Sidebar: View {
     /// Nothing to rearrange with fewer than two plugins — the mode ends by itself.
     private var isArranging: Bool { arranging && plugins.count > 1 }
 
-    /// "Agents" with the rearrange button on the right; in the mode — "Done".
-    private var agentsHeader: some View {
+    /// The top list has no title (task 128: it holds plugins, not only agents, and "Plugins" is the catalog under "Hub");
+    /// only the rearrange button on the right; in the mode — "Done".
+    private var listHeader: some View {
         HStack(spacing: 4) {
-            Text(tr("Агенты", "Agents")).font(.system(size: 11, weight: .semibold)).foregroundStyle(.white.opacity(0.45))
             Spacer(minLength: 4)
             if plugins.count > 1 {
                 Button { arranging = !isArranging; dropTarget = nil } label: {

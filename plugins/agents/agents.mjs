@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 // <agenthub.title>Claude Code Фоновые агенты</agenthub.title>
 // <agenthub.title lang="en">Claude Code Background Agents</agenthub.title>
-// <agenthub.version>1.2.2</agenthub.version>
-// <agenthub.desc>Фоновые прогоны Workflow в Claude Code: что идёт, что упало, сколько потрачено</agenthub.desc>
-// <agenthub.desc lang="en">Claude Code Workflow runs in the background: what's running, what failed, what it cost</agenthub.desc>
+// <agenthub.version>1.3.0</agenthub.version>
+// <agenthub.desc>Фоновые агенты и прогоны Workflow в Claude Code: что идёт, что упало, сколько потрачено</agenthub.desc>
+// <agenthub.desc lang="en">Claude Code background agents and Workflow runs: what's running, what failed, what it cost</agenthub.desc>
 // <agenthub.status value="ok" label="Прогоны в порядке">Идущие и завершённые прогоны без сбоев</agenthub.status>
 // <agenthub.status value="ok" lang="en" label="Runs OK">Running and finished runs, no failures</agenthub.status>
 // <agenthub.status value="wait" label="Прогон требует внимания">Прогон упал, остановлен или остался без сессии — стоит посмотреть</agenthub.status>
@@ -17,6 +17,7 @@
 // <agenthub.fsRead>~/.claude/projects/*/*/workflows/wf_*.json — итог прогона (статус, имя, длительность)</agenthub.fsRead>
 // <agenthub.fsRead>~/.claude/projects/*/*/subagents/workflows/wf_*/journal.jsonl — старт/итог агентов (только тип, agentId, phase)</agenthub.fsRead>
 // <agenthub.fsRead>~/.claude/projects/*/*/subagents/workflows/wf_*/agent-*.jsonl — только usage, requestId, message.id</agenthub.fsRead>
+// <agenthub.fsRead>~/.claude/projects/*/*/subagents/agent-*.meta.json — агенты сессий (Agent): только description, finished; у agent-*.jsonl — только время изменения</agenthub.fsRead>
 // <agenthub.fsRead>~/.claude/sessions/*.json — жива ли сессия, запустившая прогон: pid, procStart, sessionId, cwd, name (без *.key)</agenthub.fsRead>
 // <agenthub.fsRead>~/.cmuxterm/claude-hook-sessions.json — вкладка cmux сессии (только sessionId, surfaceId, workspaceId)</agenthub.fsRead>
 // <agenthub.exec>/bin/ps -o pid=,lstart= -p <pid,…> (TZ=UTC) — время старта процесса сессии: pid не занят другим процессом (только macOS)</agenthub.exec>
@@ -273,6 +274,7 @@ function safeReaddir(p) {
 }
 
 const RUN_RE = /^wf_[\w-]{1,64}$/;
+const AGENT_META_RE = /^agent-[\w-]{1,80}\.meta\.json$/;
 
 export class Tracker {
   constructor({ home = homedir(), now = () => Date.now(), alive = pidsAlive, cachePath = null, lang = envLang(), readBudget = READ_BUDGET } = {}) {
@@ -284,6 +286,7 @@ export class Tracker {
     this.now = now;
     this.alive = alive;
     this.runs = new Map();
+    this.agents = new Map(); // a session's own agents (the Agent tool): meta path → SubAgent
     this.sessions = new Map(); // sessionId → { pid, cwd, name, alive }
     this.sessionsAt = 0;
     this.broken = [];
@@ -323,6 +326,7 @@ export class Tracker {
       for (const s of safeReaddir(pdir)) {
         if (s.startsWith(".") || s.endsWith(".jsonl")) continue;
         const sdir = join(pdir, s);
+        this.discoverAgents(p, s, sdir, now, seen);
         const found = new Map();
         for (const name of safeReaddir(join(sdir, "subagents", "workflows"))) {
           if (!RUN_RE.test(name)) continue;
@@ -359,7 +363,51 @@ export class Tracker {
     }
     // files disappeared or the run is older than the window — forget it
     for (const [key, r] of this.runs) if (!seen.has(key) || now - r.lastActivityMs > WINDOW_MS) this.runs.delete(key);
+    for (const [key, a] of this.agents) if (!seen.has(key) || now - a.lastActivityMs > WINDOW_MS) this.agents.delete(key);
     return seen;
+  }
+
+  // A session's own agents (the Agent tool, 2026-11-21): Claude Code keeps subagents/agent-<id>.meta.json beside the
+  // transcript and adds "finished": true when the agent ends. Without them a session running five background agents
+  // showed "No background runs". Workflow agents live in subagents/workflows/ and are counted by their run.
+  discoverAgents(project, sessionId, sdir, now, seen) {
+    const dir = join(sdir, "subagents");
+    for (const f of safeReaddir(dir)) {
+      if (!AGENT_META_RE.test(f)) continue;
+      const metaPath = join(dir, f);
+      const tst = safeStat(metaPath.slice(0, -".meta.json".length) + ".jsonl");
+      const mst = safeStat(metaPath);
+      if (!mst) continue;
+      const last = Math.max(mst.mtimeMs, tst?.mtimeMs || 0);
+      const key = `agent:${metaPath}`;
+      let a = this.agents.get(key);
+      if (!a && now - last > WINDOW_MS) continue;
+      seen.add(key);
+      if (!a) {
+        a = { key, project, sessionId, metaPath, startedMs: mst.birthtimeMs || mst.ctimeMs || null, lastActivityMs: last, sig: null, finished: false, description: null };
+        this.agents.set(key, a);
+      }
+      a.lastActivityMs = Math.max(a.lastActivityMs, last);
+      const sig = `${mst.mtimeMs}:${mst.size}`;
+      if (sig === a.sig) continue;
+      a.sig = sig;
+      try {
+        const o = JSON.parse(readFileSync(metaPath, "utf8"));
+        a.finished = o?.finished === true;
+        a.description = typeof o?.description === "string" && o.description.trim() ? clean(o.description).slice(0, 80) : null;
+      } catch {
+        // written mid-way — read again on the next change
+        a.sig = null;
+      }
+    }
+  }
+
+  // An agent is working: not finished, and its session is alive or it wrote something in the last 2 min. Unfinished
+  // with a dead session and no writes — the session was closed mid-agent: it is not shown as working.
+  agentRunning(a) {
+    if (a.finished) return false;
+    const sess = this.sessions.get(a.sessionId);
+    return !!sess?.alive || this.now() - a.lastActivityMs < ACTIVE_QUIET_MS;
   }
 
   refreshSessions(force = false) {
@@ -540,6 +588,8 @@ export class Tracker {
     const order = { running: 0, orphaned: 1, failed: 2, completed: 3 };
     views.sort((a, b) => order[a.state] - order[b.state] || b.r.lastActivityMs - a.r.lastActivityMs);
     const running = views.filter((v) => v.state === "running");
+    const agentsNow = [...this.agents.values()].filter((a) => this.agentRunning(a)).sort((a, b) => (a.startedMs || 0) - (b.startedMs || 0));
+    const agentsDone = [...this.agents.values()].filter((a) => a.finished).length;
     const bad = views.filter((v) => v.state === "failed" || v.state === "orphaned");
     const en = this.lang === "en";
     const BROKEN = en ? { "no-status": "no status", "bad-json": "not JSON", unreadable: "can't be read" } : { "no-status": "нет status", "bad-json": "не JSON", unreadable: "не читается" };
@@ -561,20 +611,27 @@ export class Tracker {
       if (bad.every((x) => x.state === "orphaned")) tile = en ? `${bad.length} lost` : `${bad.length} без сессии`;
       // the tile is short: the sidebar badge holds 6 chars (SidebarBadgeText), it truncated the Russian "1 stopped" to "1 st…"
       else if (bad.every(killed)) tile = en ? `${bad.length} stop` : `${bad.length} стоп`;
-    } else if (running.length) {
-      const ph = running[0].curPhase ? clean(running[0].curPhase) : null;
+    } else if (running.length || agentsNow.length) {
+      const ph = running[0]?.curPhase ? clean(running[0].curPhase) : null;
       const n = running.length;
-      title = en ? `${n} ${plEn(n, "run", "runs")} in progress${ph && n === 1 ? ` · ${ph} phase` : ""}` : `${n} ${plural(n, "прогон идёт", "прогона идут", "прогонов идут")}${ph && n === 1 ? ` · фаза ${ph}` : ""}`;
-      tile = en ? `${n} running` : `${n} ${plural(n, "идёт", "идут", "идут")}`;
+      const m = agentsNow.length;
+      const runsPart = n ? (en ? `${n} ${plEn(n, "run", "runs")} in progress${ph && n === 1 ? ` · ${ph} phase` : ""}` : `${n} ${plural(n, "прогон идёт", "прогона идут", "прогонов идут")}${ph && n === 1 ? ` · фаза ${ph}` : ""}`) : null;
+      const agentsPart = m ? (en ? `${m} ${plEn(m, "agent", "agents")} working` : `${m} ${plural(m, "агент работает", "агента работают", "агентов работают")}`) : null;
+      title = [agentsPart, runsPart].filter(Boolean).join(" · ");
+      tile = en ? `${n + m} running` : `${n + m} ${plural(n + m, "идёт", "идут", "идут")}`;
     } else {
-      title = en ? "No background runs — nothing to do" : "Фоновых прогонов нет — делать ничего не нужно";
+      title = en ? "No background agents or runs — nothing to do" : "Фоновых агентов и прогонов нет — делать ничего не нужно";
       // "0 runs", not a bare "none": next to the tile label "none / Agents" it would read like a refusal
       tile = en ? "0 runs" : "0 прогонов";
     }
     if (broken.length && status === "ok") status = "unknown";
     // activity= — for the hub's "is it safe to shut down" verdict: running runs (empty — no runs, quiet)
     let activity = "";
-    if (running.length) {
+    const agentNames = (list) => list.slice(0, 3).map((a) => a.description || (en ? "agent" : "агент")).join(", ") + (list.length > 3 ? (en ? `, ${list.length - 3} more` : `, ещё ${list.length - 3}`) : "");
+    if (agentsNow.length && !running.length) {
+      const m = agentsNow.length;
+      activity = en ? `${m} ${plEn(m, "agent", "agents")} working: ${agentNames(agentsNow)}` : `${m} ${plural(m, "агент работает", "агента работают", "агентов работают")}: ${agentNames(agentsNow)}`;
+    } else if (running.length) {
       const v0 = running[0];
       const since = v0.r.final?.startTime || v0.r.startedMs || v0.r.firstSeenMs;
       const dur = Number.isFinite(since) && since > 0 ? fmtDur(Math.max(0, now - since), this.lang) : null;
@@ -583,16 +640,20 @@ export class Tracker {
         const nm = running.slice(0, 3).map((v) => clean(v.name)).join(", ") + (running.length > 3 ? (en ? `, ${running.length - 3} more` : `, ещё ${running.length - 3}`) : "");
         activity = en ? `${running.length} runs in progress: ${nm}` : `${running.length} ${plural(running.length, "прогон идёт", "прогона идут", "прогонов идут")}: ${nm}`;
       }
+      if (agentsNow.length) activity += en ? ` · ${agentsNow.length} ${plEn(agentsNow.length, "agent", "agents")} working` : ` · агентов работает: ${agentsNow.length}`;
     }
     // tileLabel — the popover tile label: "Claude Code Background Agents" does not fit in the tile (~110 pt, one line)
-    const head = line(title, { status, tile, tileLabel: TILE_LABEL(this.lang), sfimage: running.length ? "gearshape.2" : bad.length ? "exclamationmark.triangle" : "gearshape", activity });
+    const head = line(title, { status, tile, tileLabel: TILE_LABEL(this.lang), sfimage: running.length || agentsNow.length ? "gearshape.2" : bad.length ? "exclamationmark.triangle" : "gearshape", activity });
     const out = [activity ? head : `${head} activity=""`];
     if (running.length) {
       const sum = running.reduce((a, v) => a + v.r.spend.read, 0);
       out.push(line(en ? `Used ≈${fmtTokens(sum, "en")} tokens` : `Потрачено ≈${fmtTokens(sum)} токенов`, { color: "gray" }));
     }
     out.push("---");
-    if (!views.length) out.push(line(en ? "No runs in the last 12 h" : "За 12 ч прогонов не было", { color: "gray" }));
+    for (const a of agentsNow.slice(0, MAX_SHOWN)) out.push(...this.renderAgent(a, now));
+    if (agentsNow.length > MAX_SHOWN) out.push(line(en ? `…and ${agentsNow.length - MAX_SHOWN} more agents` : `…и ещё агентов: ${agentsNow.length - MAX_SHOWN}`, { color: "gray" }));
+    if (agentsDone) out.push(line(en ? `Agents finished in the last 12 h: ${agentsDone}` : `Агентов завершено за 12 ч: ${agentsDone}`, { color: "gray", sfimage: "checkmark.circle" }));
+    if (!views.length) out.push(line(en ? "No Workflow runs in the last 12 h" : "За 12 ч прогонов Workflow не было", { color: "gray" }));
     for (const v of views.slice(0, MAX_SHOWN)) out.push(...this.renderRun(v, now));
     if (views.length > MAX_SHOWN) out.push(line(en ? `…and ${views.length - MAX_SHOWN} more` : `…и ещё ${views.length - MAX_SHOWN}`, { color: "gray" }));
     if (broken.length) {
@@ -601,6 +662,20 @@ export class Tracker {
       for (const b of broken.slice(0, 3)) out.push(line(`--${clean(b)}`, { color: "gray" }));
     }
     return out.join("\n");
+  }
+
+  renderAgent(a, now) {
+    const en = this.lang === "en";
+    const L = this.lang;
+    const sess = this.sessions.get(a.sessionId) || null;
+    const name = a.description || (en ? "Agent" : "Агент");
+    const dur = a.startedMs ? fmtDur(Math.max(0, now - a.startedMs), L) : null;
+    const out = [line(en ? `${name} — working${dur ? `, ${dur}` : ""}` : `${name} — работает${dur ? `, ${dur}` : ""}`, { sfimage: "play.circle" })];
+    const sname = sess?.name || projectLabel(a.project, sess?.cwd) || a.sessionId.slice(0, 8);
+    out.push(line(en ? `--Session "${clean(sname)}"` : `--Сессия «${clean(sname)}»`, { color: "gray" }));
+    const surf = this.surfaces?.get(a.sessionId);
+    if (surf) out.push(line(en ? "--Switch to the session's tab" : "--Перейти во вкладку сессии", { effect: `cmux.focus ${surf.surfaceId} workspaceId=${surf.workspaceId}` }));
+    return out;
   }
 
   renderRun(v, now) {

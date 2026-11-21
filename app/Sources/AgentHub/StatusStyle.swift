@@ -328,6 +328,16 @@ struct PillStyle: ButtonStyle {
 }
 
 /// Hub pause (internal name — estop): what exactly gets turned off. A hint at the button and in the banner.
+var restartHubHelp: String {
+    tr("Перезапустить хаб: служба и приложение закроются и откроются снова. Если что-то показывается не так",
+       "Restart the hub: the service and the app close and open again. For when something looks wrong")
+}
+
+/// "Restart hub" (popover header, icon menu): starts the restart and quits; the app comes back by itself.
+@MainActor func restartHub(_ store: HubStore) {
+    if store.restartHub(appPath: Bundle.main.bundlePath) { NSApp.terminate(nil) }
+}
+
 var pauseHubHelp: String {
     tr("Пауза хаба выключает: ответы сессиям из хаба, запуск, прерывание и остановку сессий, переход во вкладки, кнопки действий плагинов, установку и обновление плагинов. Работают: статусы, уведомления, открытие ссылок и файлов. Сами сессии не останавливаются: они спрашивают в терминале.",
        "Pausing the hub turns off: replying to sessions from the hub, launching, interrupting and stopping sessions, switching to tabs, plugin action buttons and installing or updating plugins. Still working: statuses, notifications, opening links and files. Sessions themselves keep running and ask in the terminal.")

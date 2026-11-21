@@ -4,6 +4,33 @@ Releases are git tags `vX.Y.Z` (also published as GitHub releases); the current 
 The plugin contract has its own version history in
 [`docs/extension-points.md`](docs/extension-points.md#contract-versions).
 
+## 0.1.10 — 2026-11-21
+
+### Added
+
+- **Restart hub.** A round button in the popover header (and an item in the icon's right-click menu) restarts the
+  hub service and the app — for when something looks wrong.
+
+### Changed
+
+- **A hint follows the pointer.** Outside charts the card sits just under the mouse pointer and moves with it while
+  the pointer stays on the element. A chart bar's card still stands above its bar. The contract notes where each kind
+  of hint appears.
+- **The top list has no title.** It was called "Agents", but it holds every plugin's page (quota, spend, settings and
+  others), and "Plugins" is the catalog under "Hub". Only the rearrange button stays above it.
+
+### Fixed
+
+- **A hint no longer stays behind.** When the panel redrew under a still pointer, a row's hint card missed the pointer
+  leaving and stayed up until another hint replaced it. The card now hides as soon as the pointer is off its element.
+- **A hint in the window stands at its own row.** In the window's sidebar a row's hint area was measured down to the
+  bottom of the column, so the card could appear rows away from the pointer.
+- **Background agents are counted again.** The Agents page and tile counted only Workflow runs, so while sessions ran
+  background agents (the Agent tool) they said "No background runs". Now each working agent is listed with its task,
+  session and time, and agents finished in the last 12 h are counted.
+- **The menu bar shows the waiting count again.** After hovering a hint in the window, the text of that hint could
+  appear beside the hub icon in the menu bar instead of the number of sessions waiting for you.
+
 ## 0.1.9 — 2026-11-21
 
 ### Changed

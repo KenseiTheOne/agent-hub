@@ -147,7 +147,7 @@ test("running workflow: phase, agents, spend matches the manual count", () => {
     assert.equal(run.spend.requests, manual.requests);
     assert.equal(parsed.status, "ok");
     assert.deepEqual(parsed.events, []);
-    const title = parsed.body[0].title;
+    const title = parsed.body.find((b) => b.title.startsWith("demo-flow")).title;
     assert.match(title, /^demo-flow — идёт, фаза Build/);
     // activity= for the hub's "safe to shut down?" verdict: a running workflow and how long it has been running
     assert.equal(parsed.activity.length, 1);
@@ -248,7 +248,7 @@ test("orphaned workflow: no result, no session, quiet > 5 min → wf-orphaned; w
     tr = new Tracker({ home });
     parsed = check(tr.tick({ discover: true }));
     assert.deepEqual(parsed.events, []);
-    assert.match(parsed.body[0].title, /идёт/);
+    assert.ok(parsed.body.some((b) => /^demo-flow — идёт/.test(b.title)));
   } finally {
     rmSync(home, { recursive: true, force: true });
   }
@@ -259,7 +259,7 @@ test("workflows older than 12 h aren't shown; broken result → source-broken", 
   try {
     makeRun(home, "wf_old-0001", { final: "wf_completed.json", ageMs: 13 * 3600_000 });
     let parsed = check(new Tracker({ home }).tick({ discover: true }));
-    assert.match(parsed.header[0].title, /^Фоновых прогонов нет/);
+    assert.match(parsed.header[0].title, /^Фоновых агентов и прогонов нет/);
     const { sdir } = makeRun(home, "wf_bad-0001", { final: "wf_completed.json" });
     writeFileSync(join(sdir, "workflows", "wf_bad-0001.json"), "{не json");
     parsed = check(new Tracker({ home }).tick({ discover: true }));
@@ -439,6 +439,34 @@ test("broken result in English: details — in English", () => {
     const ru = new Tracker({ home }).tick({ discover: true });
     assert.match(ru, /wf_bad-0002\.json: не JSON/);
     assert.match(ru, /wf_bad-0003\.json: нет status/);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("a session's own background agents: an unfinished one counts as working, a finished one doesn't", () => {
+  const home = tempHome("ah-ag-");
+  try {
+    const dir = join(home, ".claude", "projects", PROJ, SID, "subagents");
+    mkdirSync(dir, { recursive: true });
+    const meta = { agentType: "general-purpose", description: "Review lens: demo", requestShape: "background" };
+    writeFileSync(join(dir, "agent-b1.meta.json"), JSON.stringify(meta));
+    writeFileSync(join(dir, "agent-b1.jsonl"), "");
+    writeFileSync(join(dir, "agent-b2.meta.json"), JSON.stringify({ ...meta, description: "Old one", finished: true }));
+    liveSession(home);
+    const tr = new Tracker({ home });
+    let parsed = check(tr.tick({ discover: true }));
+    // the session's own work is the Sessions tile's business: only the background agent counts here
+    assert.match(parsed.header[0].title, /^1 агент работает$/);
+    assert.equal(parsed.header[0].params.tile, "1 идёт");
+    assert.match(parsed.activity[0], /^1 агент работает: Review lens: demo$/);
+    assert.ok(parsed.body.some((b) => /^Review lens: demo — работает/.test(b.title)));
+    assert.ok(parsed.body.some((b) => /Агентов завершено за 12 ч: 1/.test(b.title)));
+    // the agent ends: Claude Code adds "finished": true
+    writeFileSync(join(dir, "agent-b1.meta.json"), JSON.stringify({ ...meta, finished: true, extra: 1 }));
+    parsed = check(tr.tick({ discover: true }));
+    assert.match(parsed.header[0].title, /^Фоновых агентов и прогонов нет/);
+    assert.ok(parsed.body.some((b) => /Агентов завершено за 12 ч: 2/.test(b.title)));
   } finally {
     rmSync(home, { recursive: true, force: true });
   }

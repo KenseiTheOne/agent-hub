@@ -875,6 +875,12 @@ unescaped. Parameters:
 | `until=<ISO-8601>` | hub 0.1.3, first header line: a countdown the app runs itself in the tile and the page header (`mm:ss`, from an hour `h:mm:ss`, stops at `00:00`); give a time zone; unparsable — ignored; keep a `tile=` for older hubs |
 | anything else (`color`, `iconColor`, `sfimage`, `badge`, `badgeColor`, `link`, `tooltip`, `font`, `size`, …) | styling, passed as is in `params`. The panel uses: `color` (title and icon, on every nesting level), `iconColor` (icon only), `badgeColor` (badge tint), `link=true` (an offer line drawn as a text link, not a capsule; same gate and confirmation), `font=mono` (hub 0.1.3: the title in a monospaced font; other `font=` values are ignored). Older hubs ignore keys they do not know — no contract bump (contract 3) |
 
+**Where a hover hint appears (hub 0.1.10).** The plugin only supplies the text; the hub picks the place from the kind of
+element, so there is no key for it. A bar of `chart=bars` (`tips=`) — the card stands above that bar with a pointer
+toward it, so the reader sees which bar it is about. Everything else (`tooltip=`, a truncated title or status, a
+disabled button's reason, the sidebar status line) — the card sits just under the mouse pointer and follows it while
+the pointer stays on the element. Write hint texts that read on their own; keep long ones to a couple of sentences.
+
 A non-zero exit code → status `error` (the output items are kept) and the `plugin-error` event. A standard timeout
 (5 s) → the whole process group is killed, `error: "timeout"`. More than 1 MB of output → `output-too-large`.
 

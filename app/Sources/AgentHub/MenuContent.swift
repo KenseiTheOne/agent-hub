@@ -27,7 +27,8 @@ struct MenuBarLabel: View {
             if let t = look.labelText(test: store.testMark != nil) { Text(t).monospacedDigit() }
         }
         .accessibilityLabel(tip)
-        .tip(tip)
+        // no `.tip` here: a hover view inside a MenuBarExtra label made the menu bar item grow and show the hub's
+        // current hint card text beside the icon (2026-11-21); the button's own AppKit tooltip is set below
         .onChange(of: tip, initial: true) { _, t in StatusItemTip.set(t) }
         .task {
             // openWindow exists only on a scene's view — hand it to the router (notifications, popover)
@@ -150,6 +151,18 @@ struct PopoverView: View {
                 Text(updatedText).font(.system(size: 11)).foregroundStyle(.white.opacity(0.55))
             }
             Spacer()
+            if store.canRestartHub {
+                Button { restartHub(store) } label: {
+                    Image(systemName: "arrow.clockwise")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(.white)
+                        .frame(width: 28, height: 28)
+                        .background(Circle().fill(Color.white.opacity(0.10)))
+                }
+                .buttonStyle(.plain)
+                .tip(restartHubHelp)
+                .accessibilityLabel(tr("Перезапустить хаб", "Restart hub"))
+            }
             // Settings — an ordinary button of its own: the menu on the right opens only on press-and-hold, and
             // nobody finds a hold on their own
             Button { router.open(.settings) } label: {

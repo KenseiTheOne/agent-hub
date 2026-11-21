@@ -585,7 +585,7 @@ final class AppModel {
             for t in tips { print("tooltip=\(Int(t.rect.minX)),\(Int(view.bounds.height - t.rect.maxY)),\(Int(t.rect.width)),\(Int(t.rect.height)) \(t.text)") }
             // the first left to right, top to bottom: for identical texts this picks the sidebar item where the line is truncated
             let ordered = tips.sorted { ($0.rect.minX, -$0.rect.maxY) < ($1.rect.minX, -$1.rect.maxY) }
-            if let hit = ordered.first(where: { $0.text.contains(probe) }), let img = TooltipProbe.render(hit.text, above: hit.above) {
+            if let hit = ordered.first(where: { $0.text.contains(probe) }), let img = TooltipProbe.render(hit.text, arrow: hit.arrow) {
                 let size = view.bounds.size
                 let k = CGFloat(rep.pixelsWide) / max(size.width, 1)
                 let canvas = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: rep.pixelsWide, pixelsHigh: rep.pixelsHigh, bitsPerSample: 8,
@@ -595,11 +595,13 @@ final class AppModel {
                     NSGraphicsContext.saveGraphicsState()
                     NSGraphicsContext.current = ctx
                     rep.draw(in: NSRect(x: 0, y: 0, width: CGFloat(rep.pixelsWide), height: CGFloat(rep.pixelsHigh)))
-                    // as `TipWindow` places it: centered above a bar column, or like at a pointer slightly right of the
-                    // element's start and below it
+                    // as `TipWindow` places it: centered above a bar column, or like at a pointer slightly right of the element's start and below it
                     let m = TipBubbleView.snapshotMargin
-                    var origin = hit.above ? NSPoint(x: hit.rect.midX - img.size.width / 2, y: hit.rect.maxY + 2 - m)
-                                           : NSPoint(x: hit.rect.minX + 14 - m, y: hit.rect.minY - img.size.height - 2 + m)
+                    var origin: NSPoint
+                    switch hit.arrow {
+                    case .bottom: origin = NSPoint(x: hit.rect.midX - img.size.width / 2, y: hit.rect.maxY + 2 - m)
+                    default: origin = NSPoint(x: hit.rect.minX + 14 - m, y: hit.rect.minY - img.size.height - 2 + m)
+                    }
                     origin.x = min(origin.x, size.width - img.size.width - 4)
                     origin.y = max(origin.y, 4)
                     let box = NSRect(x: origin.x * k, y: origin.y * k, width: img.size.width * k, height: img.size.height * k)

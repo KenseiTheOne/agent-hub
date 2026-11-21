@@ -315,3 +315,25 @@ final class KickstartedDaemon: @unchecked Sendable {
     d.shutdown()
     #expect(!DaemonProbe.listening(d.path))
 }
+
+@MainActor @Test func restartHubRestartsTheJobAndReopensTheApp() {
+    let store = HubStore(client: HubClient(socketPath: "/tmp/none.sock"))
+    var seen: [String] = []
+    // no starter (test copy, preview) — nothing happens
+    #expect(!store.canRestartHub)
+    #expect(!store.restartHub(appPath: "/A.app") { _, _ in Issue.record("must not launch"); return true })
+    store.daemonStarter = DaemonStarter(home: "/Users/x/.agenthub", defaultHome: "/Users/x/.agenthub", uid: 501)
+    #expect(store.canRestartHub)
+    #expect(store.restartHub(appPath: "/Apps/Agent Hub.app") { exe, args in seen = [exe] + args; return true })
+    #expect(seen.first == "/bin/sh")
+    #expect(seen.contains("gui/501/com.kensei.agenthub"))
+    #expect(seen.last == "/Apps/Agent Hub.app")
+    #expect(seen[2].contains("kickstart -k") && seen[2].contains("/usr/bin/open"))
+    // quitting for a restart skips /shutdown
+    #expect(store.hubRestarting)
+    // a failed launch leaves the app as it was
+    let other = HubStore(client: HubClient(socketPath: "/tmp/none.sock"))
+    other.daemonStarter = store.daemonStarter
+    #expect(!other.restartHub(appPath: "/A.app") { _, _ in false })
+    #expect(!other.hubRestarting)
+}

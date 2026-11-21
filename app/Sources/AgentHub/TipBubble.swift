@@ -9,11 +9,12 @@ import SwiftUI
 /// The look was chosen on a test page among five (2026-11-21): glass — the panel shows through, blurred, under a light
 /// tint; it fades in quickly and glides from bar to bar. A multi-line hint reads as a heading and details — the first
 /// line semibold, a hairline, then the rest secondary with tabular digits (chart tips are "date · total" then one line
-/// per part); a one-line hint is plain text. A card standing over a chart bar has a small pointer toward it.
+/// per part); a one-line hint is plain text. A card standing over a chart bar has a small pointer toward it; any other
+/// card follows the pointer, just below-right of it.
 struct TipBubbleView: View {
     let text: String
-    /// The pointer's x inside the card, and whether it points down (card above the bar) or up; nil — no pointer.
-    var arrow: (x: CGFloat, down: Bool)?
+    /// The card's small pointer; nil — none.
+    var arrow: TipArrow?
     /// On screen the blur comes from the window's `NSVisualEffectView` and this view only tints it; a snapshot cannot
     /// capture the blur, so there the card is filled almost solid and draws its own shadow inside a margin.
     var forSnapshot = false
@@ -41,8 +42,8 @@ struct TipBubbleView: View {
         .frame(maxWidth: TipWindow.maxWidth, alignment: .leading)
         .padding(.horizontal, 12)
         .padding(.vertical, 9)
-        .padding(.top, arrow?.down == false ? Self.arrowSize.height : 0)
-        .padding(.bottom, arrow?.down == true ? Self.arrowSize.height : 0)
+        .padding(.top, arrow?.edge == .top ? Self.arrowSize.height : 0)
+        .padding(.bottom, arrow?.edge == .bottom ? Self.arrowSize.height : 0)
         .fixedSize()
         .background(shape.fill(Color(nsColor: forSnapshot ? TipWindow.snapshotTint : TipWindow.tint)))
         .overlay(shape.stroke(Color(nsColor: TipWindow.edge), lineWidth: 0.5))
@@ -57,11 +58,18 @@ struct TipBubbleView: View {
     var shape: TipShape { TipShape(radius: Self.radius, arrow: arrow, arrowSize: Self.arrowSize) }
 }
 
-/// A rounded card, with an optional small pointer on its bottom or top edge — one outline, so the border runs around
-/// the pointer too. Also the mask of the window's blur.
+/// Where the card's pointer sits: on which edge, and how far from the card's left (clamped clear of the corners).
+struct TipArrow {
+    enum Edge { case bottom, top }
+    var edge: Edge
+    var at: CGFloat
+}
+
+/// A rounded card, with an optional small pointer on its bottom or top edge — one outline, so the border runs
+/// around the pointer too. Also the mask of the window's blur.
 struct TipShape: Shape {
     let radius: CGFloat
-    let arrow: (x: CGFloat, down: Bool)?
+    let arrow: TipArrow?
     let arrowSize: CGSize
 
     func path(in rect: CGRect) -> Path {
@@ -69,19 +77,19 @@ struct TipShape: Shape {
         guard let a = arrow else {
             return Path(roundedRect: card, cornerRadius: radius, style: .continuous)
         }
-        if a.down { card.size.height -= arrowSize.height } else { card.origin.y += arrowSize.height; card.size.height -= arrowSize.height }
+        let h = arrowSize.height, half = arrowSize.width / 2
+        switch a.edge {
+        case .bottom: card.size.height -= h
+        case .top: card.origin.y += h; card.size.height -= h
+        }
         let p = Path(roundedRect: card, cornerRadius: radius, style: .continuous)
-        let half = arrowSize.width / 2
-        let x = min(max(a.x, card.minX + radius + half), card.maxX - radius - half)
         var tip = Path()
-        if a.down {
-            tip.move(to: CGPoint(x: x - half, y: card.maxY - 0.5))
-            tip.addQuadCurve(to: CGPoint(x: x, y: rect.maxY), control: CGPoint(x: x - 1.5, y: card.maxY + 2))
-            tip.addQuadCurve(to: CGPoint(x: x + half, y: card.maxY - 0.5), control: CGPoint(x: x + 1.5, y: card.maxY + 2))
-        } else {
-            tip.move(to: CGPoint(x: x - half, y: card.minY + 0.5))
-            tip.addQuadCurve(to: CGPoint(x: x, y: rect.minY), control: CGPoint(x: x - 1.5, y: card.minY - 2))
-            tip.addQuadCurve(to: CGPoint(x: x + half, y: card.minY + 0.5), control: CGPoint(x: x + 1.5, y: card.minY - 2))
+        do {
+            let x = min(max(a.at, card.minX + radius + half), card.maxX - radius - half)
+            let (base, apex, bulge) = a.edge == .bottom ? (card.maxY - 0.5, rect.maxY, card.maxY + 2) : (card.minY + 0.5, rect.minY, card.minY - 2)
+            tip.move(to: CGPoint(x: x - half, y: base))
+            tip.addQuadCurve(to: CGPoint(x: x, y: apex), control: CGPoint(x: x - 1.5, y: bulge))
+            tip.addQuadCurve(to: CGPoint(x: x + half, y: base), control: CGPoint(x: x + 1.5, y: bulge))
         }
         tip.closeSubpath()
         return p.union(tip)
@@ -110,7 +118,8 @@ final class TipWindow {
     static let fadeIn: TimeInterval = 0.09
     static let glide: TimeInterval = 0.07
 
-    /// Where the card goes: below-right of the pointer (like a tooltip), or centered above a rectangle (a chart's bar).
+    /// Where the card goes: below-right of the pointer, following it (like a tooltip), or centered above a rectangle
+    /// (a chart's bar).
     enum Anchor {
         case pointer(NSPoint)
         case above(NSRect)
@@ -126,6 +135,12 @@ final class TipWindow {
     private var key = 0
     private var text = ""
     private var monitor: Any?
+    /// Checks the pointer while the card is up (task 128): the owner's `mouseExited` is lost when the panel redraws
+    /// under a still pointer (its tracking area is rebuilt), and the card then stayed until another hint took it.
+    private var watchdog: Timer?
+    /// Where the owner stood on screen when the card was placed; if it moves (the window slides in, the list scrolls),
+    /// the card no longer points at it.
+    private var ownerFrame: NSRect = .zero
 
     private init() {
         panel = NSPanel(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: true)
@@ -165,10 +180,15 @@ final class TipWindow {
         owner = new
         region = r
         key = k
-        guard moved else { return }
+        guard moved else {
+            if case .pointer(let pt) = anchor { follow(pt) }
+            return
+        }
         self.text = text
+        ownerFrame = Self.screenFrame(of: new) ?? .zero
         place(anchor)
         watchClicks()
+        watchPointer()
     }
 
     func hide(for v: NSView) {
@@ -181,6 +201,32 @@ final class TipWindow {
         panel.orderOut(nil)
         if let m = monitor { NSEvent.removeMonitor(m) }
         monitor = nil
+        watchdog?.invalidate()
+        watchdog = nil
+    }
+
+    /// Hides the card once the pointer is out of the owner's region or the owner has left its window.
+    private func watchPointer() {
+        guard watchdog == nil else { return }
+        let t = Timer(timeInterval: 0.1, repeats: true) { [weak self] _ in
+            guard let self else { return }
+            if self.stale(pointer: NSEvent.mouseLocation) { self.hide() }
+        }
+        RunLoop.main.add(t, forMode: .common)
+        watchdog = t
+    }
+
+    /// Whether the shown card no longer belongs under `pointer`.
+    private func stale(pointer: NSPoint) -> Bool {
+        guard let o = owner, let now = Self.screenFrame(of: o) else { return true }
+        if abs(now.minX - ownerFrame.minX) > 1 || abs(now.minY - ownerFrame.minY) > 1 { return true }
+        return !NSMouseInRect(pointer, region.insetBy(dx: -1, dy: -1), false)
+    }
+
+    /// The view's visible part on screen, or nil when it has no window.
+    private static func screenFrame(of v: NSView) -> NSRect? {
+        guard let w = v.window else { return nil }
+        return w.convertToScreen(HoverTipView.visibleFrameInWindow(v))
     }
 
     /// A click or scroll hides the card, as with a system tooltip (the element under the pointer may change or move).
@@ -192,9 +238,30 @@ final class TipWindow {
         }
     }
 
+    /// Where the card stands below-right of the pointer `pt`, kept on the screen.
+    private static func origin(below pt: NSPoint, size: NSSize, in vis: NSRect) -> NSPoint {
+        var o = NSPoint(x: pt.x + 10, y: pt.y - 22 - size.height)
+        if o.y < vis.minY + 4 { o.y = pt.y + 12 }
+        o.x = min(max(o.x, vis.minX + 4), vis.maxX - size.width - 4)
+        o.y = min(max(o.y, vis.minY + 4), vis.maxY - size.height - 4)
+        return o
+    }
+
+    /// The pointer moved within the same element: the card goes along with it, no glide (it would lag behind).
+    private func follow(_ pt: NSPoint) {
+        guard panel.isVisible else { return }
+        let vis = (NSScreen.screens.first { NSMouseInRect(pt, $0.frame, false) } ?? NSScreen.main)?.visibleFrame
+            ?? NSRect(x: -1e5, y: -1e5, width: 2e5, height: 2e5)
+        panel.setFrameOrigin(Self.origin(below: pt, size: panel.frame.size, in: vis))
+    }
+
     private func place(_ anchor: Anchor) {
-        let overBar: Bool = { if case .above = anchor { return true }; return false }()
-        host.rootView = TipBubbleView(text: text, arrow: overBar ? (0, true) : nil)
+        var view = TipBubbleView(text: text)
+        switch anchor {
+        case .pointer: break
+        case .above: view.arrow = TipArrow(edge: .bottom, at: 0)
+        }
+        host.rootView = view
         host.layoutSubtreeIfNeeded()
         let size = host.fittingSize
         let p: NSPoint
@@ -208,18 +275,18 @@ final class TipWindow {
         var down = true
         switch anchor {
         case .pointer(let pt):
-            o = NSPoint(x: pt.x + 10, y: pt.y - 22 - size.height)
-            if o.y < vis.minY + 4 { o.y = pt.y + 12 }
+            o = Self.origin(below: pt, size: size, in: vis)
         case .above(let r):
             o = NSPoint(x: r.midX - size.width / 2, y: r.maxY + 2)
             if o.y + size.height > vis.maxY - 4 { o.y = r.minY - 2 - size.height; down = false }
         }
         o.x = min(max(o.x, vis.minX + 4), vis.maxX - size.width - 4)
         o.y = min(max(o.y, vis.minY + 4), vis.maxY - size.height - 4)
-        var view = TipBubbleView(text: text)
-        if case .above(let r) = anchor {
+        switch anchor {
+        case .pointer: break
+        case .above(let r):
             // the pointer aims at the bar even when the card is pushed off-center by the screen edge
-            view.arrow = (r.midX - o.x, down)
+            view.arrow = TipArrow(edge: down ? .bottom : .top, at: r.midX - o.x)
         }
         host.rootView = view
         glass.maskImage = Self.mask(view.shape, size: size)
@@ -256,12 +323,13 @@ final class TipWindow {
 
     /// The card for `text` as an image (the snapshot stand, `--tooltip`): what `offer` shows, with the glass replaced
     /// by a near-solid tint and the shadow drawn in a margin, at the screen's scale.
-    func image(for text: String, arrowDown: Bool? = nil, scale: CGFloat = NSScreen.main?.backingScaleFactor ?? 2) -> NSImage? {
+    func image(for text: String, arrow edge: TipArrow.Edge? = nil, scale: CGFloat = NSScreen.main?.backingScaleFactor ?? 2) -> NSImage? {
         var view = TipBubbleView(text: text, forSnapshot: true)
-        if let d = arrowDown {
-            view.arrow = (0, d)
-            let w = NSHostingView(rootView: view).fittingSize.width - 2 * TipBubbleView.snapshotMargin
-            view.arrow = (w / 2, d)
+        if let e = edge {
+            view.arrow = TipArrow(edge: e, at: 0)
+            let s = NSHostingView(rootView: view).fittingSize
+            let m = 2 * TipBubbleView.snapshotMargin
+            view.arrow = TipArrow(edge: e, at: (s.width - m) / 2)
         }
         // `ImageRenderer` with an explicit scale: `cacheDisplay` rasterizes a SwiftUI view at 1x even into a 2x buffer
         let appearance = NSApp.effectiveAppearance

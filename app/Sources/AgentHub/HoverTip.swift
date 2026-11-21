@@ -38,10 +38,19 @@ final class HoverTipView: NSView {
         if window == nil { TipWindow.shared.hide(for: self) }
     }
 
+    /// The view's visible part in window coordinates. `visibleRect` alone is not enough: inside the window's sidebar
+    /// scroll view it came back stretched from the row down to the bottom of the column (2026-11-21), so the card stood
+    /// mid-column. The view's own bounds bound it.
+    static func visibleFrameInWindow(_ v: NSView) -> NSRect {
+        let whole = v.convert(v.bounds, to: nil)
+        let seen = v.convert(v.visibleRect, to: nil).intersection(whole)
+        return seen.isEmpty ? whole : seen
+    }
+
     /// The region this hint covers, on screen.
     var screenRegion: NSRect? {
         guard let w = window else { return nil }
-        return w.convertToScreen(convert(visibleRect, to: nil))
+        return w.convertToScreen(Self.visibleFrameInWindow(self))
     }
 
     private func present(force: Bool = false) {
@@ -137,16 +146,16 @@ extension View {
 /// carries, and the card (`TipWindow.image`) of the one whose text contains the fragment, placed under its element (the
 /// stand does not move the pointer). For snapshots and manual checks only.
 enum TooltipProbe {
-    /// All window hints: (frame in window coordinates, text, whether the card stands above it — a chart's bar column —
-    /// rather than at the pointer).
-    static func tips(in window: NSWindow) -> [(rect: NSRect, text: String, above: Bool)] {
+    /// All window hints: (frame in window coordinates, text, where the card's pointer is: `.bottom` — the card stands
+    /// above it (a chart's bar column), nil — at the pointer).
+    static func tips(in window: NSWindow) -> [(rect: NSRect, text: String, arrow: TipArrow.Edge?)] {
         guard let root = window.contentView?.superview ?? window.contentView else { return [] }
-        var out: [(NSRect, String, Bool)] = []
+        var out: [(NSRect, String, TipArrow.Edge?)] = []
         func walk(_ v: NSView) {
             if let h = v as? HoverTipView, let t = h.tip, !t.isEmpty {
-                out.append((h.convert(h.bounds, to: nil), t, false))
+                out.append((h.convert(h.bounds, to: nil), t, nil))
             } else if let c = v as? ChartTipsView {
-                for col in c.columns() { out.append((c.convert(c.barTop(col.bar, in: col.rect), to: nil), col.text, true)) }
+                for col in c.columns() { out.append((c.convert(c.barTop(col.bar, in: col.rect), to: nil), col.text, .bottom)) }
             }
             v.subviews.forEach(walk)
         }
@@ -154,7 +163,7 @@ enum TooltipProbe {
         return out
     }
 
-    @MainActor static func render(_ text: String, above: Bool) -> NSImage? {
-        TipWindow.shared.image(for: text, arrowDown: above ? true : nil)
+    @MainActor static func render(_ text: String, arrow: TipArrow.Edge?) -> NSImage? {
+        TipWindow.shared.image(for: text, arrow: arrow)
     }
 }

@@ -68,6 +68,31 @@ extension HubStore {
         }
     }
 
+    /// The live hub can be restarted from the app (a test copy has no launchd job).
+    public var canRestartHub: Bool { daemonStarter?.enabled == true }
+
+    /// "Restart hub": start the detached restart (`DaemonStarter.restartArguments`) and mark the quit as a restart, so
+    /// the app quits without `/shutdown` (that would stop the daemon for good instead of letting launchd bring it up).
+    /// true — started, the caller quits the app; false — nothing was done.
+    @discardableResult
+    public func restartHub(appPath: String, launch: (String, [String]) -> Bool = HubStore.launchDetached) -> Bool {
+        guard let starter = daemonStarter, starter.enabled else { return false }
+        hubRestarting = true
+        if launch("/bin/sh", starter.restartArguments(appPath: appPath)) { return true }
+        hubRestarting = false
+        return false
+    }
+
+    /// Start a process and don't wait for it: it outlives the app that started it.
+    public nonisolated static func launchDetached(_ executable: String, _ arguments: [String]) -> Bool {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: executable)
+        p.arguments = arguments
+        p.standardOutput = FileHandle.nullDevice
+        p.standardError = FileHandle.nullDevice
+        do { try p.run(); return true } catch { return false }
+    }
+
     /// Quitting the app: stop the stream and ask the daemon to exit (`POST /shutdown`) if this copy is
     /// the pinned build. We wait no longer than 2 s for the reply.
     public func shutdownDaemonOnQuit(arguments: [String] = CommandLine.arguments) async -> QuitShutdown {

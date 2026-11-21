@@ -98,6 +98,13 @@ public struct DaemonStarter: Sendable {
     /// launchd job, and a test directory has none): for the cases where the app cannot do it itself.
     public var restartCommand: String? { enabled ? "agenthub restart" : nil }
 
+    /// "Restart hub" (2026-11-21, user request: a manual way out when something looks wrong): `/bin/sh` with these
+    /// arguments restarts the launchd job (`kickstart -k` — the daemon is stopped and started again) and then opens the app
+    /// at `appPath` again. It runs detached from the app, which quits right after starting it.
+    public func restartArguments(appPath: String) -> [String] {
+        ["-c", "\(Self.launchctl) kickstart -k \"$1\"; /bin/sleep 1; /usr/bin/open \"$2\"", "agenthub-restart", service, appPath]
+    }
+
     public func start() async -> DaemonStartOutcome {
         guard enabled else { return .skipped }
         // print: is the job loaded (no — code 113 "Could not find service")

@@ -84,6 +84,7 @@ final class StatusItemMenu: NSObject, NSMenuDelegate {
         // only the pinned build can resume
         pause.isEnabled = resume ? store.canAct : store.connection.isLive
         pause.toolTip = resume ? (store.canAct ? resumeHubHelp : ActionBlock.notPinned.help) : pauseHubHelp
+        if store.canRestartHub { item(m, tr("Перезапустить хаб", "Restart hub"), #selector(restart)).toolTip = restartHubHelp }
         m.addItem(.separator())
         item(m, tr("Выйти из Agent Hub", "Quit Agent Hub"), #selector(quit))
         return m
@@ -106,6 +107,8 @@ final class StatusItemMenu: NSObject, NSMenuDelegate {
     }
 
     @objc private func quit() { NSApp.terminate(nil) }
+
+    @objc private func restart() { restartHub(store) }
 
     func menuWillOpen(_ menu: NSMenu) {
         isOpen = true
