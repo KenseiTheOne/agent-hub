@@ -881,6 +881,10 @@ toward it, so the reader sees which bar it is about. Everything else (`tooltip=`
 disabled button's reason, the sidebar status line) — the card sits just under the mouse pointer and follows it while
 the pointer stays on the element. Write hint texts that read on their own; keep long ones to a couple of sentences.
 
+**Multi-line `tooltip=` (hub 0.1.12).** `tooltip=` takes `\n` line breaks the way `tips=` does: the card shows the first
+line as a semibold heading and the rest as details. Blank lines and runs of spaces are dropped. Hubs before 0.1.12
+join the lines into one.
+
 A non-zero exit code → status `error` (the output items are kept) and the `plugin-error` event. A standard timeout
 (5 s) → the whole process group is killed, `error: "timeout"`. More than 1 MB of output → `output-too-large`.
 

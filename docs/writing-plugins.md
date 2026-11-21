@@ -422,10 +422,11 @@ and there is no key to choose:
 
 So: a hint about one data point of a chart → `tips=`; a hint about a line, a button or a status → `tooltip=`.
 
-Both cards are up to about 300 pt wide and wrap long text. A `tooltip=` is one paragraph of plain text. A `tips=`
-entry may have several lines (`\n`, printed as `\\n` inside a quoted value), and then it reads as a heading and
-details: the first line semibold, a hairline, then the rest in a secondary color with tabular digits — for example
-`"Fri Nov 6\\n$503 · 42 sessions"`. Write hints that read on their own, put the main fact first, and keep long ones to
+Both cards are up to about 300 pt wide and wrap long text. Both `tips=` entries and `tooltip=` (hub 0.1.12+) may have
+several lines (`\n`, printed as `\\n` inside a quoted value), and then the card reads as a heading and details: the
+first line semibold, a hairline, then the rest in a secondary color with tabular digits — for example
+`tooltip="Run stopped\\nexit 2 · 04:30"` or a bar's `"Fri Nov 6\\n$503 · 42 sessions"`. Blank lines are dropped;
+an older hub shows a multi-line `tooltip=` as one line. Write hints that read on their own, put the main fact first, and keep long ones to
 a couple of sentences.
 
 A layout example (the built-in `quota` and `claude-sessions` use all of these):

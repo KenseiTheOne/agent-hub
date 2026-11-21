@@ -4,6 +4,13 @@ Releases are git tags `vX.Y.Z` (also published as GitHub releases); the current 
 The plugin contract has its own version history in
 [`docs/extension-points.md`](docs/extension-points.md#contract-versions).
 
+## 0.1.12 — 2026-11-21
+
+### Added
+
+- **Multi-line `tooltip=`.** A plugin's hover hint takes `\n` line breaks like a chart's `tips=`: the first line is a
+  heading, the rest details.
+
 ## 0.1.11 — 2026-11-21
 
 ### Changed

@@ -75,6 +75,8 @@ import Testing
         #expect(PluginText.rowHelp(head) == #"Run "my-runner-public-final-cleanup" was stopped"#)
         // the plugin's own tooltip= beats the text
         #expect(PluginText.rowHelp(Item(title: "A", params: ["tooltip": "полностью"])) == "полностью")
+        // tooltip= takes \n line breaks like tips=: a heading and details; blank lines and extra spaces go
+        #expect(PluginText.rowHelp(Item(title: "A", params: ["tooltip": #"Run stopped\n  exit 2 \n\nat 04:30"#])) == "Run stopped\nexit 2\nat 04:30")
         // card: label, value, the line under it — joined with " — ", in one line
         let card = Item(title: "04:30", params: ["stat": "Следующий\nзапуск", "note": "через 2 ч"])
         #expect(PluginText.cardHelp(card) == "Следующий запуск — 04:30 — через 2 ч")

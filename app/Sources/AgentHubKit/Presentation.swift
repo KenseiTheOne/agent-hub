@@ -736,15 +736,22 @@ public struct SidebarStatus: Equatable, Sendable {
 }
 
 /// Hover tooltips on plugin texts (panel, popover): the full text of whatever may have been ellipsized.
-/// The plugin's own `tooltip=` takes precedence; otherwise — the line's parts joined with " — ", on one line; up to `SidebarStatus.helpLimit`
+/// The plugin's own `tooltip=` takes precedence (several lines allowed, `tooltipText`); otherwise — the line's parts joined with " — ", on one line; up to `SidebarStatus.helpLimit`
 /// (300) characters. Empty — nil (no tooltip).
 public enum PluginText {
     public static func help(tooltip: String? = nil, _ parts: String?...) -> String? {
         help(tooltip: tooltip, parts: parts)
     }
 
+    /// A plugin's `tooltip=` (hub 0.1.12): the two characters `\n` break the line, as in a chart's `tips=`, so a hint
+    /// can read as a heading and details (`TipBubbleView`). Each line is tidied to one line of its own; empty ones go.
+    public static func tooltipText(_ raw: String) -> String {
+        raw.replacingOccurrences(of: "\\n", with: "\n").components(separatedBy: .newlines)
+            .map(SidebarStatus.oneLine).filter { !$0.isEmpty }.joined(separator: "\n")
+    }
+
     public static func help(tooltip: String?, parts: [String?]) -> String? {
-        if let t = tooltip.map(SidebarStatus.oneLine), !t.isEmpty { return SidebarStatus.clip(t) }
+        if let t = tooltip.map(tooltipText), !t.isEmpty { return SidebarStatus.clip(t) }
         let s = parts.compactMap { $0.map(SidebarStatus.oneLine) }.filter { !$0.isEmpty }.joined(separator: " — ")
         return s.isEmpty ? nil : SidebarStatus.clip(s)
     }
