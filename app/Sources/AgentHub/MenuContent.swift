@@ -151,18 +151,6 @@ struct PopoverView: View {
                 Text(updatedText).font(.system(size: 11)).foregroundStyle(.white.opacity(0.55))
             }
             Spacer()
-            if store.canRestartHub {
-                Button { restartHub(store) } label: {
-                    Image(systemName: "arrow.clockwise")
-                        .font(.system(size: 13, weight: .medium))
-                        .foregroundStyle(.white)
-                        .frame(width: 28, height: 28)
-                        .background(Circle().fill(Color.white.opacity(0.10)))
-                }
-                .buttonStyle(.plain)
-                .tip(restartHubHelp)
-                .accessibilityLabel(tr("Перезапустить хаб", "Restart hub"))
-            }
             // Settings — an ordinary button of its own: the menu on the right opens only on press-and-hold, and
             // nobody finds a hold on their own
             Button { router.open(.settings) } label: {
@@ -520,6 +508,9 @@ struct PopoverView: View {
     // MARK: capsules
 
     private var capsules: some View {
+        // two rows: navigation, then what acts on the hub itself — restart weighs as much as pause, so it is a labelled
+        // capsule beside it, not an icon in the header (2026-11-21: a round arrow there read as "refresh")
+        VStack(spacing: 8) {
         HStack(spacing: 8) {
             Button { router.open(nil) } label: { Label(tr("Панель", "Panel"), systemImage: "sidebar.left") }
                 .buttonStyle(CapsuleStyle())
@@ -530,7 +521,16 @@ struct PopoverView: View {
                 .buttonStyle(CapsuleStyle())
                 .disabled(launchBlock != nil)
                 .tip(launchBlock?.help ?? "")
+        }
+        HStack(spacing: 8) {
             PauseHubButton(store: store)
+            if store.canRestartHub {
+                // the same red as "Pause hub": restart closes the service and the app, it is no milder than pausing
+                Button { restartHub(store) } label: { Label(tr("Перезапуск", "Restart"), systemImage: "power") }
+                    .buttonStyle(CapsuleStyle(fill: Color(red: 1, green: 69 / 255, blue: 58 / 255).opacity(0.16), stroke: Color(red: 1, green: 120 / 255, blue: 110 / 255).opacity(0.35), text: hexColor(0xFFB3AD)))
+                    .tip(restartHubHelp)
+            }
+        }
         }
         .labelStyle(.titleAndIcon)
     }

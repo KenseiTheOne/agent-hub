@@ -4,6 +4,26 @@ Releases are git tags `vX.Y.Z` (also published as GitHub releases); the current 
 The plugin contract has its own version history in
 [`docs/extension-points.md`](docs/extension-points.md#contract-versions).
 
+## 0.1.11 — 2026-11-21
+
+### Changed
+
+- **Restart hub** is a red labelled capsule beside "Pause hub" at the bottom of the popover instead of a round arrow in the
+  header, which read as "refresh".
+
+### Fixed
+
+- **The icon's right-click menu** opened partly inside the menu bar, so its first item hid under a scroll arrow.
+- **Quit from the icon's right-click menu** hung instead of closing the hub.
+- **Long hints** (such as the restart button's) were measured as one line and cut off; the card now wraps them in
+  full.
+- **The spinner in the hub update status** has a fixed size and no longer runs into the status text.
+
+### Docs
+
+- **Writing plugins: hover hints.** Which hint stands above a chart bar (`tips=`) and which follows the pointer
+  (`tooltip=`), and how a multi-line bar hint is laid out.
+
 ## 0.1.10 — 2026-11-21
 
 ### Added

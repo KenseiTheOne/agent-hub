@@ -18,6 +18,9 @@ struct TipBubbleView: View {
     /// On screen the blur comes from the window's `NSVisualEffectView` and this view only tints it; a snapshot cannot
     /// capture the blur, so there the card is filled almost solid and draws its own shadow inside a margin.
     var forSnapshot = false
+    /// The text column's width once measured (`TipWindow.measure`); nil — up to `TipWindow.maxWidth`. A long one-line
+    /// hint measured without it reported one line's height and was cut off when it wrapped on screen (2026-11-21).
+    var width: CGFloat?
 
     static let radius: CGFloat = 11
     static let arrowSize = CGSize(width: 12, height: 6)
@@ -39,6 +42,7 @@ struct TipBubbleView: View {
         .lineSpacing(2)
         .multilineTextAlignment(.leading)
         .fixedSize(horizontal: false, vertical: true)
+        .frame(width: width, alignment: .leading)
         .frame(maxWidth: TipWindow.maxWidth, alignment: .leading)
         .padding(.horizontal, 12)
         .padding(.vertical, 9)
@@ -261,9 +265,7 @@ final class TipWindow {
         case .pointer: break
         case .above: view.arrow = TipArrow(edge: .bottom, at: 0)
         }
-        host.rootView = view
-        host.layoutSubtreeIfNeeded()
-        let size = host.fittingSize
+        let size = Self.measure(&view)
         let p: NSPoint
         switch anchor {
         case .pointer(let pt): p = pt
@@ -310,6 +312,16 @@ final class TipWindow {
         panel.invalidateShadow()
     }
 
+    /// Sizes `view` in two passes: the first finds the text column's width (its one-line width up to `maxWidth`), the
+    /// second wraps the text at that width and gives the real height. One pass measured a long sentence as one line.
+    private static func measure(_ view: inout TipBubbleView) -> NSSize {
+        view.width = nil
+        let wide = NSHostingView(rootView: view).fittingSize
+        let pad: CGFloat = 24 + (view.forSnapshot ? 2 * TipBubbleView.snapshotMargin : 0)
+        view.width = min(max(wide.width - pad, 1), maxWidth)
+        return NSHostingView(rootView: view).fittingSize
+    }
+
     /// The blur's mask: the card's outline (the window shows nothing outside it, so its shadow follows it too).
     private static func mask(_ shape: TipShape, size: NSSize) -> NSImage {
         NSImage(size: size, flipped: true) { rect in
@@ -325,6 +337,7 @@ final class TipWindow {
     /// by a near-solid tint and the shadow drawn in a margin, at the screen's scale.
     func image(for text: String, arrow edge: TipArrow.Edge? = nil, scale: CGFloat = NSScreen.main?.backingScaleFactor ?? 2) -> NSImage? {
         var view = TipBubbleView(text: text, forSnapshot: true)
+        _ = Self.measure(&view)
         if let e = edge {
             view.arrow = TipArrow(edge: e, at: 0)
             let s = NSHostingView(rootView: view).fittingSize

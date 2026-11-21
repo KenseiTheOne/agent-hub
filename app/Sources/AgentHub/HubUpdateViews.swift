@@ -22,7 +22,7 @@ struct HubUpdatePopoverLine: View {
                 Group {
                     switch line.kind {
                     case .available: Image(systemName: "arrow.up.circle.fill").foregroundStyle(hexColor(0x4DA3FF))
-                    case .progress: ProgressView().controlSize(.small)
+                    case .progress: ProgressView().controlSize(.small).frame(width: 16, height: 16)
                     case .failed: Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(hexColor(0xFFC56B))
                     case .ready: Image(systemName: "arrow.clockwise.circle.fill").foregroundStyle(hexColor(0x4DA3FF))
                     case .done: Image(systemName: "checkmark.circle.fill").foregroundStyle(hexColor(0x7EE29B))
@@ -117,7 +117,7 @@ struct HubUpdateSettings: View {
             }
             if let st = HubUpdateText.installLine(info) {
                 HStack(spacing: 6) {
-                    if !st.failed, HubUpdateText.progressPhases.contains(info.install.phase) { ProgressView().controlSize(.small) }
+                    if !st.failed, HubUpdateText.progressPhases.contains(info.install.phase) { ProgressView().controlSize(.small).frame(width: 16, height: 16) }
                     Text(st.text).font(.system(size: 12)).foregroundStyle(st.failed ? hexColor(0xFF6B6B) : .white.opacity(0.8))
                         .fixedSize(horizontal: false, vertical: true)
                 }

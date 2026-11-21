@@ -411,6 +411,23 @@ every hub.
 | other keys (`size`, …) | any line | passed to the shell in `params` as is; the app draws nothing for them |
 | `bash=`, `shell=`, `terminal=`, `paramN=` | — | **forbidden**: dropped with a warning; output can never run a command |
 
+**Hover hints (hub 0.1.10+).** You supply only the text; where the card appears depends on what it is attached to,
+and there is no key to choose:
+
+| You write | The card |
+|---|---|
+| `tips=` on a `chart=bars` line | stands **above the bar** with a small pointer at it and glides from bar to bar — the reader must see which bar it is about |
+| `tooltip=` on any line, a status explanation (`agenthub.status`), the title of an `icon=true` button | sits **under the mouse pointer** and follows it while the pointer stays on the element |
+| nothing (the hub's own hints: a truncated title or status, why a button is disabled) | under the pointer, the same way |
+
+So: a hint about one data point of a chart → `tips=`; a hint about a line, a button or a status → `tooltip=`.
+
+Both cards are up to about 300 pt wide and wrap long text. A `tooltip=` is one paragraph of plain text. A `tips=`
+entry may have several lines (`\n`, printed as `\\n` inside a quoted value), and then it reads as a heading and
+details: the first line semibold, a hairline, then the rest in a secondary color with tabular digits — for example
+`"Fri Nov 6\\n$503 · 42 sessions"`. Write hints that read on their own, put the main fact first, and keep long ones to
+a couple of sentences.
+
 A layout example (the built-in `quota` and `claude-sessions` use all of these):
 
 ```

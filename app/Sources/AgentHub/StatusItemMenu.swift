@@ -52,8 +52,11 @@ final class StatusItemMenu: NSObject, NSMenuDelegate {
         default:
             return false
         }
-        // the menu comes after returning from the monitor: popUp runs its own tracking loop
-        Task { @MainActor [weak self] in self?.show() }
+        // the menu comes after returning from the monitor: popUp runs its own tracking loop. A run loop block, not a
+        // Task or a main-queue block (2026-11-21): "Quit" chosen inside the menu calls terminate within that loop, and
+        // quitting awaits a main-actor task (shutdownDaemonOnQuit). From inside a Task or a main-queue block that task
+        // could never start — the main queue was still busy with the menu — and the app hung instead of quitting.
+        RunLoop.main.perform { MainActor.assumeIsolated { [weak self] in self?.show() } }
         return true
     }
 
@@ -64,9 +67,13 @@ final class StatusItemMenu: NSObject, NSMenuDelegate {
         router.closePopover()
         let menu = build()
         button.highlight(true)
-        // the point is the menu's top-left corner in button coordinates: slightly below its bottom edge, like status item menus
-        let y = button.isFlipped ? button.bounds.maxY + 5 : button.bounds.minY - 5
-        menu.popUp(positioning: nil, at: NSPoint(x: button.bounds.minX, y: y), in: button)
+        // the point is the menu's top-left corner on screen, no higher than the bottom of the menu bar. A point just below
+        // the button was still inside the menu bar (taller than the button on a notched screen), so AppKit scrolled the
+        // menu: its first item hid under a scroll arrow (2026-11-21).
+        guard let w = button.window else { return }
+        let b = w.convertToScreen(button.convert(button.bounds, to: nil))
+        let bar = (w.screen ?? NSScreen.main).map { $0.visibleFrame.maxY } ?? b.minY
+        menu.popUp(positioning: nil, at: NSPoint(x: b.minX, y: min(b.minY - 5, bar - 1)), in: nil)
         button.highlight(false)
     }
 
