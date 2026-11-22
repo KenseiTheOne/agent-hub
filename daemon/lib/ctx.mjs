@@ -49,8 +49,8 @@ export function makeCtx(core, name) {
     peer: Object.freeze({
       verifySigned: (pid, requirementName) => core.peer.verifySigned(pid, requirementName),
       classifyPid: (pid) => core.peer.classifyPid(pid),
-      verifyHookSession: (peerInfo, sessionId) => core.peer.verifyHookSession(peerInfo, sessionId),
-      interactiveProcess: (pid) => (core.peer.interactiveProcess ? core.peer.interactiveProcess(pid) : { ok: false, reason: "no-check" }),
+      verifyHookSession: (peerInfo, sessionId, body) => core.peer.verifyHookSession(peerInfo, sessionId, body),
+      interactiveProcess: (pid, agent, opts) => (core.peer.interactiveProcess ? core.peer.interactiveProcess(pid, agent, opts) : { ok: false, reason: "no-check" }),
       // Whether the process is stopped and in its terminal's foreground group (typing into the tab, contract 3).
       // → { stopped, foreground } | null (cannot tell)
       procState: (pid) => core.peer.sys?.procState?.(pid) ?? null,
@@ -69,7 +69,7 @@ export function makeCtx(core, name) {
     lang: () => core.lang(),
     t: (key, params) => t(core.lang(), key, params),
     // Shell settings (<home>/settings.json, lib/i18n.mjs Settings) — read-only: lang, checkPluginUpdates,
-    // checkHubUpdates, launchAtLogin.
+    // checkHubUpdates, launchAtLogin, builtinOff.
     // Only the app class writes them (PUT /settings/*); a change emits settings.changed.
     settings: Object.freeze({ get: (key) => core.settings.get(key) }),
     exec: core.exec,
@@ -90,6 +90,10 @@ export function makeCtx(core, name) {
     // Name — AGENTHUB_<NAME> (not AGENTHUB_SECRET_* and not those taken by the core). The values are not secrets: plugins'
     // environment gets only what is fine to show under "Permissions".
     providePluginEnv: (name, value) => core.setPluginEnv(name, value),
+    // Whether a running trusted plugin declares reading or watching the file given in that variable ($NAME in fsRead, watch or
+    // fsWrite). A service that fetches the file from the network polls only while it is wanted; the internal bus event
+    // plugins.running (ctx.on) says the set of running plugins changed. → boolean
+    pluginEnvWanted: (name) => core.pluginEnvWanted(name),
     // This service's part of GET /state: fn() → the section `section` (JSON-ready; null — nothing to show). For the two
     // setting sections the core builds itself (launchAtLogin, notifications) fn() → extra fields of that setting, which
     // GET /settings shows too. fn null — remove. A section belongs to the extension that provided it first; the core's own

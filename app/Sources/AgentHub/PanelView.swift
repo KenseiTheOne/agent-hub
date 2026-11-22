@@ -242,7 +242,12 @@ struct Sidebar: View {
             }
             .scrollIndicators(.hidden)
             .scrollBounceBehavior(.basedOnSize)
-            PauseHubButton(store: store, height: 36, concentric: true).padding(.top, 4)
+            HStack(spacing: 6) {
+                PauseHubButton(store: store, height: 36, concentric: true)
+                RestartHubButton(store: store, height: 36, concentric: true)
+            }
+            .labelStyle(.titleAndIcon)
+            .padding(.top, 4)
         }
         .padding(PanelMetrics.cardPadding)
         // the card radius is concentric with the window: the system window radius − the inset (ConcentricRectangle, macOS 26)

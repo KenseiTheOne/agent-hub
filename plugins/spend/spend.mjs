@@ -4,11 +4,13 @@
 //
 // <agenthub.title>Claude Code Расход</agenthub.title>
 // <agenthub.title lang="en">Claude Code Spend</agenthub.title>
-// <agenthub.version>0.2.2</agenthub.version>
+// <agenthub.version>0.2.3</agenthub.version>
 // <agenthub.author.name>Kensei</agenthub.author.name>
 // <agenthub.author.github>KenseiTheOne</agenthub.author.github>
 // <agenthub.desc>Журнал расхода токенов Claude Code: сколько и когда потрачено, стоимость по ценам API за день, неделю и месяц</agenthub.desc>
 // <agenthub.desc lang="en">Claude Code token spend journal: how much and when, and the cost at API list prices per day, week and month</agenthub.desc>
+// <agenthub.requires name="Claude Code" url="https://claude.com/product/claude-code" check="~/.claude">агент, чей расход токенов считает плагин</agenthub.requires>
+// <agenthub.requires lang="en" name="Claude Code">the agent whose token spend this plugin counts</agenthub.requires>
 // <agenthub.status value="ok" label="Расход посчитан">Числа посчитаны по журналам сессий Claude Code</agenthub.status>
 // <agenthub.status value="ok" lang="en" label="Spend counted">Numbers counted from Claude Code session transcripts</agenthub.status>
 // <agenthub.status value="unknown" label="Журналы не читаются">Папка журналов Claude Code не найдена или не читается</agenthub.status>

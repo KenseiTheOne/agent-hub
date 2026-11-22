@@ -1,24 +1,32 @@
 // Stage 6: session replies. Shared state for the services/hook.mjs service, the routes/hook.mjs routes
-// and the primitives/session.respond.mjs primitive.
+// and the primitives/session.respond.mjs primitive. Claude Code and Codex sessions go through the same code; what
+// differs per agent is in lib/hook/agents.mjs (the peer carries agent + agentPid, see lib/peer.mjs).
 //
 // What lives here:
-//   - the registry of interactive sessions: SessionStart from the hook (a peer of class hook, session_id matched
-//     ~/.claude/sessions/<Claude pid>.json) + a live pid with a Claude Code signature + properties of the process itself
-//     that an agent inside the session can't fake: a controlling terminal and argv without -p/--print/--output-format
-//     (peer.interactiveProcess). kind/entrypoint from the file are only an extra hint: the file is writable
-//     by any process of the same UID. Only such sessions get a card; for the rest the hook answers {}
-//     right away;
-//   - a session_id already bound to another live signed pid isn't moved to a new pid; a session_id change
-//     for the same pid — only with source ∈ {clear, resume, compact};
-//   - after a daemon restart the registry is empty: the first PermissionRequest from a verified hook registers the session
-//     lazily with the same checks as SessionStart (source=lazy). A session this daemon saw SessionEnd for is not such
-//     a case: its next request gets {} right away, only an explicit SessionStart makes it interactive again;
-//   - cards of pending PermissionRequest requests: they wait for a decision from the app no longer than waitMs;
+//   - the registry of interactive sessions: SessionStart from the hook (a peer of class hook whose session_id the
+//     server already proved belongs to the agent ancestor: peer.verifyHookSession) + a live pid with the agent's
+//     signature + properties of the process itself that an agent inside the session can't fake
+//     (peer.interactiveProcess): Claude Code — a controlling terminal and argv without -p/--print/--output-format;
+//     Codex — the terminal UI with a terminal or the shared app-server daemon (services.hook.codexModes). For Claude Code
+//     kind/entrypoint from ~/.claude/sessions/<pid>.json are an extra hint: the file is writable by any process of the
+//     same UID. Only such sessions get a card; for the rest the hook answers {} right away;
+//   - a session_id already bound to another live signed pid isn't moved to a new pid; for Claude Code a session_id
+//     change for the same pid — only with source ∈ {clear, resume, compact} (one process, one current session; a Codex
+//     daemon hosts many threads at once);
+//   - after a daemon restart the registry is empty: the first PermissionRequest (or UserPromptSubmit) from a verified
+//     hook registers the session lazily with the same checks as SessionStart (source=lazy). A session this daemon saw
+//     SessionEnd for is not such a case: its next request gets {} right away, only an explicit SessionStart makes it
+//     interactive again;
+//   - cards of pending PermissionRequest requests: they wait for a decision from the app no longer than waitMs
+//     (Claude Code) / codexWaitMs (Codex);
 //   - a narrow reply: "once" (allow), "deny" (deny), choosing an option (allow + updatedInput with answers
-//     for AskUserQuestion). No updatedPermissions, "always", bypass, setMode, interrupt;
+//     for AskUserQuestion; Claude Code only), "terminal" (no decision: {} — the agent asks in its own terminal dialog).
+//     No updatedPermissions, "always", bypass, setMode, interrupt;
 //   - removing a card: a repeated identical request (dedup), Stop, SessionEnd, process death, session status
 //     "waiting" → "not waiting" (answered in the terminal or in Remote Control), the hook connection dropped
-//     (if the core passes a signal), ESTOP, a rate-limit pause, timeout;
+//     (if the core passes a signal), ESTOP, a rate-limit pause, timeout. For a process that hosts many sessions (Codex)
+//     Stop and SessionEnd do not remove cards and dedup replaces only a card whose hook is already gone: another
+//     thread's tool command in the same process could send them (see onHook);
 //   - approval rate limit: more than N per minute → pause + hook.paused event (for push).
 //
 // tool_input is kept only in card memory (needed for updatedInput) and is never written to the log
@@ -34,16 +42,27 @@ import { createHash, randomBytes } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { AGENTS, CODEX_MODES_DEFAULT, peerAgent, pidFields } from "./agents.mjs";
 
 export const HOOK_DEFAULTS = Object.freeze({
-  // How long a card waits for a decision. Less than the agenthub-hook timeout (118 s) and the hook in hooks.json (125 s).
+  // How long a card waits for a decision. Less than the agenthub-hook timeout (123 s) and the hook in hooks.json (125 s).
   waitMs: 110_000,
+  // The same for a Codex card: Codex blocks its own approval prompt while the hook runs, so the card may use almost all
+  // of the hook's 125 s; after that (or "decide in terminal") Codex asks in the terminal.
+  codexWaitMs: 120_000,
+  // Which Codex launches get cards (lib/hook/agents.mjs codexMode): "tui" (the terminal UI, with a terminal), "daemon"
+  // (the shared app-server daemon the TUI starts and hosts threads in), "exec" (`codex exec`: nobody at the terminal —
+  // for tests only), "app-server" (stdio app-server: IDE extensions, the desktop app).
+  codexModes: [...CODEX_MODES_DEFAULT],
   // Approval limit (once/answer) across all sessions in a sliding minute; exceeding it → pause.
   maxApprovalsPerMinute: 10,
   pauseMs: 10 * 60_000,
   // Request limit from one session per minute and the cap on concurrently waiting cards.
   maxRequestsPerMinute: 30,
   maxPending: 32,
+  // The cap on cards waiting at once from one process that hosts many sessions (lib/hook/agents.mjs
+  // oneSessionPerProcess: false — a Codex daemon or TUI): one runaway thread cannot take the whole maxPending.
+  maxPendingPerProcess: 8,
   // Which sessions count as interactive (kind/entrypoint fields of ~/.claude/sessions/<pid>.json).
   interactiveKinds: ["interactive"],
   interactiveEntrypoints: ["cli"],
@@ -54,7 +73,7 @@ export const HOOK_DEFAULTS = Object.freeze({
   sweepMs: 30_000,
 });
 
-export const DECISIONS = ["once", "deny", "answer"];
+export const DECISIONS = ["once", "deny", "answer", "terminal"];
 // SessionStart sources with which the same Claude process legitimately changes session_id.
 export const REBIND_SOURCES = ["clear", "resume", "compact"];
 export const denyMessage = (lang) => tr(lang, "hook.deny");
@@ -101,10 +120,50 @@ function tildify(p) {
   return p === h || p.startsWith(h + "/") ? "~" + p.slice(h.length) : p;
 }
 
+function shortPath(p) {
+  const s = tildify(p);
+  return s.length > 120 ? "…" + s.slice(-119) : s;
+}
+
+// The files an apply_patch patch touches (Codex): the "*** Add/Update/Delete File:" and "*** Move to:" lines only —
+// never the patch body. → "a.txt, ~/b/c.txt +2"
+export function patchFiles(patch) {
+  if (typeof patch !== "string") return null;
+  const files = [];
+  for (const line of patch.split("\n", 20_000)) {
+    const m = /^\*\*\* (?:Add File|Update File|Delete File|Move to): (.+)$/.exec(line.trimEnd());
+    if (!m) continue;
+    const f = m[1].trim();
+    if (f && f.length <= 4096 && !files.includes(f)) files.push(f);
+  }
+  if (!files.length) return null;
+  const shown = files.slice(0, 3).map(shortPath).join(", ");
+  return files.length > 3 ? `${shown} +${files.length - 3}` : shown;
+}
+
 // A safe request summary: command name or path, without the body. Sent only to the app (GET /hook/cards).
-export function safeSummary(tool, input, lang = "ru") {
+// agent — the agent kind (lib/hook/agents.mjs): Codex sends a few requests of its own (apply_patch, network access as a
+// "Bash" request, write_stdin, request_permissions).
+export function safeSummary(tool, input, lang = "ru", agent = "claude") {
   const t = String(tool || "?").slice(0, 128);
   const inp = input && typeof input === "object" ? input : {};
+  if (agent === "codex") {
+    if (t === "Bash" && typeof inp.description === "string" && inp.description.startsWith("network-access ")) {
+      const target = inp.description.slice(15).trim();
+      const host = /^[\w.:[\]-]{1,253}$/.test(target) ? target : tr(lang, "hook.command");
+      return `${tr(lang, "hook.network")}: ${host}`;
+    }
+    if (t === "apply_patch") {
+      const files = patchFiles(inp.command ?? inp.patch);
+      return files ? `apply_patch: ${files}` : "apply_patch";
+    }
+    if (t === "write_stdin") return tr(lang, "hook.stdin");
+    if (t === "request_permissions") {
+      const keys = inp.permissions && typeof inp.permissions === "object" && !Array.isArray(inp.permissions) ? Object.keys(inp.permissions) : [];
+      const names = keys.filter((k) => /^[\w-]{1,40}$/.test(k)).slice(0, 4);
+      return names.length ? `${tr(lang, "hook.permissions")}: ${names.join(", ")}` : tr(lang, "hook.permissions");
+    }
+  }
   if (t === "Bash" || t === "PowerShell") {
     const cmd = typeof inp.command === "string" ? inp.command : "";
     const words = cmd.trim().split(/\s+/);
@@ -202,8 +261,9 @@ export class HookState {
   constructor(ctx, opts = {}) {
     this.ctx = ctx;
     this.opts = { ...HOOK_DEFAULTS, ...opts };
-    this.interactive = new Map(); // sessionId → { pid, startSec, at }
-    this.ended = new Map(); // sessionId → the Claude pid whose SessionEnd closed it (no lazy registration, see permission())
+    this.interactive = new Map(); // sessionId → { agent, pid, startSec, mode, at }
+    this.ended = new Map(); // sessionId → the agent pid whose SessionEnd closed it (no lazy registration, see permission())
+    this.quiet = new Map(); // sessionId → the last non-interactive verdict journaled for a lazy registration (no repeats)
     this.cards = new Map(); // requestId → card
     this.approvals = []; // approval times within the last minute
     this.requests = new Map(); // sessionId → [request times]
@@ -232,29 +292,49 @@ export class HookState {
     if (this.stopped) return undefined;
     const ev = body?.hook_event_name;
     const sid = typeof body?.session_id === "string" ? body.session_id : null;
-    if (!sid || !peer || peer.class !== "hook" || !Number.isInteger(peer.claudePid)) return {};
-    // the session_id already belongs to another Claude process: a foreign hook doesn't remove or replace its cards
+    const a = peerAgent(peer);
+    if (!sid || !a) return {};
+    const who = { agent: a.kind, pid: a.pid };
+    // the session_id already belongs to another agent process: a foreign hook doesn't remove or replace its cards
     const owner = this.interactive.get(sid);
-    if (owner && owner.pid !== peer.claudePid && ev !== "SessionStart") {
-      this.log({ type: "hook-foreign-session", sessionId: sid, claudePid: peer.claudePid, event: str(ev, 64) });
+    if (owner && (owner.pid !== a.pid || owner.agent !== a.kind) && ev !== "SessionStart") {
+      this.log({ type: "hook-foreign-session", sessionId: sid, ...pidFields(a.kind, a.pid), event: str(ev, 64) });
       return {};
+    }
+    // One process hosting many sessions (a Codex daemon or TUI, see oneSessionPerProcess in lib/hook/agents.mjs): any tool
+    // command under it can send a hook naming another of its threads, and the session proof passes — same pid. So its
+    // lifecycle events never cancel cards and never close a session for good: a pending card goes away when its own
+    // hook connection closes (Codex kills the hook's process group when the turn is interrupted or the thread shuts
+    // down: hooks/src/engine/command_runner.rs) or at codexWaitMs. SessionEnd only forgets a session without cards
+    // (keeps the registry small); after a real SessionEnd the thread's lock is gone, so its hooks fail the proof anyway.
+    if (!a.spec.oneSessionPerProcess) {
+      if (ev === "Stop") return {};
+      if (ev === "SessionEnd") {
+        const e = this.interactive.get(sid);
+        if (e && e.pid === a.pid && e.agent === a.kind && ![...this.cards.values()].some((c) => c.sessionId === sid)) await this.endSession(sid, "session-end");
+        return {};
+      }
     }
     switch (ev) {
       case "SessionStart":
-        await this.sessionStart(sid, peer.claudePid, body);
+        await this.sessionStart(sid, who, body);
         return {};
       case "SessionEnd":
         await this.endSession(sid, "session-end");
         // remembered (the last 256): a later PermissionRequest of this process must not bring the session back lazily
         this.ended.delete(sid);
-        this.ended.set(sid, peer.claudePid);
+        this.ended.set(sid, a.pid);
         if (this.ended.size > 256) this.ended.delete(this.ended.keys().next().value);
         return {};
       case "Stop":
         this.cancelSession(sid, "stop");
         return {};
+      case "UserPromptSubmit":
+        // a turn started: after a daemon restart this registers the session before its first request
+        if (!this.interactive.has(sid) && this.ended.get(sid) !== a.pid) await this.sessionStart(sid, who, body, { lazy: true });
+        return {};
       case "PermissionRequest":
-        return this.permission(sid, peer.claudePid, body, signal);
+        return this.permission(sid, who, body, signal);
       default:
         return undefined;
     }
@@ -269,62 +349,100 @@ export class HookState {
     }
   }
 
-  // the session_id already belongs to another live signed Claude process (same start) → true.
-  async boundElsewhere(sid, pid) {
+  // the session_id already belongs to another live signed agent process (same start) → true.
+  async boundElsewhere(sid, agent, pid) {
     const cands = [];
     const e = this.interactive.get(sid);
-    if (e && e.pid !== pid) cands.push(e);
+    if (e && (e.pid !== pid || e.agent !== agent)) cands.push(e);
     const reg = this.ctx.sessions.get(sid);
-    if (reg && reg.pid !== pid) cands.push(reg);
+    if (reg && (reg.pid !== pid || agent !== "claude")) cands.push({ ...reg, agent: "claude" });
     for (const c of cands) {
-      const v = await this.ctx.peer.verifySigned(c.pid, "claudeCode");
+      const v = await this.ctx.peer.verifySigned(c.pid, AGENTS[c.agent || "claude"].requirement);
       if (v.ok && (c.startSec == null || v.startSec == null || v.startSec === c.startSec)) return true;
     }
     return false;
   }
 
-  // → true if the session is registered as interactive. lazy — registration by the first PermissionRequest
-  // (after a daemon restart SessionStart won't come anymore).
-  async sessionStart(sid, pid, body, { lazy = false } = {}) {
+  // → true if the session is registered as interactive. who — { agent, pid } of the verified hook peer. lazy —
+  // registration by the first PermissionRequest / UserPromptSubmit (after a daemon restart SessionStart won't come
+  // anymore).
+  async sessionStart(sid, who, body, { lazy = false } = {}) {
+    const { agent, pid } = who;
+    const spec = AGENTS[agent];
+    const ids = pidFields(agent, pid);
     const source = lazy ? "lazy" : str(body?.source, 32);
-    const data = this.readSessionFile(pid);
-    const kind = str(data?.kind, 32);
-    const entrypoint = str(data?.entrypoint, 32);
+    let kind = null;
+    let entrypoint = null;
+    let mode = null;
     let reason = null;
     let keepExisting = false;
-    if (!data || data.sessionId !== sid) reason = "no-session-file";
-    else if (!this.opts.interactiveKinds.includes(kind)) reason = "kind";
-    else if (!this.opts.interactiveEntrypoints.includes(entrypoint)) reason = "entrypoint";
+    if (spec.sessionFile) {
+      const data = this.readSessionFile(pid);
+      kind = str(data?.kind, 32);
+      entrypoint = str(data?.entrypoint, 32);
+      if (!data || data.sessionId !== sid) reason = "no-session-file";
+      else if (!this.opts.interactiveKinds.includes(kind)) reason = "kind";
+      else if (!this.opts.interactiveEntrypoints.includes(entrypoint)) reason = "entrypoint";
+    }
     if (!reason) {
-      const proc = this.ctx.peer.interactiveProcess ? this.ctx.peer.interactiveProcess(pid) : { ok: false, reason: "no-check" };
+      const proc = this.ctx.peer.interactiveProcess
+        ? this.ctx.peer.interactiveProcess(pid, agent, { codexModes: this.opts.codexModes })
+        : { ok: false, reason: "no-check" };
+      mode = proc.mode ?? null;
       if (!proc.ok) reason = `proc:${proc.reason}`;
     }
-    if (!reason && (await this.boundElsewhere(sid, pid))) {
+    if (!reason && (await this.boundElsewhere(sid, agent, pid))) {
       reason = "sid-bound";
       keepExisting = true; // the real session on another pid stays as is
     }
     // One Claude process — one current session: /clear, resume and compact change session_id for the same pid.
-    const samePid = [...this.interactive].filter(([other, e]) => e.pid === pid && other !== sid).map(([other]) => other);
+    const samePid = spec.oneSessionPerProcess
+      ? [...this.interactive].filter(([other, e]) => e.pid === pid && e.agent === agent && other !== sid).map(([other]) => other)
+      : [];
     if (!reason && samePid.length && !REBIND_SOURCES.includes(source)) {
       reason = "rebind-source";
       keepExisting = true;
     }
+    const extra = spec.sessionFile ? { kind, entrypoint } : { mode };
     if (reason) {
-      if (!keepExisting && this.interactive.get(sid)?.pid === pid) await this.endSession(sid, reason);
-      this.log({ type: "hook-session", sessionId: sid, claudePid: pid, interactive: false, reason, kind, entrypoint, source });
+      const mine = this.interactive.get(sid);
+      if (!keepExisting && mine?.pid === pid && mine.agent === agent) await this.endSession(sid, reason);
+      // a lazy check repeats with every prompt of a non-interactive session (`claude -p`, `codex exec`): one line per
+      // session, pid and verdict is enough
+      const verdict = `${agent}|${pid}|${reason}`;
+      if (!lazy || this.quiet.get(sid) !== verdict) {
+        this.log({ type: "hook-session", sessionId: sid, ...ids, interactive: false, reason, ...extra, source });
+        if (lazy) {
+          this.quiet.delete(sid);
+          this.quiet.set(sid, verdict);
+          if (this.quiet.size > 256) this.quiet.delete(this.quiet.keys().next().value);
+        }
+      }
       return false;
     }
     for (const other of samePid) await this.endSession(other, "replaced");
-    const r = await this.ctx.sessions.register(sid, { pid, source: "hook", interactive: true });
-    if (!r.verified) {
-      if (this.interactive.get(sid)?.pid === pid) this.interactive.delete(sid);
-      this.log({ type: "hook-session", sessionId: sid, claudePid: pid, interactive: false, reason: r.reason || "unverified", source });
-      return false;
+    let startSec = null;
+    if (spec.registry) {
+      const r = await this.ctx.sessions.register(sid, { pid, source: "hook", interactive: true });
+      if (!r.verified) {
+        if (this.interactive.get(sid)?.pid === pid) this.interactive.delete(sid);
+        this.log({ type: "hook-session", sessionId: sid, ...ids, interactive: false, reason: r.reason || "unverified", source });
+        return false;
+      }
+      startSec = this.ctx.sessions.get(sid)?.startSec ?? null;
+    } else {
+      // not in the Claude Code registry: the signature and start time are checked here (and again by isInteractive)
+      const v = await this.ctx.peer.verifySigned(pid, spec.requirement);
+      if (!v.ok) {
+        this.log({ type: "hook-session", sessionId: sid, ...ids, interactive: false, reason: `signature:${v.reason || "?"}`, source });
+        return false;
+      }
+      startSec = v.startSec ?? null;
     }
-    const startSec = this.ctx.sessions.get(sid)?.startSec ?? null;
     this.ended.delete(sid);
-    this.interactive.set(sid, { pid, startSec, at: Date.now() });
-    this.log({ type: "hook-session", sessionId: sid, claudePid: pid, interactive: true, kind, entrypoint, source });
+    this.quiet.delete(sid);
+    this.interactive.set(sid, { agent, pid, startSec, mode, at: Date.now() });
+    this.log({ type: "hook-session", sessionId: sid, ...ids, interactive: true, ...extra, source });
     return true;
   }
 
@@ -341,15 +459,15 @@ export class HookState {
       }
       this.ctx.sessions.unregister(sid, "hook");
     }
-    if (e) this.log({ type: "hook-session-end", sessionId: sid, claudePid: e.pid, reason });
+    if (e) this.log({ type: "hook-session-end", sessionId: sid, ...pidFields(e.agent, e.pid), reason });
   }
 
-  // The session is interactive: registered by SessionStart, the same pid, the process is alive, Claude Code signature,
-  // the start time didn't change (the pid wasn't reused).
-  async isInteractive(sid, pid) {
+  // The session is interactive: registered by SessionStart, the same agent and pid, the process is alive with the
+  // agent's signature, the start time didn't change (the pid wasn't reused).
+  async isInteractive(sid, pid, agent) {
     const e = this.interactive.get(sid);
-    if (!e || e.pid !== pid) return false;
-    const r = await this.ctx.peer.verifySigned(pid, "claudeCode");
+    if (!e || e.pid !== pid || (agent && e.agent !== agent)) return false;
+    const r = await this.ctx.peer.verifySigned(pid, AGENTS[e.agent].requirement);
     if (!r.ok || (e.startSec != null && r.startSec != null && r.startSec !== e.startSec)) {
       await this.endSession(sid, r.ok ? "pid-reused" : "dead");
       return false;
@@ -358,12 +476,12 @@ export class HookState {
   }
 
   async sweep() {
-    for (const [sid, e] of [...this.interactive]) await this.isInteractive(sid, e.pid);
+    for (const [sid, e] of [...this.interactive]) await this.isInteractive(sid, e.pid, e.agent);
   }
 
   // ---------- cards ----------
-  skip(sid, pid, tool, reason) {
-    this.log({ type: "hook-skip", sessionId: sid, claudePid: pid, tool, reason });
+  skip(sid, who, tool, reason) {
+    this.log({ type: "hook-skip", sessionId: sid, ...pidFields(who.agent, who.pid), tool, reason });
     return {};
   }
 
@@ -378,34 +496,49 @@ export class HookState {
     return true;
   }
 
-  async permission(sid, pid, body, signal) {
+  async permission(sid, who, body, signal) {
+    const { agent, pid } = who;
+    const spec = AGENTS[agent];
     const now = Date.now();
     const tool = str(body.tool_name, 128) || "?";
     const input = body.tool_input;
-    if (this.paused(now)) return this.skip(sid, pid, tool, "paused");
-    let interactive = await this.isInteractive(sid, pid);
+    if (this.paused(now)) return this.skip(sid, who, tool, "paused");
+    let interactive = await this.isInteractive(sid, pid, agent);
     // The daemon restarted (the in-memory registry is empty): the same verified hook, the same checks as SessionStart.
     // An empty slot left by SessionEnd from this very process is not a restart: the session is over, and registering
     // it again here would leave a card nobody expects hanging until waitMs.
     if (!interactive && !this.interactive.has(sid)) {
-      if (this.ended.get(sid) === pid) return this.skip(sid, pid, tool, "session-ended");
-      interactive = await this.sessionStart(sid, pid, body, { lazy: true });
+      if (this.ended.get(sid) === pid) return this.skip(sid, who, tool, "session-ended");
+      interactive = await this.sessionStart(sid, who, body, { lazy: true });
     }
-    if (!interactive) return this.skip(sid, pid, tool, "not-interactive");
-    if (this.opts.skipTools.includes(tool)) return this.skip(sid, pid, tool, "skip-tool");
-    if (!input || typeof input !== "object" || Array.isArray(input)) return this.skip(sid, pid, tool, "bad-input");
-    if (!this.rateOk(sid, now)) return this.skip(sid, pid, tool, "rate");
+    if (!interactive) return this.skip(sid, who, tool, "not-interactive");
+    if (this.opts.skipTools.includes(tool)) return this.skip(sid, who, tool, "skip-tool");
+    if (!input || typeof input !== "object" || Array.isArray(input)) return this.skip(sid, who, tool, "bad-input");
+    if (!this.rateOk(sid, now)) return this.skip(sid, who, tool, "rate");
     const kind = tool === "AskUserQuestion" ? "question" : "permission";
+    // an agent that cannot take answers (Codex drops updatedInput) never gets a question card
+    if (kind === "question" && !spec.questions) return this.skip(sid, who, tool, "no-questions");
     let questions = null;
     if (kind === "question") {
       questions = sanitizeQuestions(input.questions);
-      if (!questions) return this.skip(sid, pid, tool, "bad-questions");
+      if (!questions) return this.skip(sid, who, tool, "bad-questions");
     }
     const agentId = str(body.agent_id, 128);
     const dedupKey = sha(`${sid}|${agentId || ""}|${tool}|${stableStringify(input)}`);
     // A repeated identical request — the previous one no longer waits (answered in another channel or Claude asked again).
-    for (const c of [...this.cards.values()]) if (c.dedupKey === dedupKey) this.cancel(c, "superseded");
-    if (this.cards.size >= this.opts.maxPending) return this.skip(sid, pid, tool, "too-many");
+    // In a process hosting many sessions the new request may come from another thread's tool command posing as this
+    // one: there only a card whose own hook connection is already gone is replaced.
+    for (const c of [...this.cards.values()]) {
+      if (c.dedupKey !== dedupKey) continue;
+      if (spec.oneSessionPerProcess || c.signal?.aborted) this.cancel(c, "superseded");
+    }
+    if (this.cards.size >= this.opts.maxPending) return this.skip(sid, who, tool, "too-many");
+    if (!spec.oneSessionPerProcess) {
+      let mine = 0;
+      for (const c of this.cards.values()) if (c.pid === pid && c.agent === agent) mine++;
+      if (mine >= this.opts.maxPendingPerProcess) return this.skip(sid, who, tool, "too-many-process");
+    }
+    const waitMs = agent === "codex" ? this.opts.codexWaitMs : this.opts.waitMs;
 
     const requestId = randomBytes(16).toString("hex");
     let resolveFn;
@@ -413,27 +546,31 @@ export class HookState {
     const card = {
       requestId,
       sessionId: sid,
-      claudePid: pid,
+      agent,
+      pid,
       agentId,
       kind,
       tool,
-      summary: kind === "question" ? tr(this.lang(), "hook.question", { n: questions.length }) : safeSummary(tool, input, this.lang()),
+      summary: kind === "question" ? tr(this.lang(), "hook.question", { n: questions.length }) : safeSummary(tool, input, this.lang(), agent),
       questions,
       toolInput: input, // memory only: needed for updatedInput
       dedupKey,
       createdAt: now,
-      expiresAt: now + this.opts.waitMs,
+      expiresAt: now + waitMs,
       // The sessions plugin may have seen "waiting" before the hook arrived.
       sawWaiting: this.ctx.sessions.get(sid)?.status === "waiting",
       resolve: resolveFn,
       timer: null,
+      signal: signal ?? null, // the hook's connection (aborted — the hook is gone)
     };
-    if (signal?.aborted) return this.skip(sid, pid, tool, "hook-gone");
-    card.timer = setTimeout(() => this.cancel(card, "timeout"), this.opts.waitMs);
+    if (signal?.aborted) return this.skip(sid, who, tool, "hook-gone");
+    card.timer = setTimeout(() => this.cancel(card, "timeout"), waitMs);
     card.timer.unref?.();
     signal?.addEventListener("abort", () => this.cancel(card, "hook-gone"), { once: true });
     this.cards.set(requestId, card);
-    this.log({ type: "hook-card", request: requestRef(requestId), sessionId: sid, claudePid: pid, kind, tool, agent: Boolean(agentId) });
+    // "agent" in this record has always meant "a subagent's request"; the agent kind goes as agentKind
+    const ids = agent === "claude" ? { claudePid: pid } : { agentKind: agent, agentPid: pid };
+    this.log({ type: "hook-card", request: requestRef(requestId), sessionId: sid, ...ids, kind, tool, agent: Boolean(agentId) });
     this.ctx.emit({ type: "hook.card", requestId, sessionId: sid, kind, tool });
     return promise;
   }
@@ -443,7 +580,7 @@ export class HookState {
     this.cards.delete(card.requestId);
     clearTimeout(card.timer);
     card.resolve(output);
-    this.log({ request: requestRef(card.requestId), sessionId: card.sessionId, claudePid: card.claudePid, tool: card.tool, ...entry });
+    this.log({ request: requestRef(card.requestId), sessionId: card.sessionId, ...pidFields(card.agent, card.pid), tool: card.tool, ...entry });
     this.ctx.emit({ type: "hook.card.removed", requestId: card.requestId, sessionId: card.sessionId, reason: entry.reason });
     return true;
   }
@@ -475,6 +612,7 @@ export class HookState {
     if (this.paused()) return { ok: false, reason: "paused" };
     if (!this.interactive.has(card.sessionId)) return { ok: false, reason: "not-interactive" };
     if (!DECISIONS.includes(decision)) return { ok: false, reason: "decision" };
+    if (!this.decisionsOf(card).includes(decision)) return { ok: false, reason: "decision" };
     if (card.kind === "permission" && decision === "answer") return { ok: false, reason: "decision" };
     if (card.kind === "question" && decision === "once") return { ok: false, reason: "decision" };
     if (decision === "answer") {
@@ -495,6 +633,7 @@ export class HookState {
     const card = c.card;
     let output;
     if (decision === "deny") output = denyOutput(this.lang());
+    else if (decision === "terminal") output = {}; // no decision: the agent's own dialog asks; not an approval
     else {
       const now = Date.now();
       this.approvals = this.approvals.filter((t) => now - t < 60_000);
@@ -505,7 +644,7 @@ export class HookState {
       this.approvals.push(now);
       output = decision === "answer" ? allowOutput({ ...card.toolInput, answers: c.answers }) : allowOutput(null);
     }
-    this.finish(card, output, { type: "hook-answer", reason: "answered", decision, appPid: requester.pid ?? null });
+    this.finish(card, output, { type: "hook-answer", reason: decision === "terminal" ? "terminal" : "answered", decision, appPid: requester.pid ?? null });
     return { ok: true };
   }
 
@@ -523,21 +662,32 @@ export class HookState {
     }
   }
 
+  // The answers a card offers (the app draws its buttons from this list).
+  decisionsOf(c) {
+    return c.kind === "question" ? ["answer", "deny", "terminal"] : ["once", "deny", "terminal"];
+  }
+
   // ---------- views for routes ----------
+  // external — the card's session is a non-Claude agent session some plugin reported (ctx.sessions.external: the same
+  // id, case-insensitive): the app focuses that session's tab and marks it as waiting.
   cardView(c) {
-    const s = this.ctx.sessions.get(c.sessionId);
+    const s = c.agent === "claude" ? this.ctx.sessions.get(c.sessionId) : null;
+    const ext = s ? null : (this.ctx.sessions.external?.(c.sessionId) ?? null);
     return {
       requestId: c.requestId,
       sessionId: c.sessionId,
-      sessionName: s?.name ?? null,
+      sessionName: s?.name ?? ext?.name ?? null,
       surfaceId: s?.surfaceId ?? null,
-      claudePid: c.claudePid,
+      agent: c.agent,
+      agentLabel: AGENTS[c.agent]?.label ?? c.agent,
+      ...(c.agent === "claude" ? { claudePid: c.pid } : { agentPid: c.pid }),
+      external: Boolean(ext),
       subagent: Boolean(c.agentId),
       kind: c.kind,
       tool: c.tool,
       summary: c.summary,
       questions: c.questions,
-      decisions: c.kind === "question" ? ["answer", "deny"] : ["once", "deny"],
+      decisions: this.decisionsOf(c),
       createdAt: new Date(c.createdAt).toISOString(),
       expiresAt: new Date(c.expiresAt).toISOString(),
     };

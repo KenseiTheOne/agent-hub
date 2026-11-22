@@ -524,15 +524,26 @@ struct PopoverView: View {
         }
         HStack(spacing: 8) {
             PauseHubButton(store: store)
-            if store.canRestartHub {
-                // the same red as "Pause hub": restart closes the service and the app, it is no milder than pausing
-                Button { restartHub(store) } label: { Label(tr("Перезапуск", "Restart"), systemImage: "power") }
-                    .buttonStyle(CapsuleStyle(fill: Color(red: 1, green: 69 / 255, blue: 58 / 255).opacity(0.16), stroke: Color(red: 1, green: 120 / 255, blue: 110 / 255).opacity(0.35), text: hexColor(0xFFB3AD)))
-                    .tip(restartHubHelp)
-            }
+            RestartHubButton(store: store)
         }
         }
         .labelStyle(.titleAndIcon)
+    }
+}
+
+/// "Restart hub" next to "Pause hub": one for the popover and the panel; nothing when this build can't restart the hub.
+struct RestartHubButton: View {
+    let store: HubStore
+    var height: CGFloat = 32
+    var concentric = false
+
+    var body: some View {
+        if store.canRestartHub {
+            // the same red as "Pause hub": restart closes the service and the app, it is no milder than pausing
+            Button { restartHub(store) } label: { Label(tr("Перезапуск", "Restart"), systemImage: "power") }
+                .buttonStyle(CapsuleStyle(fill: Color(red: 1, green: 69 / 255, blue: 58 / 255).opacity(0.16), stroke: Color(red: 1, green: 120 / 255, blue: 110 / 255).opacity(0.35), text: hexColor(0xFFB3AD), height: height, concentric: concentric))
+                .tip(restartHubHelp)
+        }
     }
 }
 

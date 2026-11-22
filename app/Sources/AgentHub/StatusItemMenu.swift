@@ -7,6 +7,8 @@ import AppKit
 /// `NSMenu.popUp` under the button. A left click without ⌃ passes through the monitor as is — SwiftUI opens the popover.
 @MainActor
 final class StatusItemMenu: NSObject, NSMenuDelegate {
+    /// The menu window's inset above its first item (measured: 5 pt on macOS 26, the same as native menus).
+    static let menuTopInset: CGFloat = 5
     private let store: HubStore
     private let router: PanelRouter
     private var monitor: Any?
@@ -73,7 +75,10 @@ final class StatusItemMenu: NSObject, NSMenuDelegate {
         guard let w = button.window else { return }
         let b = w.convertToScreen(button.convert(button.bounds, to: nil))
         let bar = (w.screen ?? NSScreen.main).map { $0.visibleFrame.maxY } ?? b.minY
-        menu.popUp(positioning: nil, at: NSPoint(x: b.minX, y: min(b.minY - 5, bar - 1)), in: nil)
+        // the point is the top of the first item, and the menu window has its own top inset above it (5 pt on macOS 26):
+        // without subtracting it the window overlapped the menu bar, AppKit pinned its top below the bar and cut the
+        // window shorter, so the bottom inset under the last item was lost (2026-11-22)
+        menu.popUp(positioning: nil, at: NSPoint(x: b.minX, y: min(b.minY - 5, bar - 1) - Self.menuTopInset), in: nil)
         button.highlight(false)
     }
 

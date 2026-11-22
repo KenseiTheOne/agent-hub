@@ -87,6 +87,28 @@ test("a background claude -p (entrypoint sdk-cli) → SessionStart does not make
   }
 });
 
+test("every prompt of a claude -p (UserPromptSubmit) → one non-interactive hook-session line per session, pid and verdict", async () => {
+  const h = await hub();
+  try {
+    fakeClaude(h, h.sys, NIGHT_PID, NIGHT_SID, { kind: "print", entrypoint: "sdk-cli", argv: ["claude", "-p", "x"], tty: true });
+    const prompt = () => h.hook({ session_id: NIGHT_SID, hook_event_name: "UserPromptSubmit", prompt: SECRET }, NIGHT_PID);
+    for (let i = 0; i < 3; i++) assert.deepEqual((await prompt()).json, {});
+    const lines = () => h.journal().split("\n").filter((l) => l.includes('"type":"hook-session"') && l.includes(NIGHT_SID));
+    assert.equal(lines().length, 1);
+    assert.match(lines()[0], /"source":"lazy".*"interactive":false/);
+    // another verdict for the same session is journaled again
+    writeFileSync(join(h.claudeHome, "sessions", `${NIGHT_PID}.json`), JSON.stringify({ pid: NIGHT_PID, sessionId: NIGHT_SID, kind: "interactive", entrypoint: "cli" }));
+    await prompt();
+    await prompt();
+    assert.equal(lines().length, 2);
+    assert.match(lines()[1], /"reason":"proc:print"/);
+    assert.equal(h.st().interactive.size, 0);
+    assert.equal(h.journal().includes(SECRET), false);
+  } finally {
+    await h.stop();
+  }
+});
+
 test("spoofed session_id (another session's) → 403 peer:session-mismatch, the hook prints {}", async () => {
   const h = await hub();
   try {
@@ -126,7 +148,7 @@ test("full path: SessionStart → card → \"once\" from app → allow without u
     const cards = await req(h.sock, "GET", "/hook/cards");
     assert.equal(cards.status, 200);
     assert.equal(cards.body.cards[0].summary, "Bash: ls");
-    assert.deepEqual(cards.body.cards[0].decisions, ["once", "deny"]);
+    assert.deepEqual(cards.body.cards[0].decisions, ["once", "deny", "terminal"]);
     assert.equal((await curl(h.sock, "GET", "/hook/cards")).status, 403);
     // cli sees only counters: requestId is the answer key, known only to the app
     const stc = await curl(h.sock, "GET", "/hook/status");
@@ -217,7 +239,7 @@ test("AskUserQuestion: choosing options → allow + updatedInput with the origin
     const view = (await req(h.sock, "GET", `/hook/cards/${card.requestId}`)).body;
     assert.equal(view.kind, "question");
     assert.equal(view.questions[1].multiSelect, true);
-    assert.deepEqual(view.decisions, ["answer", "deny"]);
+    assert.deepEqual(view.decisions, ["answer", "deny", "terminal"]);
     assert.equal((await h.respond({ requestId: card.requestId, decision: "once" })).body.error, "facts:decision");
     assert.equal((await h.respond({ requestId: card.requestId, decision: "answer", answers: "[[0,1],[0]]" })).body.error, "facts:answers");
     assert.equal((await h.respond({ requestId: card.requestId, decision: "answer", answers: "[[5],[0]]" })).body.error, "facts:answers");
@@ -557,7 +579,8 @@ test("session A's agent wrote live session B's session_id into its file: B does 
     // the real B works
     const pending = h.hook(bash(SID2), CPID2);
     const card = await pendingCard(h);
-    assert.equal(card.claudePid, CPID2);
+    assert.equal(card.pid, CPID2);
+    assert.equal(card.agent, "claude");
     assert.equal((await h.respond({ requestId: card.requestId, decision: "deny" })).status, 200);
     await pending;
   } finally {

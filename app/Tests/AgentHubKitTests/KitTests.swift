@@ -179,6 +179,15 @@ let cardsJSON = #"""
     #expect(r.cards[1].questions[0].options[1].description == nil)
 }
 
+@Test func hookCardCarriesTheVerifiedAgentAndTheTerminalDecision() throws {
+    let json = #"{"cards":[{"requestId":"c1","sessionId":"019a0000-0000-7000-8000-000000000001","kind":"permission","tool":"Bash","summary":"Bash: ls","agent":"codex","agentLabel":"Codex","agentPid":4242,"external":true,"decisions":["once","deny","terminal"]},{"requestId":"c2","sessionId":"s2","kind":"permission","tool":"Bash"}],"paused":false}"#
+    let r = try JSONDecoder().decode(HookCardsResponse.self, from: Data(json.utf8))
+    #expect(r.cards[0].agent == "codex" && r.cards[0].verifiedAgent == "Codex" && r.cards[0].external && r.cards[0].canDecideInTerminal)
+    // a daemon before the agent table: Claude Code, no "terminal" button
+    #expect(r.cards[1].agent == nil && r.cards[1].verifiedAgent == "Claude Code" && !r.cards[1].external && !r.cards[1].canDecideInTerminal)
+    #expect(RespondChoice.terminal.args(requestId: "r") == ["requestId": .string("r"), "decision": .string("terminal")])
+}
+
 @Test(.hubLang(.ru)) func respondArgsAreNarrow() throws {
     let r = try JSONDecoder().decode(HookCardsResponse.self, from: Data(cardsJSON.utf8))
     let q = r.cards[1]

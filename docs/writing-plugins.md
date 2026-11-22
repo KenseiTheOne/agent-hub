@@ -10,7 +10,8 @@ truth:
 - [`daemon/lib/push/README.md`](../daemon/lib/push/README.md) — notification rules.
 
 Everything below matches the code of contract **3** (`CONTRACT_VERSION` in `daemon/lib/meta.mjs`). The built-in plugins
-in [`plugins/`](../plugins) (`quota`, `agents`, `claude-sessions`, `spend`) are real, complete examples.
+in [`plugins/`](../plugins) (`quota`, `agents`, `claude-sessions`, `spend`, `codex-sessions`, `codex-quota`,
+`codex-spend`) are real, complete examples.
 
 ## Contents
 
@@ -287,6 +288,19 @@ repeatable (section 6):
 
 **Translations.** Repeat a tag with `lang="xx"` (section 10): `title`, `desc`, `status`, `push`, `requires`,
 `connection` and the "why" of permission entries. Actions use `title-xx=`, `cost-xx=` and `input-xx=` attributes instead.
+
+**A missing requirement hides the plugin.** If any `<agenthub.requires check="…">` path does not exist in the plugins'
+`HOME`, the hub does **not run** the plugin: no process, no section in the sidebar, panel or popover, no notifications.
+The Plugins page still lists it with "Requires <name> — not found: <your note>" — the `name` (or the translated `title=`)
+and the text of the tag, in the hub language — so write both as something a person reads: what the program is, not how
+you check it. When the path appears, the plugin starts by itself without a restart (the hub watches the path; the
+safety rescan catches it within a minute at worst); when it disappears, the plugin is stopped again. Its data stays.
+So:
+
+- pick a `check` path that exists exactly when the program is usable (its config folder, `~/.tool`; not a file the
+  program creates only after its first run, unless the plugin is useless before that);
+- do not declare `requires` for something the plugin can work without — show that state in your output instead;
+- you no longer need a "Tool is not installed" output line for a missing `check` path: the plugin never runs then.
 
 ## 4. Output
 
@@ -836,8 +850,12 @@ your user. The hub enforces effects, actions, secrets, hub variables, connection
 Declare everything your code really touches and nothing it does not.
 
 **Forbidden for everyone** (a linter error in metadata and in any file of the plugin, no exceptions by tier):
-`~/.claude/projects` (conversation text), `~/.cmuxterm/workstream.jsonl`, `*.key`, `.env*`, `auth.json`, and any path
-or mask that covers them — `~/.claude`, `~/.claude/*`, `~/.claude/sessions` as a whole, `/`, `~`. Allowed masks are
+`~/.claude/projects` (conversation text), `~/.cmuxterm/workstream.jsonl`, Codex conversations and history
+(`~/.codex/sessions`, `~/.codex/archived_sessions`, `~/.codex/history.jsonl`, the databases
+`~/.codex/state_*.sqlite`, `~/.codex/thread_history_*.sqlite`, `~/.codex/logs_*.sqlite`, `~/.codex/memories_*.sqlite`,
+`~/.codex/goals_*.sqlite`, `~/.codex/queue_*.sqlite`; thread names in `~/.codex/session_index.jsonl`), `*.key`, `.env*`,
+`auth.json`, and any path or mask that covers them — `~/.claude`, `~/.claude/*`, `~/.claude/sessions` as a whole,
+`~/.codex`, `~/.codex/*`, `/`, `~`. Allowed masks are
 narrower: `~/.claude/sessions/*.json`. `exec` tokens that look like paths are checked the same way: `/bin/df -k /` is an
 error (`/` covers `~/.claude/projects`), `/bin/df -k` is fine. `..` in a path is an error. In the source text `*.key`
 is any string literal ending in `.key` (`"server.key"`, `"tls.server.key"`, `` `${host}.local.key` ``,
@@ -850,7 +868,8 @@ warns the reviewer:
 
 - `fsWrite` to a **hijack location** — places through which Claude Code or the system can be taken over:
   `claude-code` (all of `~/.claude` except `task-runs` and `backups`, `~/.claude.json`, any project's `.claude` and
-  `.mcp.json`), `autostart` (LaunchAgents, cron…), `shell` (`~/.zshrc` and friends), `bin` (directories on `PATH`,
+  `.mcp.json`), `codex` (all of `~/.codex` — `config.toml`, `hooks.json`, `rules/`, plugins, skills — `/etc/codex`,
+  `~/.agents`, any project's `.codex`), `autostart` (LaunchAgents, cron…), `shell` (`~/.zshrc` and friends), `bin` (directories on `PATH`,
   global npm packages), `terminals` (`~/.cmuxterm`, terminal configs), `ssh`, `git`, `hub` (the Agent Hub directory
   except your own `PluginData/<id>` and `Cache/<id>`). The list is `WRITE_RISKS` in `daemon/lib/registry/perms.mjs`.
   Write there only what the "why" promises: an allowlist of keys, a backup before editing, atomic writes.

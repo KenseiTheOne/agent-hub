@@ -38,6 +38,7 @@ import { chmodSync, existsSync, lstatSync, mkdirSync, statSync, unlinkSync } fro
 import { join } from "node:path";
 import { DAEMON_DIR } from "./config.mjs";
 import { loadModules } from "./loader.mjs";
+import { pidFields } from "./hook/agents.mjs";
 import { makeCtx } from "./ctx.mjs";
 import { CONTRACT_VERSION } from "./meta.mjs";
 import { PEER_CLASSES } from "./peer.mjs";
@@ -188,7 +189,7 @@ function builtinRoutes(core) {
       handler: ({ body, peer }) => {
         const on = body?.on;
         if (typeof on !== "boolean") return { status: 400, body: { error: "args:on:type" } };
-        if (!on && peer.class !== "app") return { status: 403, body: { error: peer.reason && peer.reason !== "peer:no-claude-ancestor" ? peer.reason : `peer:${peer.class}` } };
+        if (!on && peer.class !== "app") return { status: 403, body: { error: peer.reason && peer.reason !== "peer:no-agent-ancestor" ? peer.reason : `peer:${peer.class}` } };
         return { status: 200, body: { estop: core.setEstop(on, peer) } };
       },
     },
@@ -197,7 +198,7 @@ function builtinRoutes(core) {
       method: "GET",
       path: "/settings",
       peers: ["app", "cli"],
-      handler: () => ({ status: 200, body: { lang: core.langInfo(), checkPluginUpdates: core.pluginUpdatesSetting(), checkHubUpdates: core.hubUpdatesSetting(), launchAtLogin: core.launchAtLoginSetting(), notifications: core.notificationsSetting() } }),
+      handler: () => ({ status: 200, body: { lang: core.langInfo(), checkPluginUpdates: core.pluginUpdatesSetting(), checkHubUpdates: core.hubUpdatesSetting(), launchAtLogin: core.launchAtLoginSetting(), notifications: core.notificationsSetting(), builtinPlugins: core.builtinPluginList() } }),
     },
     {
       // "Notifications": {enabled?, kinds?: {<kind>: bool}, quiet?: {enabled?, start?, end?}} — a partial edit
@@ -252,6 +253,21 @@ function builtinRoutes(core) {
       },
     },
     {
+      // A built-in plugin on or off: {id, enabled: bool}. Written only by app. Off — the host stops it and does not start it
+      // again (no process, frames or notifications; its files and PluginData stay); the choice is in settings.json →
+      // builtinOff, which hub updates and `agenthub builtin update` do not touch. → {builtinPlugins}
+      method: "PUT",
+      path: "/settings/builtin-plugins",
+      peers: ["app"],
+      handler: async ({ body, peer }) => {
+        const id = body?.id;
+        if (typeof id !== "string") return { status: 400, body: { error: "args:id:type" } };
+        const r = await core.setBuiltinEnabled(id, body?.enabled, peer);
+        if (r.error) return { status: r.error === "builtin:unknown" ? 404 : 400, body: { error: r.error } };
+        return { status: 200, body: r };
+      },
+    },
+    {
       method: "PUT",
       path: "/settings/lang",
       peers: ["app"],
@@ -287,12 +303,12 @@ function builtinRoutes(core) {
       maxBody: HOOK_MAX_BODY,
       handler: async ({ req, res, body, peer }) => {
         if (!body || typeof body !== "object") return { status: 400, body: { error: "body" } };
-        const v = core.peer.verifyHookSession(peer, body.session_id);
+        const v = await core.peer.verifyHookSession(peer, body.session_id, body);
         if (!v.ok) {
-          core.journal.write({ type: "hook-denied", claudePid: peer.claudePid, error: v.reason });
+          core.journal.write({ type: "hook-denied", ...pidFields(peer.agent, peer.agentPid ?? peer.claudePid), error: v.reason });
           return { status: 403, body: { error: v.reason } };
         }
-        // The hook closed the connection before the response (Claude killed agenthub-hook) → signal for the handlers.
+        // The hook closed the connection before the response (the agent killed agenthub-hook) → signal for the handlers.
         const ac = new AbortController();
         const gone = () => {
           if (!res.writableEnded) ac.abort();
@@ -385,7 +401,7 @@ function sse(core, req, res, peer, { maxBuffer = SSE_MAX_BUFFER, maxStallMs = SS
 
 export function denyCode(peer) {
   if (peer.class === "foreign") return "peer:uid";
-  if (peer.reason === "peer:no-claude-ancestor") return peer.reason;
+  if (peer.reason === "peer:no-agent-ancestor") return peer.reason;
   // a process that runs the bridge script but is not taken for the bridge (lib/peer.mjs bridgeCandidate): say why
   if (typeof peer.reason === "string" && peer.reason.startsWith("peer:bridge-")) return peer.reason;
   return `peer:${peer.class}`;

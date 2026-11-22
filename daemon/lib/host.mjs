@@ -7,6 +7,7 @@
 
 import { existsSync, readdirSync, statSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
+import { homedir } from "node:os";
 import { readPluginMeta, parseFileName, splitWhy } from "./meta.mjs";
 import { groupAlive, isAbsolutePath } from "./platform.mjs";
 import { msg } from "./i18n.mjs";
@@ -443,6 +444,13 @@ export function wallTimer(targetMs, fn, { stepMs = 60_000 } = {}) {
   return h;
 }
 
+// A plugin's declared requirements (<agenthub.requires check="…">) whose check path is missing in the plugins' HOME
+// (home — config.pluginHome on a test hub, otherwise the user's). → [requires entry] (empty — all present)
+export function missingRequires(meta, home = homedir()) {
+  return (meta?.requires || []).filter((r) => r.check && !existsSync(expandHome(r.check, home)));
+}
+const expandHome = (p, home) => (p === "~" ? home : p.startsWith("~/") ? join(home, p.slice(2)) : p);
+
 // The policy the running instance was started with still holds: effects, actions, officialness, tier and the registry it came
 // from (G19). The registry's display label is not compared here: a new label (a second registry was added, a name changed) does not
 // restart the plugin — the host updates it in place (sameLabel, B7).
@@ -462,6 +470,14 @@ export class PluginHost {
     // Task 80: stopped instances (removed, updated, policy changed) whose processes still run — killed jobs that have not
     // exited yet, a stream that has not closed. pluginByPid still finds them; dropped once nothing of them runs.
     this.leaving = new Set();
+    // What the last scan found (id → scanned plugin) and which of it is held back without running: id → "off" (a built-in
+    // the person turned off, settings.json → builtinOff) | "requires" (a declared requirement's check path is missing).
+    this.found = new Map();
+    this.held = new Map();
+    // Watches the check paths of missing requirements: the plugin starts as soon as its program appears (the 60 s safety
+    // rescan catches it too, this is only quicker).
+    this.reqWatcher = null;
+    this.reqPaths = "";
   }
   dirs() {
     const p = this.core.config.paths;
@@ -510,9 +526,15 @@ export class PluginHost {
   async rescanNow() {
     for (const inst of this.leaving) if (!inst.busy()) this.leaving.delete(inst);
     const found = this.discover();
+    this.found = found;
+    const held = new Map();
+    let running = false; // the set of running plugins changed
     for (const [id, inst] of this.instances) {
       const pl = found.get(id);
       let drop = !pl || pl.file !== inst.plugin.file || pl.mtimeMs !== inst.plugin.mtimeMs;
+      // turned off (built-in) or its requirement went away: stopped like any policy change, recorded as held below
+      const hold = !drop ? this.core.pluginHold(pl) : null;
+      if (hold) drop = true;
       // Same files, but the policy may have changed (lock, blocklist, consent): re-evaluate the running ones too.
       if (!drop) {
         const policy = await this.core.policyFor(pl);
@@ -524,16 +546,23 @@ export class PluginHost {
         }
       }
       if (drop) {
-        await inst.stop(!pl ? "removed" : pl.file !== inst.plugin.file || pl.mtimeMs !== inst.plugin.mtimeMs ? "updated" : "policy");
+        await inst.stop(!pl ? "removed" : pl.file !== inst.plugin.file || pl.mtimeMs !== inst.plugin.mtimeMs ? "updated" : hold || "policy");
         this.instances.delete(id);
         // its jobs are being killed (core.killJobs), a stream may not have closed: they stay attributed (task 80)
         if (inst.busy()) this.leaving.add(inst);
         // the same id remains on disk — a restart: events move to the new instance (core.pluginRemoved)
         this.core.pluginRemoved(id, { keepEvents: Boolean(pl) });
+        running = true;
       }
     }
     for (const [id, pl] of found) {
       if (this.instances.has(id)) continue;
+      // held back: not a refusal — no warning, one journal line when it starts being held (heldChanged)
+      const hold = this.core.pluginHold(pl);
+      if (hold) {
+        held.set(id, hold);
+        continue;
+      }
       const policy = await this.core.policyFor(pl);
       if (!policy.allowed) {
         this.core.warn(id, msg("warn.plugin.denied", { why: policy.reason || "policy" }));
@@ -545,8 +574,36 @@ export class PluginHost {
       this.instances.set(id, inst);
       this.core.pluginAdded(pl);
       inst.start();
+      running = true;
     }
     this.core.finishCarried();
+    this.heldChanged(held);
+    if (running) this.core.pluginsRunningChanged?.();
+  }
+  // After a scan: journal what started being held back, watch the missing requirements, tell the shell when the set changed.
+  heldChanged(held) {
+    let changed = held.size !== this.held.size;
+    for (const [id, why] of held) {
+      if (this.held.get(id) === why) continue;
+      changed = true;
+      this.core.journal.write({ type: "plugin-held", plugin: id, reason: why, ...(why === "requires" ? { requires: missingRequires(this.found.get(id)?.meta, this.home()).map((r) => r.name) } : {}) });
+    }
+    this.held = held;
+    const paths = [...new Set([...held].filter(([, why]) => why === "requires").flatMap(([id]) => missingRequires(this.found.get(id)?.meta, this.home()).map((r) => r.check)))].sort();
+    if (paths.join("\n") !== this.reqPaths) {
+      this.reqPaths = paths.join("\n");
+      this.reqWatcher?.close();
+      this.reqWatcher = null;
+      if (paths.length && !this.closed) {
+        this.reqWatcher = new Watcher(paths, () => this.rescan(), { debounceMs: 1000, home: this.home() });
+        this.reqWatcher.start();
+      }
+    }
+    if (changed) this.core.pluginsHeldChanged?.();
+  }
+  // The plugins' HOME: requirement checks look there (a test hub may give plugins their own, AGENTHUB_PLUGIN_HOME).
+  home() {
+    return this.core.config.pluginHome || homedir();
   }
   get(id) {
     return this.instances.get(id) || null;
@@ -625,8 +682,10 @@ export class PluginHost {
     return true;
   }
   async stop() {
+    this.closed = true;
     clearInterval(this.rescanTimer);
     this.dirWatcher?.close();
+    this.reqWatcher?.close();
     await Promise.all([...this.instances.values()].map((i) => i.stop("shutdown")));
     this.instances.clear();
   }

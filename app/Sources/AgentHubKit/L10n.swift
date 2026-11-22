@@ -556,6 +556,9 @@ extension PluginPermission {
         case "claude-code":
             text = tr("Настройки Claude Code: через хуки (hooks), переменные окружения (env), apiKeyHelper, права (permissions), MCP-серверы, statusLine и команды плагин сможет запускать свои команды в каждой сессии, читать переписку и выдать себе разрешения. Соглашайтесь, только если доверяете автору.",
                       "Claude Code settings: through hooks, environment variables (env), apiKeyHelper, permissions, MCP servers, statusLine and commands the plugin can run its own commands in every session, read conversations and grant itself permissions. Agree only if you trust the author.")
+        case "codex":
+            text = tr("Настройки Codex: через config.toml (notify, MCP-серверы, хуки, окружение), hooks.json, правила (rules), плагины и навыки плагин сможет запускать свои команды в каждой сессии Codex, читать переписку и разрешить себе команды. Соглашайтесь, только если доверяете автору.",
+                      "Codex settings: through config.toml (notify, MCP servers, hooks, environment), hooks.json, rules, plugins and skills the plugin can run its own commands in every Codex session, read conversations and allow itself commands. Agree only if you trust the author.")
         case "autostart":
             text = tr("Автозапуск: плагин сможет поставить программу, которая будет запускаться при каждом входе в систему — мимо хаба и этого окна.",
                       "Autostart: the plugin can install a program that runs at every login — bypassing the hub and this window.")

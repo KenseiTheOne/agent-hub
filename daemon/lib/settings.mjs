@@ -22,6 +22,10 @@ import { normLang, normLocales } from "./i18n.mjs";
 import { normPrefs, prefsFromFile, prefsToFile } from "./push/prefs.mjs";
 
 export const LANG_SETTINGS = ["system", "ru", "en"];
+// A plugin id as the scanner accepts it (lib/host.mjs PLUGIN_ID_RE); builtinOff keeps only such strings, at most MAX_OFF of them.
+const PLUGIN_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+const MAX_OFF = 64;
+const normIds = (v) => (Array.isArray(v) ? [...new Set(v.filter((x) => typeof x === "string" && PLUGIN_ID_RE.test(x)))].sort().slice(0, MAX_OFF) : []);
 const SYSTEM_TTL_MS = 60_000;
 const SYSTEM_STALE_MS = 5 * SYSTEM_TTL_MS;
 
@@ -105,7 +109,9 @@ export class Settings {
     // launchAtLogin — "Launch at login" (decision 2026-11-07): the daemon + app pair. Off — a daemon started
     // at login (launchd RunAtLoad) waits for the app and exits normally (the app service, lib/app-supervisor.mjs).
     // notifications — "Settings → Notifications" (lib/push/prefs.mjs): the master switch, kinds, quiet hours.
-    this.data = { lang: "system", checkPluginUpdates: true, checkHubUpdates: true, launchAtLogin: true, notifications: normPrefs(null) };
+    // builtinOff — ids of built-in plugins the person turned off (PUT /settings/builtin-plugins): the host does not start them.
+    // Kept here rather than next to the plugins: a hub update and `agenthub builtin update` re-copy <home>/Builtin, not this file.
+    this.data = { lang: "system", checkPluginUpdates: true, checkHubUpdates: true, launchAtLogin: true, notifications: normPrefs(null), builtinOff: [] };
     this.sys = null;
     this.sysAt = 0;
     this.load();
@@ -122,6 +128,7 @@ export class Settings {
     if (typeof this.data.checkHubUpdates !== "boolean") this.data.checkHubUpdates = true;
     if (typeof this.data.launchAtLogin !== "boolean") this.data.launchAtLogin = true;
     this.data.notifications = normPrefs(this.data.notifications);
+    this.data.builtinOff = normIds(this.data.builtinOff);
   }
   // Known keys only (ctx.settings.get).
   get(key) {
@@ -130,6 +137,7 @@ export class Settings {
     if (key === "checkHubUpdates") return this.data.checkHubUpdates;
     if (key === "launchAtLogin") return this.data.launchAtLogin;
     if (key === "notifications") return structuredClone(this.data.notifications);
+    if (key === "builtinOff") return [...this.data.builtinOff];
     return undefined;
   }
   get notifications() {
@@ -154,6 +162,17 @@ export class Settings {
   setCheckHubUpdates(v) {
     if (typeof v !== "boolean") throw Object.assign(new Error("enabled"), { code: "args:enabled:type" });
     this.data = { ...this.data, checkHubUpdates: v };
+    this.save();
+  }
+  // Whether a built-in plugin is on (not in builtinOff).
+  builtinEnabled(id) {
+    return !this.data.builtinOff.includes(id);
+  }
+  setBuiltinEnabled(id, enabled) {
+    if (typeof id !== "string" || !PLUGIN_ID_RE.test(id)) throw Object.assign(new Error("id"), { code: "args:id:type" });
+    if (typeof enabled !== "boolean") throw Object.assign(new Error("enabled"), { code: "args:enabled:type" });
+    const rest = this.data.builtinOff.filter((x) => x !== id);
+    this.data = { ...this.data, builtinOff: enabled ? rest : [...rest, id].sort() };
     this.save();
   }
   get checkPluginUpdates() {

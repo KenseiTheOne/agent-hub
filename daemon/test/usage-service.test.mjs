@@ -45,7 +45,7 @@ async function fakeApi({ status = 200, body = LIMITS } = {}) {
   return { url: `http://127.0.0.1:${srv.address().port}/api/oauth/usage`, seen, state, close: () => new Promise((r) => srv.close(r)) };
 }
 
-const usageCfg = (extra) => ({ services: { usage: { firstDelayMs: 10, intervalMs: 100, backoffCapMs: 100, ...extra } } });
+const usageCfg = (extra) => ({ services: { usage: { onDemand: false, firstDelayMs: 10, intervalMs: 100, backoffCapMs: 100, ...extra } } });
 
 test("keychainService: like Claude Code — suffix sha256(NFC(dir))[:8] with CLAUDE_CONFIG_DIR", () => {
   assert.equal(keychainService({}), "Claude Code-credentials");

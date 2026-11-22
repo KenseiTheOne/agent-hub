@@ -56,7 +56,7 @@ export class CoreInvoke {
     // Task 75: the same for an app-only primitive that acts on one plugin's thing and names it (pluginOf: job.cancel → the job's
     // plugin) when that plugin is a test-tier one — stopping a test plugin's job is testable without the app
     const testCli = cls === "cli" && this.config.testTier === "own" && ((target.kind === "action" && offer?.testTier === true) || (target.kind === "primitive" && this.testTierTargetOf(target.prim, target.rawArgs)));
-    if (needApp && cls !== "app" && !testCli) return deny(403, peerInfo?.reason && peerInfo.reason !== "peer:no-claude-ancestor" ? peerInfo.reason : `peer:${cls}`, { peer: cls });
+    if (needApp && cls !== "app" && !testCli) return deny(403, peerInfo?.reason && peerInfo.reason !== "peer:no-agent-ancestor" ? peerInfo.reason : `peer:${cls}`, { peer: cls });
     if (target.kind === "effect" && offer && !this.plugins.has(offer.pluginId)) return deny(404, "not-found");
 
     // 3. ESTOP

@@ -4,8 +4,10 @@
 //   app    — an executable inside AgentHub.app whose signature passes requirements.app (by default — the cdhash
 //            of the pinned build, lib/app-pin.mjs; or a certificate); a diagnostic launch with --probe-action
 //            (present only in a debug build) does not count as app;
-//   hook   — agenthub-hook (path from peer.hookPaths), and among its ancestors (up to 4 levels by ppid) there is a process
-//            whose signature passes requirements.claudeCode; the pid of that Claude is remembered;
+//   hook   — agenthub-hook (path from peer.hookPaths), and among its ancestors (up to 4 levels by ppid) there is an agent
+//            process whose signature passes that agent's requirement (lib/hook/agents.mjs: requirements.claudeCode for
+//            Claude Code, requirements.codex for Codex); the agent kind and pid are remembered (agent, agentPid; for
+//            Claude Code also claudePid, the name the journal and older callers use);
 //   bridge — the bridge process: a script from peer.bridgePaths run directly by an interpreter, the file itself inside the
 //            hub's own tree and writable by this user only (bridgeCandidate below — and what this does NOT prove);
 //   cli    — everything else (read-only and "immediate"-level actions).
@@ -37,6 +39,9 @@ import { createHash } from "node:crypto";
 import { expandHome, RUN_DIRS } from "./config.mjs";
 import { loadNative } from "./native.mjs";
 import { myUid, psCommand } from "./platform.mjs";
+import { AGENTS, AGENT_KINDS, isPrintArgv, peerAgent } from "./hook/agents.mjs";
+
+export { isPrintArgv };
 
 const CS_VALID = 0x1;
 const CS_ADHOC = 0x2;
@@ -58,6 +63,23 @@ function codesignVerify(target, requirement) {
         resolve({ ok: false, definite: false });
       },
     );
+  });
+}
+
+// The pids that have a file open (`lsof -Fp -- <file>`): [] — nobody, null — cannot tell (no lsof, an error). Only reads
+// the process table; the file is never opened here. → Promise<number[] | null>; never rejects.
+function fileHolders(path) {
+  return new Promise((resolve) => {
+    execFile("/usr/sbin/lsof", ["-n", "-P", "-w", "-Fp", "--", String(path)], { encoding: "utf8", timeout: 5000 }, (err, out) => {
+      // exit 1 with empty output — nobody has the file open
+      if (err && !(err.code === 1 && !String(out || "").trim())) return resolve(null);
+      const pids = [];
+      for (const line of String(out || "").split("\n")) {
+        const m = /^p(\d{1,10})$/.exec(line.trim());
+        if (m) pids.push(Number(m[1]));
+      }
+      resolve(pids);
+    });
   });
 }
 
@@ -83,17 +105,6 @@ export function requirementIdentity(requirement) {
   const id = /\bidentifier\s+"([^"]+)"/.exec(requirement || "")?.[1] ?? null;
   const team = /leaf\[subject\.OU\]\s*=\s*"?([A-Z0-9]{10})"?/.exec(requirement || "")?.[1] ?? null;
   return { id, team };
-}
-
-// argv flags with which Claude Code runs without a human (background `claude -p`, SDK).
-export function isPrintArgv(argv) {
-  return (argv || []).slice(1).some((a) => {
-    if (typeof a !== "string") return false;
-    if (a === "--") return false;
-    if (a === "-p" || a === "--print") return true;
-    if (/^--(print|output-format|input-format)(=|$)/.test(a)) return true;
-    return /^-[A-Za-z]*p[A-Za-z]*$/.test(a) && !a.startsWith("--");
-  });
 }
 
 export const PEER_CLASSES = ["app", "hook", "bridge", "cli"];
@@ -162,6 +173,7 @@ export function defaultSys() {
     codeInfo: n?.codeInfo ? (pid) => n.codeInfo(pid) ?? null : null,
     codesignVerify,
     fileId,
+    fileHolders,
     myUid,
     readJson: (p) => JSON.parse(readFileSync(p, "utf8")),
     writeJson: (p, v) => writeFileSync(p, JSON.stringify(v) + "\n", { mode: 0o600 }),
@@ -275,7 +287,9 @@ export function createPeer({ config, sys = defaultSys() } = {}) {
   const fileCache = new Map(); // `${req}|${fileId}` → Promise<verdict>
   const codeCache = new Map(); // `${req}|${requirement}|${cdhash}` → Promise<verdict>
   const peerCfg = config.peer || {};
-  const hookRes = (peerCfg.hookPaths || []).map((p) => globRe(expandHome(p)));
+  // the Codex plugin cache under a non-default codexHome is a hook path too
+  const codexHooks = config.codexHome ? [join(config.codexHome, "plugins", "**", "agenthub-hook")] : [];
+  const hookRes = [...(peerCfg.hookPaths || []), ...codexHooks].map((p) => globRe(expandHome(p)));
   const bridgeRes = (peerCfg.bridgePaths || []).map((p) => globRe(expandHome(p)));
   // entries without wildcards: the directory part is resolved (an install lists Versions/current/…), the file name is not
   const bridgeLiterals = (peerCfg.bridgePaths || []).map((p) => expandHome(p)).filter((p) => !/[*?]/.test(p));
@@ -401,17 +415,18 @@ export function createPeer({ config, sys = defaultSys() } = {}) {
     return { ok: false, pid, path, reason: "signature" };
   }
 
-  // The Claude Code process was started by a human: it has a controlling terminal and argv has no -p/--print/--output-format.
-  // These properties are set at launch and cannot be faked by an agent from inside the session (unlike the files
-  // ~/.claude/sessions/<pid>.json). → { ok, reason? }
-  function interactiveProcess(pid) {
+  // The agent process was started by a human — by the agent's own rule (lib/hook/agents.mjs: process): Claude Code has a
+  // controlling terminal and argv without -p/--print/--output-format; Codex is the terminal UI (with a terminal) or the
+  // shared app-server daemon the TUI starts (services.hook.codexModes). These properties are set at launch and cannot be
+  // faked by an agent from inside the session (unlike the files ~/.claude/sessions/<pid>.json). → { ok, reason?, mode? }
+  function interactiveProcess(pid, agent = "claude", opts = {}) {
+    const spec = AGENTS[agent];
+    if (!spec) return { ok: false, reason: "no-agent" };
     const info = sys.pidInfo(pid);
     if (!info) return { ok: false, reason: sys.available ? "no-process" : "no-peercred" };
-    if (info.tty !== true) return { ok: false, reason: "no-tty" };
     const argv = sys.procArgv(pid);
-    if (!Array.isArray(argv) || !argv.length) return { ok: false, reason: "no-argv" };
-    if (isPrintArgv(argv)) return { ok: false, reason: "print" };
-    return { ok: true };
+    if (!Array.isArray(argv) || !argv.length) return { ok: false, reason: info.tty !== true ? "no-tty" : "no-argv" };
+    return spec.process(info, argv, opts);
   }
 
   // The script the process runs: the executable itself or the interpreter's argv[1].
@@ -465,16 +480,31 @@ export function createPeer({ config, sys = defaultSys() } = {}) {
     return { ok: true };
   }
 
-  async function findClaudeAncestor(pid) {
+  // The nearest ancestor (up to `depth` levels) signed as one of the agents. The kernel's identifier (codeInfo), when
+  // known, skips requirements that cannot match (a shell between the agent and the hook) without running codesign.
+  // → { agent, pid } | null
+  async function findAgentAncestor(pid) {
     let cur = sys.pidInfo(pid);
     for (let i = 0; i < depth && cur; i++) {
       const ppid = cur.ppid;
       if (!ppid || ppid <= 1) return null;
-      const r = await verifySigned(ppid, "claudeCode");
-      if (r.ok) return ppid;
+      const code = sys.codeInfo ? sys.codeInfo(ppid) : null;
+      for (const kind of AGENT_KINDS) {
+        const requirement = config.requirements?.[AGENTS[kind].requirement];
+        if (!requirement) continue;
+        const want = requirementIdentity(requirement);
+        if (code && typeof code.identity === "string" && want.id && code.identity !== want.id) continue;
+        const r = await verifySigned(ppid, AGENTS[kind].requirement);
+        if (r.ok) return { agent: kind, pid: ppid };
+      }
       cur = sys.pidInfo(ppid);
     }
     return null;
+  }
+  // The Claude Code ancestor only (kept for callers that ask exactly that). → pid | null
+  async function findClaudeAncestor(pid) {
+    const a = await findAgentAncestor(pid);
+    return a?.agent === "claude" ? a.pid : null;
   }
 
   // Peer class by the fd of the accepted connection.
@@ -513,9 +543,9 @@ export function createPeer({ config, sys = defaultSys() } = {}) {
     }
     const scripts = scriptOf(pid, path);
     if (scripts.some((s) => hookRes.some((re) => re.test(s)))) {
-      const claudePid = await findClaudeAncestor(pid);
-      if (claudePid) return { ...base, class: "hook", claudePid };
-      return { ...base, class: "cli", reason: "peer:no-claude-ancestor", hookCandidate: true };
+      const a = await findAgentAncestor(pid);
+      if (a) return { ...base, class: "hook", agent: a.agent, agentPid: a.pid, ...(a.agent === "claude" ? { claudePid: a.pid } : {}) };
+      return { ...base, class: "cli", reason: "peer:no-agent-ancestor", hookCandidate: true };
     }
     const bridge = bridgeCandidate(pid, path);
     if (bridge) return bridge.ok ? { ...base, class: "bridge" } : { ...base, class: "cli", reason: bridge.reason, detail: bridge.detail };
@@ -526,20 +556,27 @@ export function createPeer({ config, sys = defaultSys() } = {}) {
     return classifyFd(socket?._handle?.fd);
   }
 
-  // the hook's session_id must match the sessionId from ~/.claude/sessions/<Claude pid>.json
-  function verifyHookSession(peer, sessionId) {
-    if (peer?.class !== "hook" || !peer.claudePid) return { ok: false, reason: "peer:not-hook" };
-    let data;
-    try {
-      data = sys.readJson(join(config.claudeHome, "sessions", `${peer.claudePid}.json`));
-    } catch {
-      return { ok: false, reason: "peer:no-session-file" };
+  // The hook's session_id belongs to its agent ancestor — by the agent's rule (lib/hook/agents.mjs: verifySession):
+  // Claude Code — sessionId in ~/.claude/sessions/<pid>.json; Codex — the thread's writer lock is open in that pid and
+  // transcript_path is the thread's rollout. body — the hook's event (Codex needs transcript_path, and agent_id for a
+  // subagent). A positive Codex verdict is kept for sessionCacheMs per (pid, start, session, agent_id, transcript_path):
+  // lsof costs a few hundred ms. Not for a process that hosts several conversations at once (spec.sharedProcess: the
+  // shared daemon): Codex briefly opens other threads' locks there (writer_lock.rs probes), and a thread closed in it
+  // would stay accepted until the entry expires. Always a Promise — callers must await it. → Promise<{ ok, reason? }>
+  const sessionCache = new Map(); // JSON [agent, pid, startSec, sessionId, agent_id, transcript_path] → expiry (ms)
+  const sessionCacheMs = peerCfg.hookSessionCacheMs ?? 30_000;
+  async function verifyHookSession(peer, sessionId, body = null) {
+    const a = peerAgent(peer);
+    if (!a) return { ok: false, reason: "peer:not-hook" };
+    const cacheable = a.kind !== "claude" && sessionCacheMs > 0 && !a.spec.sharedProcess?.(sys.procArgv(a.pid));
+    const key = JSON.stringify([a.kind, a.pid, sys.pidInfo(a.pid)?.startSec ?? null, String(sessionId), String(body?.agent_id ?? ""), String(body?.transcript_path ?? "")]);
+    if (cacheable && (sessionCache.get(key) ?? 0) > Date.now()) return { ok: true };
+    const r = await a.spec.verifySession({ config, sys, pid: a.pid, sessionId, body });
+    if (r.ok && cacheable) {
+      sessionCache.set(key, Date.now() + sessionCacheMs);
+      trim(sessionCache, 500);
     }
-    if (typeof sessionId !== "string" || !sessionId || data?.sessionId !== sessionId) {
-      return { ok: false, reason: "peer:session-mismatch" };
-    }
-    if (data.pid !== undefined && data.pid !== peer.claudePid) return { ok: false, reason: "peer:session-mismatch" };
-    return { ok: true };
+    return r.ok ? { ok: true } : { ok: false, reason: r.reason };
   }
 
   return {
@@ -547,6 +584,7 @@ export function createPeer({ config, sys = defaultSys() } = {}) {
     classifyFd,
     classifyPid,
     verifySigned,
+    findAgentAncestor,
     findClaudeAncestor,
     verifyHookSession,
     interactiveProcess,

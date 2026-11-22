@@ -22,8 +22,22 @@ export const RESERVED_IDS = new Set(["local", "staging", "disabled"]);
 const SEMVER_RE = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/;
 const PLATFORMS = new Set(["macos", "windows", "linux"]);
 
-// Forbidden locations (design §4, §7): conversation text, keys, environment, tokens.
-const FORBIDDEN_TREES = ["~/.claude/projects", "~/.cmuxterm/workstream.jsonl"];
+// Forbidden locations (design §4, §7): conversation text, keys, environment, tokens. Codex keeps conversations in its
+// rollouts (sessions, archived_sessions), the prompt history (history.jsonl), thread names (session_index.jsonl) and the
+// SQLite databases below.
+const FORBIDDEN_TREES = ["~/.claude/projects", "~/.cmuxterm/workstream.jsonl", "~/.codex/sessions", "~/.codex/archived_sessions", "~/.codex/history.jsonl", "~/.codex/session_index.jsonl"];
+// Files directly in a directory, by name: Codex's databases hold thread titles, first messages, items and logs
+// (state_<n>.sqlite, thread_history_<n>.sqlite, logs_<n>.sqlite, and memories/goals/queue databases that hold
+// conversation-derived text, with their -wal/-shm/-journal files). The version
+// number changes between Codex releases, so the name is a pattern; samples are what a mask is tried against.
+const FORBIDDEN_DIR_FILES = [
+  {
+    dir: "~/.codex",
+    re: /^(?:state|thread_history|logs|memories|goals|queue)_[^/]*\.sqlite(?:-(?:wal|shm|journal))?$/,
+    samples: ["state_5.sqlite", "thread_history_1.sqlite", "logs_2.sqlite", "memories_1.sqlite", "goals_1.sqlite", "queue_1.sqlite", "state_5.sqlite-wal"],
+    label: "~/.codex/*.sqlite",
+  },
+];
 const FORBIDDEN_FILE_RE = [/\.key$/, /^\.env(?:\..*)?$/, /^auth\.json$/];
 // [sample, distinctive part]: the mask matches the sample and itself contains that part (`*.key`, `.env*`, `auth.*`);
 // generic masks like `*.json` are not considered aimed at auth.json.
@@ -430,6 +444,10 @@ export function pathViolation(raw, lang = "ru") {
     if (glob && (r === "inside" || [tree, tree + "/zz", tree + "/zz/zz.jsonl"].some((s) => re.test(s)))) return L(lang, `маска охватывает ${tree}`, `the mask covers ${tree}`);
   }
   const last = p.split("/").pop();
+  for (const f of FORBIDDEN_DIR_FILES) {
+    if (!glob && f.re.test(last) && reach(p, `${f.dir}/${last}`) === "inside") return L(lang, `запрещено: ${f.label}`, `forbidden: ${f.label}`);
+    if (glob && f.samples.some((smp) => reach(p, `${f.dir}/${smp}`) === "inside")) return L(lang, `маска охватывает ${f.label}`, `the mask covers ${f.label}`);
+  }
   if (!isGlob(last) && FORBIDDEN_FILE_RE.some((r) => r.test(last))) return L(lang, `запрещённый файл: ${last}`, `forbidden file: ${last}`);
   if (isGlob(last) && last !== "*" && last !== "**") {
     const lre = globToRe(last);
@@ -455,6 +473,11 @@ export const WRITE_RISKS = Object.freeze({
   // all of ~/.claude (except WRITE_SAFE): besides settings and hooks there are statusline scripts, ide/*.lock (a fake IDE and its
   // MCP), local/claude (an old install, run by an alias), shell-snapshots (read by the Bash tool), etc.
   "claude-code": ["~/.claude", "~/.claude.json", "/library/application support/claudecode", "/etc/claude-code"],
+  // all of ~/.codex: config.toml (notify, mcp_servers, [hooks], shell_environment_policy, profiles), hooks.json, rules/
+  // (execpolicy *.rules that allow commands), plugins/ (installed plugins with their hooks), skills/, AGENTS.md; the
+  // system layers in /etc/codex (config.toml, managed_config.toml, requirements.toml); ~/.agents (skills and plugin
+  // marketplaces Codex reads)
+  codex: ["~/.codex", "/etc/codex", "~/.agents"],
   autostart: ["~/library/launchagents", "~/library/launchdaemons", "/library/launchagents", "/library/launchdaemons", "/library/startupitems", "~/library/application support/com.apple.backgroundtaskmanagementagent", "/etc/crontab", "/etc/periodic", "/usr/lib/cron", "/var/at", "~/.config/autostart", "~/library/scripts", "~/library/workflows", "~/.hammerspoon", "~/.config/systemd/user", "~/appdata/roaming/microsoft/windows/start menu/programs/startup"],
   shell: ["~/.zshrc", "~/.zshenv", "~/.zprofile", "~/.zlogin", "~/.zlogout", "~/.bashrc", "~/.bash_profile", "~/.bash_login", "~/.bash_logout", "~/.profile", "~/.config/fish", "~/.oh-my-zsh", "~/.zsh", "~/.config/zsh", "/etc/zshrc", "/etc/zshenv", "/etc/zprofile", "/etc/profile", "/etc/bashrc", "/etc/paths", "/etc/paths.d", "/etc/launchd.conf", "/etc/sudoers", "/etc/sudoers.d", "~/documents/powershell", "~/documents/windowspowershell"],
   bin: ["~/.local/bin", "~/bin", "/usr/local/bin", "/opt/homebrew/bin", "~/.local/share/claude", "~/.npm-global", "~/.bun/bin", "~/.cargo/bin", "/opt/homebrew/lib/node_modules", "/usr/local/lib/node_modules"],
@@ -471,6 +494,8 @@ const HUB_DIR = "~/library/application support/agenthub";
 // The project's Claude Code settings directory (.claude as a whole — hooks, commands, agents, settings) and .mcp.json: a path or
 // mask aimed at them, wherever the project is.
 const PROJECT_CLAUDE_RE = /(?:^|\/)\.claude(?:\/|$)|(?:^|\/)\.mcp\.json$/;
+// The same for Codex: a project's .codex (config.toml, hooks.json, rules — trusted project layers).
+const PROJECT_CODEX_RE = /(?:^|\/)\.codex(?:\/|$)/;
 // Places on this machine found by their real paths (setLocalWritePlaces): ~/.zshrc as a link into dotfiles, etc.
 let localPlaces = [];
 
@@ -504,12 +529,14 @@ export function writeRisk(raw, { pluginId = null } = {}) {
   }
   // a project's .claude (the home ~/.claude is handled above, with WRITE_SAFE)
   if ((dotdot || !under(p, "~/.claude")) && PROJECT_CLAUDE_RE.test(glob ? p.replace(/[*?[\]{}]/g, "") : p)) return "claude-code";
+  if (PROJECT_CODEX_RE.test(glob ? p.replace(/[*?[\]{}]/g, "") : p)) return "codex";
   return null;
 }
 
 // Texts for the registry linter (reviewer) and the terminal window — what writing to such a place grants.
 export const WRITE_RISK_TEXT = Object.freeze({
   "claude-code": ["настройки Claude Code: через хуки, env, apiKeyHelper, права, MCP-серверы, statusLine и команды плагин сможет запускать свои команды в каждой сессии, читать переписку и выдать себе разрешения", "Claude Code settings: through hooks, env, apiKeyHelper, permissions, MCP servers, statusLine and commands the plugin can run its own commands in every session, read conversations and grant itself permissions"],
+  codex: ["настройки Codex: через config.toml (notify, MCP-серверы, хуки, окружение), hooks.json, правила rules, плагины и навыки плагин сможет запускать свои команды в каждой сессии Codex, читать переписку и разрешить себе команды", "Codex settings: through config.toml (notify, MCP servers, hooks, environment), hooks.json, rules, plugins and skills the plugin can run its own commands in every Codex session, read conversations and allow itself commands"],
   autostart: ["автозапуск: плагин сможет поставить программу, которая будет запускаться при каждом входе — мимо хаба и окна согласия", "autostart: the plugin can install a program that runs at every login — bypassing the hub and the consent window"],
   shell: ["файлы запуска оболочки: их команды выполняются в каждом новом терминале и в сессиях Claude Code (окружение, PATH, псевдонимы)", "shell startup files: their commands run in every new terminal and in Claude Code sessions (environment, PATH, aliases)"],
   bin: ["каталог программ из PATH или глобальных пакетов npm: можно подложить свою программу под именем claude, git или node (или подменить сам Claude Code) — она запустится вместо настоящей", "a program folder on PATH or the global npm packages: a program named claude, git or node placed here (or a replaced Claude Code) runs instead of the real one"],
@@ -545,6 +572,12 @@ const SOURCE_PATTERNS = [
   // ".claude/./projects", ".claude//projects" — the same directory (normalizePath removes "/./" and repeated "/")
   [/\.claude(?:[\\/]+\.)*[\\/]+projects/i, "~/.claude/projects"],
   [/workstream\.jsonl/i, "workstream.jsonl"],
+  [/\.codex(?:[\\/]+\.)*[\\/]+sessions\b/i, "~/.codex/sessions"],
+  [/\.codex(?:[\\/]+\.)*[\\/]+archived_sessions\b/i, "~/.codex/archived_sessions"],
+  [/\.codex(?:[\\/]+\.)*[\\/]+history\.jsonl/i, "~/.codex/history.jsonl"],
+  [/session_index\.jsonl/i, "~/.codex/session_index.jsonl"],
+  // the names of Codex's databases (also when the version is put together: `state_${n}.sqlite`)
+  [/\b(?:state|thread_history|logs|memories|goals|queue)_[\w${}.-]*\.sqlite\b/i, "~/.codex/*.sqlite"],
   [/auth\.json/i, "auth.json"],
   // any string literal that ends in ".key" (example.com.key, `${host}.local.key`, "--key-file=my.site.key"); SF Symbol
   // names (sfimage=person.badge.key, symbol="lock.rectangle.key") are removed from the text first (sfSymbolsStripped)

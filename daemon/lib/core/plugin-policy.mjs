@@ -4,7 +4,8 @@
 // The methods are installed on Core.prototype by lib/core.mjs (lib/parts.mjs): `this` is the Core.
 
 import { splitWhy } from "../meta.mjs";
-import { msg } from "../i18n.mjs";
+import { contentOf, msg, pickLang } from "../i18n.mjs";
+import { missingRequires } from "../host.mjs";
 import { effectAllowed, LOCAL_EFFECTS, THIRD_PARTY_EFFECTS, trustedPlugin } from "./tiers.mjs";
 
 // Variables that services give to trusted plugins (ctx.providePluginEnv): AGENTHUB_<NAME>, not among those reserved by the core.
@@ -64,6 +65,94 @@ export class CorePluginPolicy {
     }
     if (testOwn && res.allowed) res = { ...res, tier: "own", official: false, actions: hasActions, testTier: true };
     return res;
+  }
+  // ---------- held back: built-ins turned off, missing requirements ----------
+  // Why a discovered plugin is not run, apart from its policy: "off" — a built-in the person turned off
+  // (settings.json → builtinOff, PUT /settings/builtin-plugins); "requires" — a declared requirement
+  // (<agenthub.requires check="…">) is missing in the plugins' HOME. → "off" | "requires" | null
+  pluginHold(pl) {
+    if (pl.source === "builtin" && !this.settings.builtinEnabled(pl.id)) return "off";
+    if (missingRequires(pl.meta, this.host.home()).length) return "requires";
+    return null;
+  }
+  // Requirements of a scanned plugin in the hub language: [{ name, url, note, check, present }].
+  requiresView(pl, lang = this.lang()) {
+    const home = this.host.home();
+    const missing = new Set(missingRequires(pl.meta, home).map((r) => r.name));
+    return (pl.meta.requires || []).map((r) => {
+      const tr = contentOf(pl.meta.i18n || {}, lang, { field: "requires" }).requires?.[r.name] || {};
+      return { name: tr.name || r.name, url: r.url, note: tr.note || r.note || null, check: r.check, present: !missing.has(r.name) };
+    });
+  }
+  // GET /state.builtinPlugins: every built-in the last scan found, running or not — the Plugins page shows a switch for each.
+  // [{ id, title, desc, version, icon, enabled, running, held: "off" | "requires" | null, requires }]
+  builtinPluginList() {
+    const lang = this.lang();
+    const out = [];
+    for (const pl of this.host.found.values()) {
+      if (pl.source !== "builtin") continue;
+      const i18n = pl.meta.i18n || {};
+      out.push({
+        id: pl.id,
+        title: pickLang(pl.meta.title || pl.id, i18n, "title", lang),
+        desc: pickLang(pl.meta.desc || null, i18n, "desc", lang),
+        version: pl.meta.version || null,
+        icon: pl.meta.icon ? { ...pl.meta.icon } : null,
+        enabled: this.settings.builtinEnabled(pl.id),
+        running: this.host.instances.has(pl.id),
+        held: this.host.held.get(pl.id) || null,
+        requires: this.requiresView(pl, lang),
+      });
+    }
+    return out.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+  }
+  // GET /state.heldPlugins: plugins of any source found but held back (pluginHold) — [{ id, source, reason, requires }].
+  heldPluginList() {
+    const lang = this.lang();
+    const out = [];
+    for (const [id, reason] of this.host.held) {
+      const pl = this.host.found.get(id);
+      if (pl) out.push({ id, source: pl.source, reason, requires: this.requiresView(pl, lang) });
+    }
+    return out.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+  }
+  // The set of held plugins changed (a scan): the shell updates its lists; services that serve plugins re-check demand.
+  pluginsHeldChanged() {
+    this.emit({ type: "plugins.held", builtinPlugins: this.builtinPluginList(), heldPlugins: this.heldPluginList() });
+  }
+  // Turn a built-in plugin on or off. App only (checked by the route). → { builtinPlugins } | { error }
+  async setBuiltinEnabled(id, enabled, peerInfo) {
+    if (typeof enabled !== "boolean") return { error: "args:enabled:type" };
+    const pl = this.host.found.get(id);
+    if (!pl || pl.source !== "builtin") return { error: "builtin:unknown" };
+    if (this.settings.builtinEnabled(id) !== enabled) {
+      this.settings.setBuiltinEnabled(id, enabled);
+      this.journal.write({ type: "settings-changed", key: "builtinPlugins", plugin: id, value: enabled, peer: peerInfo?.class, pid: peerInfo?.pid });
+      await this.host.rescan();
+      this.emit({ type: "settings.changed", builtinPlugins: this.builtinPluginList() });
+    }
+    return { builtinPlugins: this.builtinPluginList() };
+  }
+  // ---------- demand for what services give plugins ----------
+  // Whether a running trusted plugin declares reading or watching the file a service gives in the variable `name`
+  // (<agenthub.fsRead>, <agenthub.watch> or <agenthub.fsWrite> starting with $NAME or ${NAME}). A service that polls a network
+  // source for its file (usage, models) polls only while this is true (ctx.pluginEnvWanted; the internal bus event
+  // plugins.running says when to look again). → boolean
+  pluginEnvWanted(name) {
+    if (!PLUGIN_ENV_RE.test(String(name))) return false;
+    const re = new RegExp(`^\\$(?:${name}|\\{${name}\\})(?![A-Za-z0-9_])`);
+    for (const pl of this.pluginMeta.values()) {
+      if (!trustedPlugin(pl)) continue;
+      const m = pl.meta || {};
+      for (const e of [...(m.fsRead || []), ...(m.watch || []), ...(m.fsWrite || [])]) {
+        if (re.test(splitWhy(e && typeof e === "object" ? e.path : e).what)) return true;
+      }
+    }
+    return false;
+  }
+  // The set of running plugins changed (a scan started or stopped some). Internal only — not an SSE event.
+  pluginsRunningChanged() {
+    this.bus.emit("plugins.running", { type: "plugins.running" });
   }
   // A core service gives trusted plugins an environment variable (a path to its cache). value null — remove.
   // Name is AGENTHUB_<NAME>, not among those reserved by the core (buildEnv). Already running plugins see it from their next run.

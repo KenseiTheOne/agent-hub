@@ -32,6 +32,7 @@ import { realExec, refuseExec } from "./terminals/_exec.mjs";
 import { msg, releaseLangSource, setLangSource } from "./i18n.mjs";
 import { Settings } from "./settings.mjs";
 import { HOOK_SEEN_FILE, HookSeen } from "./hook/seen.mjs";
+import { pidFields } from "./hook/agents.mjs";
 import { loadStateJson } from "./statefile.mjs";
 
 // Hub version is the VERSION file at the repository root (lib/version.mjs), not a string in code.
@@ -58,7 +59,7 @@ export { EFFORT_LEVELS, SESSION_MODEL_RE, SESSION_META_SOURCES, EXTERNAL_SESSION
 export { SERVICE_STATE_SLOTS } from "./core/state.mjs";
 
 // Hook events without a decision (only the interactive session registry and dismissing cards) — called even while the hub is paused.
-const HOOK_LIFECYCLE = new Set(["SessionStart", "SessionEnd", "Stop"]);
+const HOOK_LIFECYCLE = new Set(["SessionStart", "UserPromptSubmit", "SessionEnd", "Stop"]);
 
 export class Core {
   constructor({ config, peer, journal = null, terminalExec = null }) {
@@ -451,7 +452,7 @@ export class Core {
     let answer = {};
     let handled = false;
     // While the hub is paused, only requests the hub answers go without handlers (PermissionRequest and others):
-    // the session asks in the terminal. Lifecycle events (SessionStart, SessionEnd, Stop) go as usual,
+    // the session asks in the terminal. Lifecycle events (SessionStart, UserPromptSubmit, SessionEnd, Stop) go as usual,
     // otherwise the interactive session registry would diverge from Claude (after /clear while paused — the old id of the same pid).
     const estop = this.estop();
     if (!estop || HOOK_LIFECYCLE.has(event)) {
@@ -467,7 +468,7 @@ export class Core {
         } catch {}
       }
     }
-    this.journal.write({ type: "hook", event, claudePid: peerInfo?.claudePid, sessionId: body?.session_id, handled, estop });
+    this.journal.write({ type: "hook", event, ...pidFields(peerInfo?.agent, peerInfo?.agentPid ?? peerInfo?.claudePid), sessionId: body?.session_id, handled, estop });
     return answer;
   }
 }

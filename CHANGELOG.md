@@ -4,7 +4,39 @@ Releases are git tags `vX.Y.Z` (also published as GitHub releases); the current 
 The plugin contract has its own version history in
 [`docs/extension-points.md`](docs/extension-points.md#contract-versions).
 
-## 0.1.13 — 2026-11-21
+## 0.1.14 — 2026-11-22
+
+### Added
+
+- **Codex CLI in the hub.** The `agent-hub` plugin installs into Codex too (`codex plugin marketplace add
+  KenseiTheOne/agent-hub`, `codex plugin add agent-hub@agent-hub`, then trust its hooks once in Codex): Codex
+  permission requests come to the hub as cards — "Allow once", "Deny" or "Decide in terminal", which hands the request
+  back to Codex's own prompt — and Codex sessions register on start and clear on exit. The hub accepts the hook only
+  from the Codex binary signed by OpenAI (`requirements.codex`) and checks that the session really belongs to that
+  process: the thread's lock is open in it and the transcript is that thread's.
+- **Built-in Codex plugins:** "Codex Sessions" (live Codex sessions with model, effort and status; spawned subagents
+  nest under their parent, Codex's own approval reviewer is not shown), "Codex Quota" (the plan's limits, read from
+  Codex itself) and "Codex Spend" (tokens per day and model from local Codex logs).
+- **Restart button in the panel**, next to "Pause hub", as in the popover.
+- **`codex` risk class for plugin permissions:** writing anywhere in `~/.codex`, `/etc/codex`, `~/.agents` or a
+  project's `.codex` shows a red line in the consent window; Codex conversations, history and databases are forbidden
+  locations like Claude Code's transcripts.
+- **Turn built-in plugins off.** Each built-in plugin has a switch on the Plugins page. A plugin turned off does not
+  run — no process, no notifications, no section in the sidebar, panel or popover — and is not counted when the hub
+  decides whether the Mac can be shut down. Its data stays, and it stays off across hub updates. Turn it on and it runs
+  again.
+- **Plugins for a program you don't have are hidden.** A plugin that declares a program it needs
+  (`<agenthub.requires>`) and does not find it no longer runs or takes a section. The Plugins page lists it with
+  "Requires <program> — not found". Once the program is installed, the plugin appears by itself, without a restart.
+  The built-in plugins now declare theirs: the Claude ones need Claude Code, the Codex ones need Codex. So a Mac
+  without Codex shows no Codex sections.
+- **No quota or model requests nobody reads.** The hub fetches the Claude quota and model list only while a running
+  plugin uses them. With "Quota" turned off, for example, the hub makes no quota requests.
+
+### Fixed
+
+- **The icon's right-click menu** lost the inset under its last item: it was opened 5 pt too high, so macOS pinned it
+  below the menu bar and cut the window shorter.
 
 ### Changed
 

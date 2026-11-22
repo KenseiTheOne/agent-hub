@@ -14,7 +14,7 @@ import { VERSION } from "../version.mjs";
 // GET /state sections that services supply (ctx.provideState, Core.snapshot). A name is a JSON key of /state.
 const STATE_SECTION_RE = /^[a-z][A-Za-z0-9]{0,39}$/;
 // The core's own keys of /state — a service cannot provide them.
-const CORE_STATE_KEYS = new Set(["version", "contract", "now", "pid", "estop", "status", "waitingSessions", "severity", "plugins", "sessions", "externalSessions", "primitives", "appPin", "lang", "hub", "terminals", "extensions", "damagedFiles", "limits", "hook", "peer", "seq"]);
+const CORE_STATE_KEYS = new Set(["version", "contract", "now", "pid", "estop", "status", "waitingSessions", "severity", "plugins", "sessions", "externalSessions", "primitives", "appPin", "lang", "hub", "terminals", "extensions", "damagedFiles", "limits", "hook", "builtinPlugins", "heldPlugins", "peer", "seq"]);
 // Slots with a fixed place among the core's keys (clients decode /state by these names): null until a service fills one.
 export const SERVICE_STATE_SLOTS = new Set(["pluginUpdates", "ownPlugins", "registryKeys", "hubUpdate", "idle", "connections", "bridge"]);
 // Setting sections the core builds; a service adds its own fields to them (they show in GET /settings too).
@@ -128,10 +128,16 @@ export class CoreState {
       // Limits the shell shows next to what it starts: actionTimeoutMs — how long one plugin action may run before the hub
       // kills it (config.json → plugins.actionTimeoutMs).
       limits: { actionTimeoutMs: this.config.plugins.actionTimeoutMs },
-      // The Claude Code hook as this hub sees it (lib/hook/seen.mjs): {installed, lastEventAt, reason?, installCommand} —
+      // The agent hook (Claude Code, Codex) as this hub sees it (lib/hook/seen.mjs): {installed, lastEventAt, reason?, installCommand} —
       // installed means a verified hook event has reached this hub (the last one at lastEventAt); the hub does not read
       // Claude Code's settings. installCommand — the command that installs the hook.
       hook: this.hookSeen.info(),
+      // Built-ins with their switch (settings.json → builtinOff) and requirements: [{id, title, desc, version, icon, enabled,
+      // running, held, requires: [{name, url, note, check, present}]}] — the Plugins page lists them even when off or held.
+      builtinPlugins: this.builtinPluginList(),
+      // Plugins of any source found but not run: turned off (built-ins) or a declared requirement missing —
+      // [{id, source, reason: "off" | "requires", requires}]. Event plugins.held when the set changes.
+      heldPlugins: this.heldPluginList(),
       // sections services added on their own (ctx.provideState with a new name)
       ...this.extraState(),
       ...(peerInfo ? { peer: { class: peerInfo.class, reason: peerInfo.reason || null } } : {}),

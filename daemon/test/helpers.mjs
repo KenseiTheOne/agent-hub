@@ -56,12 +56,16 @@ export async function startHub({ pluginsDir, overrides = {}, sys, env = {}, serv
   if (configFile) writeFileSync(join(home, "config.json"), JSON.stringify(typeof configFile === "function" ? configFile(home) : configFile), { mode: 0o600 });
   const claudeHome = join(home, "claude-home");
   mkdirSync(join(claudeHome, "sessions"), { recursive: true });
+  const codexHome = join(home, "codex-home");
+  mkdirSync(join(codexHome, "sessions"), { recursive: true });
+  mkdirSync(join(codexHome, "thread-writer-locks"), { recursive: true });
   const config = loadConfig({
     env: {
       AGENTHUB_HOME: home,
       AGENTHUB_BUILTIN_PLUGINS: pluginsDir || join(home, "no-builtin"),
       AGENTHUB_TEST_EXEC_LOG: join(home, "exec.log"),
       AGENTHUB_CLAUDE_HOME: claudeHome,
+      AGENTHUB_CODEX_HOME: codexHome,
       AGENTHUB_SERVICES: services,
       ...env,
     },
@@ -74,6 +78,7 @@ export async function startHub({ pluginsDir, overrides = {}, sys, env = {}, serv
   return {
     home,
     claudeHome,
+    codexHome,
     config,
     core,
     srv,

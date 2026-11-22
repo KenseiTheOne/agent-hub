@@ -13,7 +13,7 @@ import { req, startHub } from "./helpers.mjs";
 const STATE_KEYS = [
   "version", "contract", "now", "pid", "estop", "status", "waitingSessions", "severity", "plugins", "sessions", "externalSessions",
   "primitives", "appPin", "lang", "pluginUpdates", "ownPlugins", "registryKeys", "hubUpdate", "launchAtLogin", "notifications",
-  "idle", "connections", "hub", "bridge", "terminals", "extensions", "damagedFiles", "limits", "hook",
+  "idle", "connections", "hub", "bridge", "terminals", "extensions", "damagedFiles", "limits", "hook", "builtinPlugins", "heldPlugins",
 ];
 
 test("/state: the key order is fixed; service sections are null and the setting sections are the core's own without services", async () => {

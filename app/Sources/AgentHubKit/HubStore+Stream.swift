@@ -222,6 +222,8 @@ extension HubStore {
                let raw = try? JSONEncoder().encode(n), let info = try? JSONDecoder().decode(NotificationsInfo.self, from: raw) {
                 state?.notifications = info
             }
+            // a built-in was turned on or off (settings.changed), or a scan held a plugin back or let it run (plugins.held)
+            if type == "settings.changed" || type == "plugins.held" { state?.applyHeld(data) }
             // OAuth connections (oauth service): login started, finished, expired, "Disconnect"
             if type == "connections.changed", let list = ConnectionInfo.list(from: data["connections"]) { state?.connections = list }
             // external extensions (G4): a file appeared, changed or went, an approval or a revocation

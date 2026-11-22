@@ -1,9 +1,11 @@
 #!/usr/bin/env node
 // <agenthub.title>Claude Code Фоновые агенты</agenthub.title>
 // <agenthub.title lang="en">Claude Code Background Agents</agenthub.title>
-// <agenthub.version>1.3.0</agenthub.version>
+// <agenthub.version>1.3.1</agenthub.version>
 // <agenthub.desc>Фоновые агенты и прогоны Workflow в Claude Code: что идёт, что упало, сколько потрачено</agenthub.desc>
 // <agenthub.desc lang="en">Claude Code background agents and Workflow runs: what's running, what failed, what it cost</agenthub.desc>
+// <agenthub.requires name="Claude Code" url="https://claude.com/product/claude-code" check="~/.claude">агент, чьи фоновые агенты и прогоны показывает плагин</agenthub.requires>
+// <agenthub.requires lang="en" name="Claude Code">the agent whose background agents and runs this plugin shows</agenthub.requires>
 // <agenthub.status value="ok" label="Прогоны в порядке">Идущие и завершённые прогоны без сбоев</agenthub.status>
 // <agenthub.status value="ok" lang="en" label="Runs OK">Running and finished runs, no failures</agenthub.status>
 // <agenthub.status value="wait" label="Прогон требует внимания">Прогон упал, остановлен или остался без сессии — стоит посмотреть</agenthub.status>

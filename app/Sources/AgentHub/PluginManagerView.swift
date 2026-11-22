@@ -205,15 +205,34 @@ struct PluginManagerView: View {
         var own: OwnSourceInfo? = nil
         /// The registry it came from, only when several exist (G19).
         var registry: String? = nil
+        var icon: PluginIcon? = nil
+        /// A built-in's switch: its state; nil — no switch (not a built-in, or an older daemon).
+        var enabled: Bool? = nil
+        /// The note is a quiet status (turned off), not a problem.
+        var quietNote = false
         var removable: Bool { tier.removable }
     }
 
     private var rows: [Row] {
         var out: [Row] = []
         let cat = Dictionary((catalog?.plugins ?? []).map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
-        for p in store.state?.plugins ?? [] where p.tier == .builtin {
-            out.append(Row(id: p.id, title: p.title, desc: p.desc ?? "", version: p.version, tier: .builtin, sfimage: p.header.first?.sfImage,
-                           permissions: []))
+        if let builtins = store.state?.builtinPlugins {
+            // every built-in the daemon found, with its switch — also those turned off or waiting for their program
+            for b in builtins {
+                let live = store.plugin(b.id)
+                out.append(Row(id: b.id, title: b.title, desc: b.desc ?? "", version: b.version, tier: .builtin, sfimage: live?.header.first?.sfImage,
+                               note: HeldText.builtinStatus(b), permissions: [], icon: b.icon, enabled: b.enabled, quietNote: !b.enabled))
+            }
+        } else {
+            for p in store.state?.plugins ?? [] where p.tier == .builtin {
+                out.append(Row(id: p.id, title: p.title, desc: p.desc ?? "", version: p.version, tier: .builtin, sfimage: p.header.first?.sfImage,
+                               permissions: []))
+            }
+        }
+        // installed and local plugins held back by a missing requirement: the plugin's own name and note for it
+        let held = Dictionary((store.state?.heldPlugins ?? []).map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+        let heldNote = { (id: String) -> String? in
+            HeldText.requirementLine(held[id]?.missingRequirements ?? []).map { $0 + tr(". Появится сам, когда программа найдётся.", ". It shows up by itself once the program is found.") }
         }
         for i in store.installed?.installed ?? [] {
             let live = store.plugin(i.id)
@@ -221,14 +240,14 @@ struct PluginManagerView: View {
             out.append(Row(id: i.id, title: live?.title ?? c?.displayTitle ?? i.title ?? i.id, desc: live?.desc ?? c?.desc ?? "",
                            version: i.version, tier: i.officialPending ? .official : (live?.tier ?? i.tier), sfimage: live?.header.first?.sfImage,
                            update: c?.updateKind != nil ? c : nil, officialPending: i.officialPending,
-                           note: i.disabled.map { tr("Заблокирован реестром: \($0)", "Blocked by the registry: \($0)") } ?? i.own?.statusText ?? (live == nil ? tr("не запущен", "not running") : nil),
+                           note: i.disabled.map { tr("Заблокирован реестром: \($0)", "Blocked by the registry: \($0)") } ?? i.own?.statusText ?? heldNote(i.id) ?? (live == nil ? tr("не запущен", "not running") : nil),
                            permissions: i.permissions, own: i.own, registry: i.registryLabel ?? live?.registryLabel))
         }
         for l in store.installed?.local ?? [] {
             let live = store.plugin(l.id)
             out.append(Row(id: l.id, title: live?.title ?? l.id, desc: tr("Локальный (для разработки): может только открывать ссылки и файлы", "Local (development): can only open links and files"),
                            version: l.version, tier: .local, sfimage: "hammer",
-                           note: l.disabled.map { tr("Заблокирован реестром: \($0)", "Blocked by the registry: \($0)") }, permissions: l.permissions))
+                           note: l.disabled.map { tr("Заблокирован реестром: \($0)", "Blocked by the registry: \($0)") } ?? heldNote(l.id), permissions: l.permissions))
         }
         return out
     }
@@ -256,7 +275,8 @@ struct PluginManagerView: View {
 
     private func row(_ r: Row) -> some View {
         HStack(spacing: 12) {
-            PluginTile(id: r.id, sfimage: r.sfimage, size: 36, radius: 10)
+            PluginTile(id: r.id, sfimage: r.sfimage, size: 36, radius: 10, icon: r.icon)
+                .opacity(r.enabled == false ? 0.45 : 1)
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 6) {
                     Text(r.title).font(.system(size: 13, weight: .semibold))
@@ -265,7 +285,7 @@ struct PluginManagerView: View {
                 }
                 if !r.desc.isEmpty { Text(r.desc).font(.system(size: 12)).foregroundStyle(.white.opacity(0.62)).lineLimit(1) }
                 if let n = r.note {
-                    Text(n).font(.system(size: 11.5)).foregroundStyle(.orange).fixedSize(horizontal: false, vertical: true)
+                    Text(n).font(.system(size: 11.5)).foregroundStyle(r.quietNote ? Color.white.opacity(0.5) : Color.orange).fixedSize(horizontal: false, vertical: true)
                         .tip(r.own?.errors.joined(separator: "\n") ?? "")
                 }
             }
@@ -277,6 +297,7 @@ struct PluginManagerView: View {
                 Button(tr("Права", "Permissions")) { Task { await PermissionsWindow.show(title: r.title, id: r.id, tier: r.tier, permissions: r.permissions) } }
                     .buttonStyle(CapsuleStyle(height: 28, expand: false))
             }
+            if let on = r.enabled { builtinSwitch(r, on: on) }
             if r.removable {
                 Button(tr("Удалить", "Remove")) { confirmRemove(r.id, title: r.title) }
                     .buttonStyle(.plain)
@@ -286,6 +307,18 @@ struct PluginManagerView: View {
             }
         }
         .padding(.horizontal, 14).padding(.vertical, 12)
+    }
+
+    /// A built-in's on/off switch: off — the plugin isn't run and has no section; its files and data stay.
+    private func builtinSwitch(_ r: Row, on: Bool) -> some View {
+        Toggle("", isOn: Binding(get: { on }, set: { v in Task { await store.setBuiltinEnabled(r.id, enabled: v) } }))
+            .toggleStyle(.switch)
+            .controlSize(.small)
+            .labelsHidden()
+            .disabled(!isApp)
+            .tip(!isApp ? tr("Только закреплённая сборка приложения", "Pinned app build only")
+                 : on ? tr("Выключить: плагин не будет запускаться и пропадёт из панели; его данные останутся", "Turn off: the plugin stops running and leaves the panel; its data stays")
+                 : tr("Включить: плагин снова запустится", "Turn on: the plugin runs again"))
     }
 
     /// Own plugin: the folder has a new version with new permissions — the consent window (the daemon takes it from the folder).

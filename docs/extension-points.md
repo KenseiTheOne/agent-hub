@@ -46,7 +46,7 @@ written to the journal.
   (`ctx.exec` runs no programs, but writes `{file,args}` as a JSON line to the file and returns `code: 0`),
   `AGENTHUB_PLUGIN_HOME` (the plugins' HOME — a synthetic `~`; only works together with `AGENTHUB_HOME`).
 - `config.json` is merged over the defaults (`daemon/lib/config.mjs`, `DEFAULTS`). Keys:
-  `requirements.app`, `requirements.claudeCode`, `peer.*`, `claudeHome`, `builtinPluginsDir`, `plugins.*`,
+  `requirements.app`, `requirements.claudeCode`, `requirements.codex`, `peer.*`, `claudeHome`, `codexHome`, `builtinPluginsDir`, `plugins.*`,
   `journal.maxBytes`, `services.<name>.enabled` (false — the service does not start) and any `services.<name>.*` for the
   service itself.
 
@@ -66,15 +66,15 @@ The same for primitives, routes and services. The object is frozen.
 | `state.pluginSignals()` | for the "can I shut down" verdict (the idle service): `[{id, title, tier, trusted, status, type, intervalMs, lastRunAt, signalsAt, activity, needsOn}]` — without copying frames; `activity`/`needsOn` are `null` (the plugin does not report), `[]` (it reports that it is quiet) or phrases; `lastRunAt` and `signalsAt` (when the phrases last arrived) are epoch ms; `intervalMs` is the scheduled interval (`null` for cron and streamable) |
 | `peer.verifySigned(pid, requirementName)` | `Promise<{ok, pid, path?, startSec?, reason?}>` — `codesign --verify --strict -R=<config.requirements[requirementName]>` on the process executable; cached by (pid, start time, path) and by file. `reason`: `no-requirement`, `bad-pid`, `no-process`, `foreign-uid`, `no-path`, `no-file`, `signature` |
 | `peer.classifyPid(pid)` | the process class as the server would determine it |
-| `peer.verifyHookSession(peerInfo, sessionId)` | `{ok}` or `{ok:false, reason:"peer:session-mismatch"\|"peer:no-session-file"\|"peer:not-hook"}` |
+| `peer.verifyHookSession(peerInfo, sessionId, body?)` | **always a `Promise`** (async since the Codex session proof, which asks `lsof`): resolves to `{ok:true}` or `{ok:false, reason:"peer:session-mismatch"\|"peer:no-session-file"\|"peer:not-hook"}`. Callers must `await` it: a Promise is truthy, so `if (ctx.peer.verifyHookSession(…))` without `await` silently accepts every session (and `.ok` on the Promise is `undefined`). Codex needs `body.transcript_path` (and `body.agent_id` for a subagent's hook) |
 | `peer.procState(pid)`, `peer.procStateAsync(pid)` | whether the process is stopped (Ctrl+Z) and in its terminal's foreground group (`ps -o stat=`): `{stopped, foreground}` or `null` (cannot tell). The first runs `ps` synchronously; the second returns a `Promise` and does not stop the daemon's event loop — use it in a request handler |
 | `facts` | core facts for verifying arguments (below) |
 | `sessions` | the session registry (below) |
 | `emit(event)` | an event on the bus: `{type, ...}`; `type` is `[\w.:-]{1,64}`, for your own events — prefixed with the extension (`push.sent`, `bridge.connected`). `id`, `ts`, `source` are added. Goes to `ctx.on` subscribers and to SSE `GET /events`. Metadata only. |
-| `on(type, fn)`, `off(type, fn)` | bus subscription; `type = "event"` — all events. The internal core event `app.peer` (`{connected, pid, startSec, path, alive?, count}` — an app-class connection opened or closed; `alive` — whether the process is alive, `count` — how many app connections remain) goes only to `on("app.peer")` subscribers, not to SSE or `on("event")` |
+| `on(type, fn)`, `off(type, fn)` | bus subscription; `type = "event"` — all events. The internal core events go only to `on("<type>")` subscribers, not to SSE or `on("event")`: `app.peer` (`{connected, pid, startSec, path, alive?, count}` — an app-class connection opened or closed; `alive` — whether the process is alive, `count` — how many app connections remain) and `plugins.running` (`{}` — a scan started or stopped plugins; look again at `pluginEnvWanted`) |
 | `estop()` | `true` if the hub is paused (the `ESTOP` file exists; in the UI — "Pause hub"). Setting and lifting the pause restarts plugins (contract 3: `AGENTHUB_PAUSED`, `AGENTHUB_REFRESH_REASON=Paused\|Resumed`) |
 | `lang()`, `t(key, params)` | the effective hub language (`ru` \| `en`, set in `<home>/settings.json`, [`api.md`](api.md)) and a core message in it (`daemon/lib/i18n.mjs`) |
-| `settings.get(key)` | a shell setting from `<home>/settings.json`, read-only: `lang`, `checkPluginUpdates` (the plugins service — background update check), `checkHubUpdates` (the hub-update service), `launchAtLogin` (the app service — "Launch at login"). Only app writes them (`PUT /settings/*`); a change emits `settings.changed` with that key |
+| `settings.get(key)` | a shell setting from `<home>/settings.json`, read-only: `lang`, `checkPluginUpdates` (the plugins service — background update check), `checkHubUpdates` (the hub-update service), `launchAtLogin` (the app service — "Launch at login"), `builtinOff` (the ids of built-in plugins turned off; the core itself does not run them — below, "Held plugins"). Only app writes them (`PUT /settings/*`); a change emits `settings.changed` with that key |
 | `exec(file, args, {timeoutMs, cwd, env})` | `Promise<{code, stdout, stderr, timedOut?}>` via `execFile` (no shell); in test mode — a record in `AGENTHUB_TEST_EXEC_LOG` |
 | `sendToPlugin(pluginId, obj)` | NDJSON to a streamable plugin's stdin (`{"type":"inbound",...}` from the hook and so on); `false` if it is not streamable or not running |
 | `refreshPlugin(pluginId, reason)` | restart a standard plugin / `{"type":"refresh"}` for streamable |
@@ -83,6 +83,7 @@ The same for primitives, routes and services. The object is frozen.
 | `rescanPlugins()` | rescan the plugin directories now and re-evaluate the policy of running ones (after install, removal, blocklist). The host also rescans by itself every `plugins.rescanIntervalMs` (60 s): fs.watch loses events |
 | `onHook(handler)` | registers a `POST /hook` handler (stage 6): `handler(body, {peer, signal})`, `signal` is an `AbortSignal` for the hook connection dropping; returns an unregister function. Handlers are called in order; the first one returning something other than `undefined`/`null` sets the hook answer. No handler, ESTOP or an error → `{}`; while the hub is paused handlers are called only for `SessionStart`, `SessionEnd`, `Stop` (the answer is `{}`) |
 | `providePluginEnv(name, value)` | a service gives **trusted** plugins (`builtin`, `official` and `own` — by core policy, not by metadata) an environment variable: `AGENTHUB_<NAME>` (not `AGENTHUB_SECRET_*` and not the core-reserved ones: `AGENTHUB_PLUGIN_ID`, `…_DATA_PATH`, `…_CACHE_PATH`, `AGENTHUB_REFRESH_REASON`, `AGENTHUB_LANG`, `AGENTHUB_LOCALE`, `AGENTHUB_PAUSED`); `value: null` removes it. The value is not a secret (a path to its own cache and the like). Already running plugins see it from their next run; services start before plugins. Currently: `AGENTHUB_USAGE_FILE` (the `usage` service), `AGENTHUB_HUB_SOCKET` (the hub socket path: since contract 3 the core always gives it to trusted plugins, not only with the `oauth` service — this is how a plugin calls `POST /connections/:id/mcp|http` and `/terminal/*`), `AGENTHUB_CLAUDE_SESSIONS_FILE` (the `sessions` service, contract 3: metadata of live Claude Code sessions) |
+| `pluginEnvWanted(name)` | whether a **running trusted** plugin declares reading or watching the file given in `name`: an `<agenthub.fsRead>`, `<agenthub.watch>` or `<agenthub.fsWrite>` entry starting with `$NAME` or `${NAME}`. A service that fetches such a file from the network polls only while it is `true` and looks again on the internal `plugins.running` event — with nobody reading the file (the plugin is not installed, turned off or held by a missing requirement) there are no requests. `usage` and `models` do this (`services/_on-demand.mjs`; `services.<name>.onDemand: false` — poll always). → `boolean` |
 | `provideState(section, fn)` | a service puts its own section into `GET /state`: `fn()` is called for every snapshot and returns a JSON value at once (no I/O; `undefined` or an exception gives `null`). The sections with a fixed place — `pluginUpdates`, `ownPlugins`, `registryKeys`, `hubUpdate`, `idle`, `connections`, `bridge` — are `null` while no service provides them; any other name (`^[a-z][A-Za-z0-9]{0,39}$`, not a key of the core) is added after `hook`, in registration order. For the two setting sections, `launchAtLogin` and `notifications`, the fields of the returned object go on top of the core's (`launchAgent`, `channels`). `fn: null` removes the section. A section belongs to the service that registered it: the same service may replace it, another one gets an error; so does a name of the core or a malformed one |
 | `registerSecretsProvider(fn)` | `fn(pluginId, key, plugin) → Promise<string|undefined>`; the core calls it for every `<agenthub.secrets>` of a plugin and puts the value into the environment as `AGENTHUB_SECRET_<KEY>` (`example.token` → `AGENTHUB_SECRET_EXAMPLE_TOKEN`). One provider per daemon; currently the `secrets` service installs it (the keychain, `agent-hub.<service>` / `<entry>`; built-in plugins get any keys except `oauth.*`, installed ones only `<id>.*` (and never `oauth.*`, even for a plugin with id `oauth`), `Plugins/local` — nothing; in test mode the keychain is not read). The same service gives other services the fact `secrets.store` — `get/set/delete` of `agent-hub.oauth` / `<connection>.client|token` entries (JSON; written via stdin of `security -i`, not argv): this is how the `oauth` service stores client registrations and tokens. And the fact `secrets.api` — `list/set/remove` of a plugin's declared keys for the app routes `GET /secrets/:plugin`, `PUT|DELETE /secrets/:plugin/:key` ([`api.md`](api.md), "Secrets"; after a change the cached value is dropped and the plugin restarts via `ctx.restartPlugin` when the core offers it, else `refreshPlugin`, reason `SecretChanged`). Key: service `[a-z0-9][a-z0-9_-]{0,63}`, account `[a-z][a-z0-9_.-]{0,63}`; cache — 5 min for a found value, 1 min for a missing one |
 | `setPluginPolicy(fn)` | stage 8: `fn(plugin, defaults) → {allowed, reason?, effects?, tier?}`; `tier: "official"` is respected only for `installed` (the plugins service gives it only if the verified catalog currently names the id official, the sha256 from `plugins.lock` is signed as official — by the current catalog or by the saved earlier index `Registry/attest/<id>` (a released new version does not demote the installed one until it is updated), and the files match the saved archive `Registry/archives/<id>.tar.gz`); the core still cuts the effects of non-built-in plugins down to the ceiling and gives `<agenthub.action>` to `builtin` and installed plugins only (community — never below `confirm`). No policy (the plugins service is off, not in `AGENTHUB_SERVICES` or failed at startup) — installed plugins (`Plugins/<id>`) are not admitted (`policy:no-manager` in the journal); built-in and local ones work as usual |
@@ -215,7 +216,8 @@ export const routes = [
   `peer:no-process` / `peer:no-pid`) gets the same narrow set: `403 {"error":"peer:no-process"|"peer:no-pid"}` unless
   the route sets `untrustedPlugin: true`.
 - `body` is the parsed JSON (or `undefined`); not JSON → 400. Returning `undefined` → 204.
-- `peer`: `{class, pid, path, startSec, reason?, claudePid?, plugin?}` — `plugin: {id, trusted, tier, source, pid}`
+- `peer`: `{class, pid, path, startSec, reason?, agent?, agentPid?, claudePid?, plugin?}` (`agent` — `claude` |
+  `codex` for the `hook` class) — `plugin: {id, trusted, tier, source, pid}`
   when the client is a plugin process or its descendant (`pid` there is the plugin process).
 
 ## Service (`daemon/lib/services/<name>.mjs`)
@@ -250,9 +252,11 @@ export async function stop(ctx) { ... }      // remove subscriptions and timers;
   plugins; network — only `api.anthropic.com`; the Claude Code token never leaves the service: not to disk, the journal,
   the bus or plugins; an expired one is not refreshed. In test mode — doubles only: `services.usage.securityPath`,
   `services.usage.credentialsFile`, `services.usage.url` on 127.0.0.1/localhost; `services.usage.live: true` — the real
-  keychain and host even in a test directory, for a live check), `models` (hub 0.1.5: the Claude models this sign-in
+  keychain and host even in a test directory, for a live check; polls only while a running trusted plugin reads
+  `$AGENTHUB_USAGE_FILE` — `ctx.pluginEnvWanted`), `models` (hub 0.1.5: the Claude models this sign-in
   can use → `Cache/models.json`, the `AGENTHUB_CLAUDE_MODELS_FILE` variable for trusted plugins; one
-  `GET api.anthropic.com/v1/models` every 6 h with the same sign-in and the same token rules as `usage`; doubles in test
+  `GET api.anthropic.com/v1/models` every 6 h with the same sign-in and the same token rules as `usage`, and like it only
+  while a running trusted plugin reads `$AGENTHUB_CLAUDE_MODELS_FILE`; doubles in test
   mode — `services.models.securityPath|credentialsFile|url`, `live`; `docs/api.md`, "Hub directory").
 
 ### Push channel
@@ -441,6 +445,27 @@ The module contracts are exactly those of the built-in modules, `ctx` included. 
 - **Off switch**: `extensions.enabled: false` in `config.json` — the folder is not even scanned. Tests:
   `AGENTHUB_TEST_EXTENSIONS=1` together with `AGENTHUB_HOME` (not the live directory) approves every file automatically.
 
+## Held plugins: built-ins turned off, missing requirements
+
+Apart from its policy, the core does not run a found plugin in two cases (`core.pluginHold`, re-checked on every scan):
+
+- **`off`** — a built-in the person turned off on the Plugins page (`PUT /settings/builtin-plugins`, `settings.json →
+  builtinOff`). Only built-ins have the switch; installed plugins are removed instead. The switch lives in
+  `settings.json`, which neither `agenthub builtin update` nor a hub update rewrites, so the plugin stays off when its
+  files are copied anew.
+- **`requires`** — a declared `<agenthub.requires check="…">` path is missing in the plugins' `HOME`. This is the generic
+  rule for **any** plugin (built-in, installed, local): a plugin whose program is not there would only show "not
+  installed", so it has no section until the program appears. The core watches each missing path (its parent folder,
+  the same watcher as `<agenthub.watch>`) and rescans when it appears; the 60 s safety rescan catches what the watcher
+  misses. When the path disappears, the plugin is held again on the next scan.
+
+`off` wins over `requires`. A held plugin is stopped (`plugin-held` in the journal once per change, no `warning`), has no
+frames, notifications, session entries or section in the sidebar, panel and popover, and is absent from
+`state.pluginSignals()` — so the idle verdict does not wait for it. Its files, `PluginData`, secrets and settings stay;
+when the hold is lifted it starts as usual. The shell learns of it from `/state.builtinPlugins` and `/state.heldPlugins`
+and the `plugins.held` event ([`api.md`](api.md)); the Plugins page names the requirement with the plugin's own `name`
+and note.
+
 ## Plugin contract (what the core understands)
 
 The format follows SwiftBar; design section 2 has the details. Here is what is actually implemented. A step-by-step
@@ -464,7 +489,8 @@ dependency: an external program without which the plugin is useless. This is not
 whether the `check` path exists (`~/…` — relative to the plugins' HOME), and the manager catalog shows "Requires Tool" as
 a link to `url` (`https://` only); if the path is missing, "Install" is dimmed with a tooltip, but installing is still
 possible. A translation is the same tag with `lang="en"` and the same `name` (the text is the explanation, `title=` the
-name). A `check` with masks or "..", or forbidden places, is a linter error. The plugin declares the program name: the
+name). An installed plugin whose `check` path is missing is **not run** and has no section until the path appears
+(above, "Held plugins"); the Plugins page lists it with "Requires <name> — not found: <note>". A `check` with masks or "..", or forbidden places, is a linter error. The plugin declares the program name: the
 core and the shell know nothing about specific programs.
 `<agenthub.status value="ok|wait|block|error|unknown" label="Short label">explanation</agenthub.status>` — your own
 status label: the shell shows it on the tile and in the card, with the explanation as a tooltip; without the tag — the
@@ -682,6 +708,8 @@ newer hub"); a plugin that can live without them may declare 2 and check the var
   explanation of what it gives, and the registry linter warns the reviewer. The places (`WRITE_RISKS` in
   `lib/registry/perms.mjs`): `claude-code` — **all of `~/.claude`** (except `~/.claude/task-runs` and
   `~/.claude/backups`), `~/.claude.json`, the `.claude` directory and `.mcp.json` of any project, managed settings;
+  `codex` — **all of `~/.codex`** (`config.toml` with `notify`, `mcp_servers`, `[hooks]`; `hooks.json`; execpolicy
+  `rules/`; installed plugins; skills; `AGENTS.md`), `/etc/codex`, `~/.agents`, the `.codex` directory of any project;
   `autostart` — LaunchAgents/LaunchDaemons, cron, `~/.config/autostart`, systemd user, Hammerspoon, the Windows startup
   folder; `shell` — `~/.zshrc` and the other shell startup files, `/etc/paths`, sudoers, the PowerShell profile; `bin` —
   program directories on PATH and global npm packages; `terminals` — `~/.cmuxterm` (the session-to-tab binding that hub

@@ -17,7 +17,7 @@ and is bound to the connection:
 | Class | How it is determined | What it may do |
 |---|---|---|
 | `app` | the executable is inside `AgentHub.app/Contents/MacOS/` **and** `codesign --verify --strict -R=<requirements.app>` passes | everything |
-| `hook` | the process is `agenthub-hook` (a path from `peer.hookPaths`; for an interpreter — `argv[1]`) **and** among its ancestors (up to 4 levels by ppid) there is a process passing `requirements.claudeCode`; its pid is remembered (`claudePid`) | only `POST /hook` (+ `/health`, `/peer`) |
+| `hook` | the process is `agenthub-hook` (a path from `peer.hookPaths`; for an interpreter — `argv[1]`) **and** among its ancestors (up to 4 levels by ppid) there is a process passing `requirements.claudeCode` or `requirements.codex`; the agent and its pid are remembered (`agent`, `agentPid`; for Claude Code also `claudePid`) | only `POST /hook` (+ `/health`, `/peer`) |
 | `bridge` | the bridge script from `peer.bridgePaths`, run directly by an interpreter, the file itself inside the hub's own tree and writable by this user only ("The bridge class" below) | only its own routes (stage 5) (+ `/health`, `/peer`) |
 | `cli` | everything else, including `curl` | reading (`/state`, `/events` without `hook.*` events, `/journal`) and `immediate` actions, except app-only ones |
 | `foreign` | another uid (the 0600 socket does not allow this; just in case) | nothing, `403 peer:uid` |
@@ -83,7 +83,7 @@ plugin's until they exit (review 3).
   `cli` too. The rule keeps honest plugins' helpers in their lane; it does not sandbox code running under the same UID
   (see "Limit" below). `GET /peer` shows `plugin: {id, trusted}` (or `null`) for debugging.
 
-Requirements are strings in `config.json` (`requirements.app`, `requirements.claudeCode`), not in code:
+Requirements are strings in `config.json` (`requirements.app`, `requirements.claudeCode`, `requirements.codex`), not in code:
 
 - `requirements.app` is `null` by default → the `app` class is unreachable (everything is `cli`). The default mode
   (decision 2026-11-05) is an ad hoc build pinned by cdhash: `identifier "com.kensei.agenthub" and cdhash H"<build cdhash>"`
@@ -102,6 +102,8 @@ Requirements are strings in `config.json` (`requirements.app`, `requirements.cla
   change gets an answer under the new pin on the same connection (the others are closed).
 - `requirements.claudeCode` = `identifier "com.anthropic.claude-code" and anchor apple generic and certificate leaf[subject.OU] = "Q6L2SF6YDW"`.
   The real binary `~/.local/share/claude/versions/<version>` is verified, not the cmux shim.
+- `requirements.codex` = `identifier "codex" and anchor apple generic and certificate leaf[subject.OU] = "2DC432GLL2"`
+  (the Codex CLI binary signed by OpenAI; [`hook.md`](hook.md), "Codex CLI").
 
 The signature is verified for the **running process**: the peercred addon (`codeInfo`, the csops system call) gets the
 process's cdhash, flags, identifier and Team ID from the kernel, and `codesign --verify --strict -R=<requirement> <pid>`
@@ -131,10 +133,10 @@ An error response is `{"error": "<code>", ...}`. The code is stable and never tr
 | 400 | `json`, `body`, `args:<field>:<required\|type\|unknown\|pattern\|too-long\|range\|enum>` | body/arguments |
 | 403 | `peer:cli`, `peer:hook`, `peer:bridge`, `peer:uid` | the route or action is not available to the class |
 | 403 | `peer:app-signature`, `peer:app-requirement-missing` | the executable is in `AgentHub.app`, but the signature failed / no requirement is set (for actions) |
-| 403 | `peer:no-claude-ancestor` | `agenthub-hook` without a signed Claude Code among its ancestors |
+| 403 | `peer:no-agent-ancestor` | `agenthub-hook` without a signed agent (Claude Code, Codex) among its ancestors |
 | 403 | `peer:bridge-launch`, `peer:bridge-file` | the process runs the bridge script but is not taken for the bridge: interpreter options before the script / the file is a link elsewhere, outside the hub's tree or writable by others ("The bridge class" above) |
 | 403 | `peer:untrusted-plugin` | the client is a process of an untrusted plugin (or its child): only `/health` and `/peer` ("Plugin processes" above) |
-| 403 | `peer:session-mismatch`, `peer:no-session-file` | the hook's `session_id` did not match `~/.claude/sessions/<claudePid>.json` |
+| 403 | `peer:session-mismatch`, `peer:no-session-file` | the hook's `session_id` does not belong to the verified agent: Claude Code — not in `~/.claude/sessions/<claudePid>.json`; Codex — the thread lock is not open in the codex ancestor or `transcript_path` is not that thread's rollout ([`hook.md`](hook.md)) |
 | 403 | `confirm:invalid` | the confirmation token is foreign, expired, used or from another pid |
 | 404 | `not-found` | no such route/action/plugin |
 | 405 | `method` | wrong method |
@@ -248,6 +250,10 @@ Snapshot:
   "limits": {"actionTimeoutMs": 30000},                                                           // how long one plugin action may run
   "hook": {"installed": true, "lastEventAt": "2026-11-17T10:00:00.000Z",                          // or {"installed":false,"lastEventAt":null,"reason":"no-events", …}
            "installCommand": "claude plugin marketplace add KenseiTheOne/agent-hub && claude plugin install agent-hub@agent-hub"},
+  "builtinPlugins": [{"id":"quota","title":"Квота","desc":"…","version":"0.5.3","icon":null,"enabled":true,"running":true,
+                      "held":null,"requires":[{"name":"Claude Code","url":"https://…","note":"…","check":"~/.claude","present":true}]}],
+  "heldPlugins": [{"id":"codex-quota","source":"builtin","reason":"requires",
+                   "requires":[{"name":"Codex","url":"https://…","note":"…","check":"~/.codex","present":false}]}],
   "peer": {"class":"cli","reason":null}
 }
 ```
@@ -269,7 +275,7 @@ no field.
 `limits` — the limits a client shows next to what it starts: `actionTimeoutMs` — how long one plugin action may run
 before the hub kills it, in milliseconds (`config.json` → `plugins.actionTimeoutMs`, 30000 by default; background jobs
 are not bound by it). An older daemon has no field.
-`hook` — the Claude Code hook as this hub sees it: `{installed, lastEventAt, reason?, installCommand}`. The hub does not
+`hook` — the agent hook (Claude Code and Codex share it) as this hub sees it: `{installed, lastEventAt, reason?, installCommand}`. The hub does not
 read Claude Code's settings or its plugin list (the user installs the hook, [`hook.md`](hook.md)), so the answer rests
 on the events themselves: `installed: true` — a verified hook event (`POST /hook` that passed the peer and session
 checks) has reached this hub, the last one at `lastEventAt` (ISO 8601; kept across daemon restarts in
@@ -281,6 +287,17 @@ be listed here. A hook that was removed later still reads `installed: true` with
 — always present, a string: the command the user runs in a terminal to install the hook for good (the "Permanently"
 commands of [`claude-plugin/README.md`](../claude-plugin/README.md) joined with `&&`); a client shows it as is instead
 of keeping its own copy. An older daemon has no `hook` field.
+`builtinPlugins` — every built-in plugin the last scan found, running or not, sorted by id: `title`, `desc` in the hub
+language, `version`, `icon`, `enabled` (the person's switch, `settings.json → builtinOff`; `PUT /settings/builtin-plugins`
+below), `running`, `held` — why it is not run: `"off"` (turned off), `"requires"` (a declared requirement is missing) or
+`null`, and `requires` — its `<agenthub.requires>` with the plugin's own `name` and `note` in the hub language and
+`present` (the `check` path exists in the plugins' `HOME`). The Plugins page builds the switches from this list; the
+sidebar, panel and popover show only `plugins`, so a held plugin has no section.
+`heldPlugins` — plugins of any source (`builtin`, `installed`, `local`) found but not run, `{id, source, reason, requires}`
+with `reason` `off` or `requires` (off wins over requires). A plugin held by `requires` starts by itself when the
+missing path appears (the core watches it; at the latest on the next safety rescan, `plugins.rescanIntervalMs`), and is
+held again — stopped, its section gone — when the path disappears. Its files, `PluginData` and settings stay. Both
+lists change with the `plugins.held` event. An older daemon has neither field.
 Sections of services: `pluginUpdates`, `ownPlugins`, `registryKeys`, `hubUpdate`, `idle`, `connections` and `bridge` are
 each filled by its service (`ctx.provideState`, [`extension-points.md`](extension-points.md)) and are `null` without it;
 the service also adds its fields to `launchAtLogin` (`launchAgent`) and `notifications` (`channels`). A service or an
@@ -470,7 +487,8 @@ always below the new instance's start, so after a daemon restart the client gets
 | `app-pin.path-changed` | `{appPin: <as in /state, with path>, old: "<previous path>"\|null}` — `appPin.path` changed with the same requirement (the bundle the daemon launches); connections are not dropped |
 | `hub.stopping` | `{reason: "shutdown"}` — the daemon is stopping on `POST /shutdown` (the app is quitting); connections close next |
 | `app.restart-stopped` | `{restarts, windowMs}` — the app keeps crashing, supervision (the app service) stopped restarting it; the push service → a notification |
-| `settings.changed` | `{lang: {setting, effective, system, locales}}` — the hub language changed; `{checkPluginUpdates: bool}` — the "Check for plugin updates" switch; `{notifications: <as in /state>}` — "Settings → Notifications" |
+| `settings.changed` | `{lang: {setting, effective, system, locales}}` — the hub language changed; `{checkPluginUpdates: bool}` — the "Check for plugin updates" switch; `{notifications: <as in /state>}` — "Settings → Notifications"; `{builtinPlugins: <as in /state>}` — a built-in plugin was turned on or off |
+| `plugins.held` | `{builtinPlugins, heldPlugins}` (as in `/state`) — a scan held a plugin back or let it run: a built-in was turned off or on, a declared requirement disappeared or appeared |
 | `hub-update.status` | `{hubUpdate: <as in /state>}` — something in the hub update changed: the check, the available version, installation progress, the hub pause (`blocked`) |
 | `hub-update.available` | `{version, tag, from}` — a new release was found; once per version (`HubUpdate/check.json`), push "A new Agent Hub version is available" |
 | `hub-update.restarting` | `{label, op}` — the hub is switching to another version: the app quits by itself **without** `POST /shutdown` |
@@ -596,7 +614,7 @@ plugin action buttons, installing and updating plugins; `/hook` → `{}` (sessio
 still receive `SessionStart`, `SessionEnd` and `Stop` while paused — the interactive session registry stays in sync with
 Claude). Statuses, plugin polling, notifications, opening links and files, and removing plugins keep working.
 
-### `GET /settings` — app, cli; `PUT /settings/lang`, `PUT /settings/plugin-updates`, `PUT /settings/hub-updates`, `PUT /settings/launch-at-login`, `PUT /settings/notifications` — app only
+### `GET /settings` — app, cli; `PUT /settings/lang`, `PUT /settings/plugin-updates`, `PUT /settings/hub-updates`, `PUT /settings/launch-at-login`, `PUT /settings/notifications`, `PUT /settings/builtin-plugins` — app only
 The hub language (UI pass 2026-11-05). `GET` → `{"lang": {"setting": "system"|"ru"|"en", "effective": "ru"|"en", "system": "ru"|"en", "locales": ["de-DE", "en-US"]}, "checkPluginUpdates": {"setting": true}}`
 (the same as `GET /state.lang`). `PUT /settings/lang {"lang": "system"|"ru"|"en"}` → `200 {"lang": {...}}`;
 cli — `403`, an invalid value — `400 args:lang:enum`. Stored in `<home>/settings.json` (0600) — not in `config.json`,
@@ -631,6 +649,16 @@ default; decision 2026-11-07): the daemon + app pair → `200 {"launchAtLogin": 
 (`SMAppService.mainApp`) is not needed — the shell removes it, but only based on a state snapshot showing that the
 daemon will launch the app at login: `launchAtLogin` is present, `appPin` has a `path`, `launchAgent` is not `missing`.
 Otherwise the registration stays (the "run agenthub pin-app" banner says what is missing).
+
+`PUT /settings/builtin-plugins {"id": "<built-in id>", "enabled": true|false}` — turn a built-in plugin on or off
+(`settings.json → builtinOff`, the ids turned off; nothing by default) → `200 {"builtinPlugins": <as in /state>}`. cli —
+`403`; `id` not a string — `400 args:id:type`, `enabled` not a boolean — `400 args:enabled:type`; not a built-in the
+last scan found — `404 builtin:unknown`. On a change: journal `settings-changed` (`key: builtinPlugins`, `plugin`,
+`value`), the plugins are rescanned (turned off — stopped with no frames, notifications or section; turned on — started
+again), then events `plugins.held` and `settings.changed {builtinPlugins}`. The same value again changes nothing. The
+plugin's files and `PluginData` stay; the switch lives in `settings.json`, which neither `agenthub builtin update` nor a
+hub update rewrites, so a built-in turned off stays off when its files are copied anew. `GET /settings` returns
+`builtinPlugins` too. There is no CLI command: other plugins have no on/off command either.
 
 `PUT /settings/notifications` — "Settings → Notifications" (`settings.json → notifications`, 2026-11-09;
 `daemon/lib/push/prefs.mjs`, [`daemon/lib/push/README.md`](../daemon/lib/push/README.md)). The body is a partial edit:
@@ -1147,12 +1175,14 @@ Restart a plugin (`AGENTHUB_REFRESH_REASON=Manual`). `202 {"ok":true}` or 404.
 ones are read from the tail of `journal.jsonl.1`. Metadata only.
 
 ### `POST /hook` — hook only
-The body is the Claude Code hook's stdin as is. The core checks `session_id` against `sessionId` from
-`<claudeHome>/sessions/<claudePid>.json` (otherwise `403 peer:session-mismatch`), then calls the `ctx.onHook` handlers
+The body is the agent hook's stdin as `agenthub-hook` forwards it. The core checks that `session_id` belongs to the
+verified agent — Claude Code: `sessionId` from `<claudeHome>/sessions/<claudePid>.json`; Codex: the thread lock and the
+rollout ([`hook.md`](hook.md), "Codex session proof") — otherwise `403 peer:session-mismatch`, then calls the `ctx.onHook` handlers
 (stage 6) as `h(body, {peer, signal})`; `signal` fires if `agenthub-hook` closed the connection before the answer (Claude
 killed the hook — it was answered in the terminal). The response is JSON for the hook's stdout; no handler, a hub pause
-or an error → `{}` (while paused, handlers are called only for `SessionStart`, `SessionEnd`, `Stop`, and the answer is
-still `{}`). The journal gets `hook_event_name`, `session_id`, `claudePid`, `handled`; `tool_input` — never.
+or an error → `{}` (while paused, handlers are called only for `SessionStart`, `UserPromptSubmit`, `SessionEnd`,
+`Stop`, and the answer is still `{}`). The journal gets `hook_event_name`, `session_id`, `claudePid` (other agents —
+`agent`, `agentPid`), `handled`; `tool_input` — never.
 
 ## Extension routes
 
@@ -1160,7 +1190,7 @@ still `{}`). The journal gets `hook_event_name`, `session_id`, `claudePid`, `han
 |---|---|---|
 | `GET /hook/cards`, `GET /hook/cards/:id` | app | session permission and question cards — [`hook.md`](hook.md) |
 | `GET /hook/status` | app, cli | metadata of cards and interactive sessions — [`hook.md`](hook.md) |
-| `POST /actions/session.respond` | app | an answer to a card: `{requestId, decision: once\|deny\|answer, answers?}` — [`hook.md`](hook.md) |
+| `POST /actions/session.respond` | app | an answer to a card: `{requestId, decision: once\|deny\|answer\|terminal, answers?}` — [`hook.md`](hook.md) |
 | `POST /push/ack` | app (cli — only with `services.push.acceptCliAck`) | `{"id": notifyId}` → `{ok}`; `400 body`, `403 peer:<class>`. Suppresses the duplicate osascript banner — [`daemon/lib/push/README.md`](../daemon/lib/push/README.md); it does not suppress the `@hub:app-pin-changed` notification (that one never goes to the shell) |
 | `GET /registry/catalog`, `GET /registry/installed` | app, cli | the registry catalog and installed plugins — [`plugins-registry.md`](plugins-registry.md) |
 | `POST /registry/check-updates` | app | "Check now" for plugin updates: the same check as the background one (a new version is announced once) → `200 {pluginUpdates, result: {ok, error, skipped}}` |
@@ -1275,9 +1305,12 @@ now?, skipped?}`, `extension-denied {path, kind, sha256, status: pending|changed
 `extension-approve-refused {path, sha256, now, pid}`, `extension-revoked {path, pid}`, and `service-start` of an
 extension service carries `extension: true`; answers — `hook-session`, `hook-session-end`, `hook-card`,
 `hook-answer`, `hook-cancel`, `hook-skip` (`reason`, among them `session-ended` — [`hook.md`](hook.md)), `hook-paused`; bridge — `bridge-op`, `bridge-stale`; quota — `usage-fetch`
-(when the outcome changes: `ok`, the `error` code, the number of rows), `usage-write-error`, `usage-error`; models —
-`models-fetch` (when the outcome or the list changes: `ok`, the `error` code, the number of models),
-`models-write-error`, `models-error`; registry —
+(when the outcome changes: `ok`, the `error` code, the number of rows), `usage-write-error`, `usage-error`, `usage-demand`
+(`polling` — the service started or stopped polling because a running plugin that reads the file appeared or went; at
+start only `polling: false`); models — `models-fetch` (when the outcome or the list changes: `ok`, the `error` code, the
+number of models), `models-write-error`, `models-error`, `models-demand` (as `usage-demand`); held plugins —
+`plugin-held {plugin, reason: off|requires, requires?: [names]}` (once per change; a plugin let run again shows up as
+its usual start); registry —
 `registry-*` (among them the registry key: `registry-key-pinned`, `registry-key-changed`, `registry-key-accepted`,
 `registry-key-restored`, `registry-key-consent-requested`, `registry-key-declined`, `registry-key-pin-error`, and
 catalog freshness: `registry-no-expiry`, `registry-expired`, `registry-cache-rejected` —
@@ -1325,7 +1358,10 @@ the service takes the Claude Code OAuth token from the keychain (`/usr/bin/secur
 a fallback to `<Claude config directory>/.credentials.json`, and makes `GET https://api.anthropic.com/api/oauth/usage`
 (`Authorization: Bearer`, `anthropic-beta: oauth-2025-04-20`, no redirects, body ≤ 256 KB). Plugins get the path as
 `AGENTHUB_USAGE_FILE` (only builtin, official and own); `<agenthub.watch>$AGENTHUB_USAGE_FILE` runs the plugin right
-after the cache is written (for example, quota). The switch is `services.usage.enabled: false`.
+after the cache is written (for example, quota). The service polls only while a running trusted plugin declares
+`$AGENTHUB_USAGE_FILE` in `<agenthub.fsRead>`, `<agenthub.watch>` or `<agenthub.fsWrite>` (journal `usage-demand`): with
+quota turned off or not installed there are no requests at all, and the cache stays as it was. The path is given either
+way. `services.usage.onDemand: false` — poll always. The switch is `services.usage.enabled: false`.
 
 `Cache/models.json` (0600, atomic writes; hub 0.1.5) — the Claude models the Claude Code sign-in can use, from the
 `models` service (`daemon/lib/services/models.mjs`):
@@ -1339,8 +1375,9 @@ token exactly as `usage` does (the same keychain entry and fallback file; `servi
 the one of `usage`) and makes `GET https://api.anthropic.com/v1/models?limit=1000` (`Authorization: Bearer`,
 `anthropic-beta: oauth-2025-04-20`, `anthropic-version: 2023-06-01`, no redirects, body ≤ 256 KB). The token never
 reaches the disk, the journal, the bus or plugins. Plugins get the path as `AGENTHUB_CLAUDE_MODELS_FILE` (only builtin,
-official and own); `<agenthub.watch>$AGENTHUB_CLAUDE_MODELS_FILE` runs the plugin right after a write. The switch is
-`services.models.enabled: false`.
+official and own); `<agenthub.watch>$AGENTHUB_CLAUDE_MODELS_FILE` runs the plugin right after a write. Like `usage`, the
+service polls only while a running trusted plugin declares reading or watching `$AGENTHUB_CLAUDE_MODELS_FILE` (journal
+`models-demand`; `services.models.onDemand: false` — always). The switch is `services.models.enabled: false`.
 
 `Cache/claude-sessions.json` (0600, atomic writes; contract 3) — metadata of live Claude Code sessions from the
 `sessions` service (`daemon/lib/services/sessions.mjs`), taken from the core session registry:

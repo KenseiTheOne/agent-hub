@@ -1,20 +1,24 @@
 #!/usr/bin/env -S -u NODE_OPTIONS node
-// agenthub-hook — a Claude Code hook (type command) for Agent Hub.
+// agenthub-hook — a Claude Code and Codex hook (type command) for Agent Hub.
 //
 // hook stdin → POST /hook on the daemon's hub.sock → stdout. Always exits with code 0 and always prints JSON:
-// daemon not running, someone else's socket, timeout, error, a 403 refusal — it prints {} and Claude Code continues
-// as if there were no hook (hooks.json has no onFailure: block).
+// daemon not running, someone else's socket, timeout, error, a 403 refusal — it prints {} and the agent continues
+// as if there were no hook (hooks.json has no onFailure: block): Claude Code keeps its dialog, Codex shows its own
+// approval prompt. The daemon tells the agents apart by the signed ancestor process, not by anything in the event.
 //
 // Defense in depth (the daemon checks everything itself, this is the second line):
-//   - only the needed event fields are forwarded: without transcript_path, last_assistant_message,
-//     background_tasks, cwd and the rest; tool_input — only for PermissionRequest;
+//   - only the needed event fields are forwarded: without last_assistant_message, prompt, background_tasks, cwd and
+//     the rest; tool_input — only for PermissionRequest; transcript_path — only when it names a Codex rollout of this
+//     very thread (rollout-…-<session_id or a subagent's agent_id>.jsonl, lowercase UUID): the daemon checks it against
+//     the thread's lock (Codex session proof), a Claude Code transcript path is never sent;
 //   - only a narrow daemon response is let through: for PermissionRequest — decision.behavior allow|deny,
 //     updatedInput (only with allow), message (only with deny). updatedPermissions, interrupt,
 //     setMode, additionalContext, systemMessage and everything else are dropped. For other events — {}.
 //
 // Environment: NODE_OPTIONS is removed by the #! line (the cmux preload crashes child node processes).
 //   AGENTHUB_HOME            — the daemon's state directory (default ~/Library/Application Support/AgentHub)
-//   AGENTHUB_HOOK_TIMEOUT_MS — overall timeout for waiting for a PermissionRequest response (default 118000)
+//   AGENTHUB_HOOK_TIMEOUT_MS — overall timeout for waiting for a PermissionRequest response (default 123000: the hub
+//                              decides by 110 s for Claude Code, 120 s for Codex; hooks.json gives the hook 125 s)
 //   AGENTHUB_HOOK_DEBUG=1    — the reason for {} as one line on stderr
 //
 // The same file lives in claude-plugin/hook/agenthub-hook (a copy; a test checks that they are identical).
@@ -33,9 +37,13 @@ const FORWARD = {
   SessionStart: ["source", "model"],
   SessionEnd: ["reason"],
   Stop: ["stop_hook_active"],
+  // only that the user started a turn (Codex: SessionStart comes with the first turn; after a hub restart this is the
+  // first sign of a session) — never the prompt itself
+  UserPromptSubmit: [],
   PermissionRequest: ["tool_name", "tool_input"],
 };
-const DEFAULT_TIMEOUT_MS = { PermissionRequest: 118_000, other: 5_000 };
+// SessionEnd: Codex gives SessionEnd hooks at most 3 s and runs them synchronously (whatever hooks.json says).
+const DEFAULT_TIMEOUT_MS = { PermissionRequest: 123_000, SessionEnd: 2_500, other: 5_000 };
 
 let done = false;
 function finish(obj, why) {
@@ -63,7 +71,22 @@ function pick(body) {
   const ev = body.hook_event_name;
   const out = {};
   for (const k of [...FORWARD.common, ...(FORWARD[ev] || [])]) if (body[k] !== undefined) out[k] = body[k];
+  if (rolloutOf(body)) out.transcript_path = body.transcript_path;
   return out;
+}
+
+// transcript_path is a Codex rollout of the thread that runs the hook: sessions/…/rollout-<time>-<thread id>.jsonl[.zst],
+// the thread being session_id itself or, for a subagent, agent_id (Codex gives a subagent's hooks the root thread's
+// session_id). Thread ids only as Codex prints them: a lowercase UUID.
+const THREAD_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+function rolloutOf(body) {
+  const p = body.transcript_path;
+  const sid = body.session_id;
+  if (typeof p !== "string" || p.length > 4096 || !THREAD_RE.test(sid)) return false;
+  const thread = typeof body.agent_id === "string" && body.agent_id !== sid ? body.agent_id : sid;
+  if (!THREAD_RE.test(thread)) return false;
+  const name = p.split(/[\\/]/).pop();
+  return name.startsWith("rollout-") && (name.endsWith(`-${thread}.jsonl`) || name.endsWith(`-${thread}.jsonl.zst`));
 }
 
 // JSON with sorted keys — for comparing inputs.
@@ -131,7 +154,7 @@ function main(text) {
   }
 
   const envMs = parseInt(process.env.AGENTHUB_HOOK_TIMEOUT_MS || "", 10);
-  const timeoutMs = Number.isInteger(envMs) && envMs > 0 ? envMs : ev === "PermissionRequest" ? DEFAULT_TIMEOUT_MS.PermissionRequest : DEFAULT_TIMEOUT_MS.other;
+  const timeoutMs = Number.isInteger(envMs) && envMs > 0 ? envMs : DEFAULT_TIMEOUT_MS[ev] ?? DEFAULT_TIMEOUT_MS.other;
   const timer = setTimeout(() => {
     req.destroy();
     finish({}, "timeout");
@@ -168,7 +191,7 @@ function main(text) {
   req.end(data);
 }
 
-// Claude Code waits for the hook until it closes stdin; read to the end with a limit.
+// The agent writes the event and closes stdin; read to the end with a limit.
 const chunks = [];
 let size = 0;
 process.stdin.on("data", (b) => {

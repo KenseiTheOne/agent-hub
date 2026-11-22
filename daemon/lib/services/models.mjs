@@ -24,6 +24,7 @@
 import { mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { endpoint, fetchJson, tokenSource, writeCache } from "./usage.mjs";
+import { OnDemand } from "./_on-demand.mjs";
 
 export const name = "models";
 
@@ -89,6 +90,7 @@ export class ModelsService {
     this.timeoutMs = Number(cfg.timeoutMs) || 8_000;
     this.timer = null;
     this.stopped = false;
+    this.demand = new OnDemand(this, ENV_NAME, "models-demand");
     this.lastError = undefined;
     this.lastIds = undefined;
   }
@@ -168,7 +170,7 @@ export class ModelsService {
   }
 
   schedule(ms) {
-    if (this.stopped) return;
+    if (this.stopped || !this.demand.active) return;
     clearTimeout(this.timer);
     this.timer = setTimeout(async () => {
       let next = ERROR_BACKOFF_MS;
@@ -184,11 +186,13 @@ export class ModelsService {
 
   start() {
     this.ctx.providePluginEnv(ENV_NAME, this.file);
-    this.schedule(this.firstDelay());
+    // polls only while a running plugin reads the file (services/_on-demand.mjs; services.models.onDemand = false — always)
+    this.demand.start();
   }
 
   stop() {
     this.stopped = true;
+    this.demand.stop();
     clearTimeout(this.timer);
     this.ctx.providePluginEnv(ENV_NAME, null);
   }

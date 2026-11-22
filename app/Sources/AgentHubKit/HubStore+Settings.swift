@@ -51,6 +51,21 @@ extension HubStore {
         }
     }
 
+    /// A built-in plugin's switch on the Plugins page: written by the daemon (app class only), the reply is applied right away;
+    /// the plugin's section comes and goes with the next snapshot of plugins.
+    public func setBuiltinEnabled(_ id: String, enabled: Bool) async {
+        do {
+            if let list = try await client.setBuiltinEnabled(id, enabled: enabled) { state?.builtinPlugins = list }
+        } catch let e as HubError {
+            await presenter?.report(title: tr("Плагин не переключён", "Plugin not switched"),
+                              detail: e.code?.hasPrefix("peer:") == true
+                                  ? tr("Встроенные плагины включает и выключает только закреплённая сборка приложения.", "Only the pinned app build can turn built-in plugins on or off.") + Self.codeNote(e.code ?? "")
+                                  : (e.errorDescription ?? ""))
+        } catch {
+            await reportOffline(error)
+        }
+    }
+
     /// "Notifications": written by the daemon (app class only) — master switch, style or quiet hours; the reply is applied right away.
     public func setNotifications(_ patch: JSONValue) async {
         do {

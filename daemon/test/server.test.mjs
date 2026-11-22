@@ -146,7 +146,7 @@ test("ad hoc signed app → 403; the same app under a requirement it satisfies g
   }
 });
 
-test("agenthub-hook started from a shell with no Claude ancestor → 403 peer:no-claude-ancestor", { skip: onlyDarwin("peercred (peer ancestors) and an orphan with ppid=1") }, async () => {
+test("agenthub-hook started from a shell with no agent ancestor → 403 peer:no-agent-ancestor", { skip: onlyDarwin("peercred (peer ancestors) and an orphan with ppid=1") }, async () => {
   const h = await hub();
   const out = join(h.home, "hook.out");
   try {
@@ -155,7 +155,7 @@ test("agenthub-hook started from a shell with no Claude ancestor → 403 peer:no
     const res = await waitFor(() => existsSync(out) && JSON.parse(readFileSync(out, "utf8")), { timeoutMs: 8000 });
     assert.equal(res.ppid, 1);
     assert.equal(res.status, 403);
-    assert.equal(JSON.parse(res.body).error, "peer:no-claude-ancestor");
+    assert.equal(JSON.parse(res.body).error, "peer:no-agent-ancestor");
   } finally {
     await h.stop();
   }

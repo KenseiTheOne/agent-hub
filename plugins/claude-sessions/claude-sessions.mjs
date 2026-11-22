@@ -3,11 +3,13 @@
 //
 // <agenthub.title>Claude Code Сессии</agenthub.title>
 // <agenthub.title lang="en">Claude Code Sessions</agenthub.title>
-// <agenthub.version>0.5.2</agenthub.version>
+// <agenthub.version>0.5.3</agenthub.version>
 // <agenthub.author.name>Kensei</agenthub.author.name>
 // <agenthub.author.github>KenseiTheOne</agenthub.author.github>
 // <agenthub.desc>Сессии Claude Code по вкладкам cmux: кто работает, кто ждёт вас, кто оборвался</agenthub.desc>
 // <agenthub.desc lang="en">Claude Code sessions by cmux tab: who's working, who needs you, who stopped</agenthub.desc>
+// <agenthub.requires name="Claude Code" url="https://claude.com/product/claude-code" check="~/.claude">агент, чьи сессии показывает плагин</agenthub.requires>
+// <agenthub.requires lang="en" name="Claude Code">the agent whose sessions this plugin shows</agenthub.requires>
 // <agenthub.status value="ok" label="Никто не ждёт">Сессии работают или свободны — от вас ничего не нужно</agenthub.status>
 // <agenthub.status value="ok" lang="en" label="No one is waiting">Sessions are working or idle — nothing needed from you</agenthub.status>
 // <agenthub.status value="wait" label="Сессия ждёт вас">Сессия ждёт разрешения или ответа, или оборвалась посреди работы</agenthub.status>

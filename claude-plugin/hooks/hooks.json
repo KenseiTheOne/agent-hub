@@ -1,5 +1,5 @@
 {
-  "description": "Agent Hub: PermissionRequest is forwarded to the hub daemon over a Unix socket and waits for the card's decision (no longer than ~2 min); SessionStart/SessionEnd/Stop are async and only register sessions. Daemon not running, session not interactive, timeout — the hook prints {} and the terminal dialog works as if there were no hook. onFailure: block is not used.",
+  "description": "Agent Hub (Claude Code and Codex): PermissionRequest is forwarded to the hub daemon over a Unix socket and waits for the card's decision (no longer than ~2 min); SessionStart/UserPromptSubmit/SessionEnd/Stop are async and only register sessions (Codex runs SessionEnd hooks synchronously for at most 3 s whatever the file says, hence its 3 s timeout). Daemon not running, session not interactive, timeout, 'decide in terminal' — the hook prints {} and the agent's own dialog works as if there were no hook. onFailure: block is not used.",
   "hooks": {
     "PermissionRequest": [
       {
@@ -24,7 +24,7 @@
         ]
       }
     ],
-    "SessionEnd": [
+    "UserPromptSubmit": [
       {
         "hooks": [
           {
@@ -32,6 +32,18 @@
             "command": "\"${CLAUDE_PLUGIN_ROOT}/hook/agenthub-hook\"",
             "async": true,
             "timeout": 10
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/hook/agenthub-hook\"",
+            "async": true,
+            "timeout": 3
           }
         ]
       }

@@ -197,7 +197,7 @@ Permissions window (`428`): `{error:"consent-required", needsConsent:true, token
 version, fromVersion, update, sha256, icon, permissions:[{kind, what, why, added, risk?}], added:[…]}` (`icon` is the
 `<agenthub.icon>` of the plugin being installed: the window tile is drawn from the declaration; `risk` — contract 3: an
 `fsWrite` entry to a place where Claude Code or the system can be hijacked, the kind of place is
-`claude-code | autostart | shell | bin | terminals | ssh | git | hub` — the window shows such a permission first, as a red line
+`claude-code | codex | autostart | shell | bin | terminals | ssh | git | hub` — the window shows such a permission first, as a red line
 "Hijack location…" with an explanation; `risk` is not part of the permission key). The app shows the permissions with
 their "why" (new ones are marked `added`) and repeats the request with `consentToken`. The token is single-use and bound
 to the id, the archive and the app pid; a new catalog arriving while the window is open gives
@@ -285,7 +285,9 @@ runs.
   can be hijacked is allowed (a Claude Code settings plugin needs exactly that), but loud: `perms.mjs` (`writeRisk`,
   `WRITE_RISKS`) maps the path to a kind of place — `claude-code` (all of `~/.claude` except `task-runs` and `backups`:
   settings, hooks, commands, agents, statusline scripts, `ide/*.lock`, `local/claude`; `~/.claude.json`; managed
-  settings; in any project the whole `.claude` directory and `.mcp.json`), `autostart` (`~/Library/LaunchAgents`,
+  settings; in any project the whole `.claude` directory and `.mcp.json`), `codex` (all of `~/.codex` — `config.toml`
+  with `notify`, `mcp_servers` and `[hooks]`, `hooks.json`, `rules/`, installed plugins, skills; `/etc/codex`;
+  `~/.agents`; any project's `.codex`), `autostart` (`~/Library/LaunchAgents`,
   LaunchDaemons, cron, systemd user, Hammerspoon, Windows startup, …), `shell` (`~/.zshrc`, `~/.zshenv`,
   `~/.bash_profile`, `~/.profile`, fish, `/etc/zshrc`, `/etc/paths`, sudoers, the PowerShell profile…), `bin`
   (`~/.local/bin`, `/usr/local/bin`, `/opt/homebrew/bin`, global npm packages — to plant your own `claude`), `terminals`
@@ -444,6 +446,11 @@ index entry and the translation into `i18n.<lang>.requires`. `GET /registry/cata
 plugins' HOME. The catalog card: "Requires <name>" as a link, "not found on this Mac" / "installed"; when missing,
 "Install" is dimmed with a tooltip (installing is still possible). For example, a registry plugin for an
 agent tool declares the tool itself ("Requires <tool>", `~/.<tool>`). An invalid index entry (not https, a mask in `check`) is dropped.
+
+After installation the same declaration decides whether the plugin runs: while a `check` path is missing, the core holds
+the plugin back (no process, no section) and the Plugins page shows "Requires <name> — not found"; it starts by itself
+when the path appears ([`extension-points.md`](extension-points.md), "Held plugins"; `/state.heldPlugins` in
+[`api.md`](api.md)).
 
 ## Index: `tier`
 

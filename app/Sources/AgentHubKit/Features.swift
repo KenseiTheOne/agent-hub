@@ -6,7 +6,10 @@ import Foundation
 
 // MARK: - session reply cards
 
-/// A `GET /hook/cards` card: a permission (tool and a safe summary — no body) or an AskUserQuestion question.
+/// A `GET /hook/cards` card: a permission (tool and a safe summary — no body) or an AskUserQuestion question. `agent` /
+/// `agentLabel` — the agent whose signature the hub verified ("claude", "codex"…; the label is what the badge shows);
+/// `external` — the card's session is one of `/state.externalSessions` (not the Claude Code registry). `decisions` — the
+/// answers this card accepts, the buttons are drawn from it.
 public struct HookCard: Decodable, Sendable, Hashable, Identifiable {
     public enum Kind: String, Decodable, Sendable { case permission, question }
 
@@ -47,6 +50,9 @@ public struct HookCard: Decodable, Sendable, Hashable, Identifiable {
     public var summary: String?
     public var questions: [Question]
     public var decisions: [String]
+    public var agent: String?
+    public var agentLabel: String?
+    public var external: Bool
     public var createdAt: String?
     public var expiresAt: String?
 
@@ -57,6 +63,7 @@ public struct HookCard: Decodable, Sendable, Hashable, Identifiable {
         self.requestId = requestId; self.sessionId = sessionId; self.sessionName = sessionName; self.surfaceId = nil
         self.subagent = false; self.kind = kind; self.tool = tool; self.summary = summary; self.questions = questions
         self.decisions = kind == .question ? ["answer", "deny"] : ["once", "deny"]; self.createdAt = nil; self.expiresAt = expiresAt
+        self.agent = nil; self.agentLabel = nil; self.external = false
     }
 
     public init(from decoder: Decoder) throws {
@@ -71,13 +78,22 @@ public struct HookCard: Decodable, Sendable, Hashable, Identifiable {
         summary = try? c.decodeIfPresent(String.self, forKey: .summary)
         questions = (try? c.decodeIfPresent([Question].self, forKey: .questions)) ?? []
         decisions = (try? c.decode([String].self, forKey: .decisions)) ?? (kind == .question ? ["answer", "deny"] : ["once", "deny"])
+        agent = (try? c.decodeIfPresent(String.self, forKey: .agent)).flatMap { $0?.isEmpty == false ? $0 : nil }
+        agentLabel = (try? c.decodeIfPresent(String.self, forKey: .agentLabel)).flatMap { $0?.isEmpty == false ? $0 : nil }
+        external = (try? c.decodeIfPresent(Bool.self, forKey: .external)) ?? false
         createdAt = try? c.decodeIfPresent(String.self, forKey: .createdAt)
         expiresAt = try? c.decodeIfPresent(String.self, forKey: .expiresAt)
     }
 
     enum CodingKeys: String, CodingKey {
-        case requestId, sessionId, sessionName, surfaceId, subagent, kind, tool, summary, questions, decisions, createdAt, expiresAt
+        case requestId, sessionId, sessionName, surfaceId, subagent, kind, tool, summary, questions, decisions, agent, agentLabel, external
+        case createdAt, expiresAt
     }
+
+    /// The badge text: the verified agent; a daemon before the agent table only answered Claude Code.
+    public var verifiedAgent: String { agentLabel ?? "Claude Code" }
+    /// The card can be handed back to the agent's own terminal prompt ("Decide in terminal").
+    public var canDecideInTerminal: Bool { decisions.contains("terminal") }
 
     public var expiresDate: Date? { expiresAt.flatMap(parseISODate) }
 }
@@ -126,11 +142,12 @@ public enum QuestionAnswer: Sendable, Hashable {
     case other(String)
 }
 
-/// A reply to a card. Only "once" / "deny" / choosing options — no "always", bypass, setMode:
-/// the `session.respond` protocol can't even express them.
+/// A reply to a card. Only "once" / "deny" / choosing options / "terminal" (no decision from the hub: the agent asks in
+/// its own terminal) — no "always", bypass, setMode: the `session.respond` protocol can't even express them.
 public enum RespondChoice: Sendable, Hashable {
     case allowOnce
     case deny
+    case terminal
     case answer([QuestionAnswer])
 
     /// Arguments for `POST /actions/session.respond` (docs/hook.md).
@@ -140,6 +157,8 @@ public enum RespondChoice: Sendable, Hashable {
             return ["requestId": .string(requestId), "decision": .string("once")]
         case .deny:
             return ["requestId": .string(requestId), "decision": .string("deny")]
+        case .terminal:
+            return ["requestId": .string(requestId), "decision": .string("terminal")]
         case .answer(let list):
             let arr: [JSONValue] = list.map {
                 switch $0 {

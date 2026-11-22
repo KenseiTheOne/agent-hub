@@ -101,6 +101,31 @@ test("only the needed fields are forwarded: no transcript_path, cwd, permission_
   }
 });
 
+test("a Codex rollout is forwarded only for a lowercase thread id: session_id's own, or a subagent's agent_id", async () => {
+  const d = await fakeDaemon(reply(200, {}));
+  const T = "019a5b2c-1111-7222-8333-444455556666";
+  const C = "019a5b2c-2222-7222-8333-444455556666";
+  const roll = (id) => `/h/.codex/sessions/2026/11/22/rollout-2026-11-22T10-00-00-${id}.jsonl`;
+  const cases = [
+    [{ session_id: T, transcript_path: roll(T) }, true],
+    [{ session_id: T, transcript_path: roll(T) + ".zst" }, true],
+    [{ session_id: T.toUpperCase(), transcript_path: roll(T.toUpperCase()) }, false],
+    [{ session_id: T.toUpperCase(), transcript_path: roll(T) }, false],
+    [{ session_id: T, agent_id: C, transcript_path: roll(C) }, true],
+    [{ session_id: T, agent_id: C, transcript_path: roll(T) }, false],
+    [{ session_id: T, agent_id: C.toUpperCase(), transcript_path: roll(C.toUpperCase()) }, false],
+    [{ session_id: T, agent_id: T, transcript_path: roll(T) }, true],
+  ];
+  try {
+    for (const [i, [b, fwd]] of cases.entries()) {
+      await runHook({ home: d.home, body: { ...b, hook_event_name: "SessionStart", source: "startup" } });
+      assert.equal("transcript_path" in d.seen[i].body, fwd, JSON.stringify(b));
+    }
+  } finally {
+    await d.close();
+  }
+});
+
 test("events other than PermissionRequest/SessionStart/SessionEnd/Stop are not forwarded → {}", async () => {
   const d = await fakeDaemon(reply(200, { hookSpecificOutput: { permissionDecision: "allow" } }));
   try {
@@ -207,20 +232,24 @@ test("the copy in claude-plugin matches hook/agenthub-hook and is executable", (
   assert.ok(statSync(HOOK_SCRIPT).mode & 0o100);
 });
 
-test("Claude Code plugin: PermissionRequest is synchronous, the rest async, no onFailure", () => {
+test("plugin hooks.json (Claude Code and Codex): PermissionRequest synchronous, the rest async, no onFailure", () => {
   const hooks = JSON.parse(readFileSync(join(REPO_DIR, "claude-plugin", "hooks", "hooks.json"), "utf8")).hooks;
   const plugin = JSON.parse(readFileSync(join(REPO_DIR, "claude-plugin", ".claude-plugin", "plugin.json"), "utf8"));
   assert.equal(plugin.name, "agent-hub");
-  assert.deepEqual(Object.keys(hooks).sort(), ["PermissionRequest", "SessionEnd", "SessionStart", "Stop"]);
+  assert.deepEqual(Object.keys(hooks).sort(), ["PermissionRequest", "SessionEnd", "SessionStart", "Stop", "UserPromptSubmit"]);
   for (const [ev, groups] of Object.entries(hooks)) {
     for (const g of groups) {
       for (const hk of g.hooks) {
         assert.equal(hk.type, "command");
         assert.match(hk.command, /\$\{CLAUDE_PLUGIN_ROOT\}\/hook\/agenthub-hook/);
         assert.equal(hk.onFailure, undefined);
+        // SessionEnd stays async for Claude Code (exit is not delayed); Codex runs it synchronously anyway
         assert.equal(Boolean(hk.async), ev !== "PermissionRequest", ev);
       }
     }
   }
-  assert.ok(hooks.PermissionRequest[0].hooks[0].timeout > 118);
+  // longer than the hook's own wait (123 s), which is longer than the Codex card (120 s) and the Claude card (110 s)
+  assert.ok(hooks.PermissionRequest[0].hooks[0].timeout > 123);
+  // Codex clamps SessionEnd to 3 s (hooks/src/engine/discovery.rs): no longer, so it does not warn about clamping
+  assert.ok(hooks.SessionEnd[0].hooks[0].timeout <= 3);
 });

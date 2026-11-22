@@ -3,7 +3,7 @@ import SwiftUI
 
 /// Session answer card (stage 6) after the Panel.dc.html prototype, inside the "Sessions" section, in two columns.
 /// Permission: the tool and a safe summary (command name or path, no body); the only buttons are
-/// "Allow once" / "Deny". AskUserQuestion: options, multiSelect, a custom answer.
+/// "Allow once" / "Deny" and, when the core offers it, "Decide in terminal". AskUserQuestion: options, multiSelect, a custom answer.
 /// The protocol cannot express "Always", bypass or a mode change, so they are not here and cannot be.
 struct ResponseCard: View {
     let store: HubStore
@@ -78,9 +78,9 @@ struct ResponseCard: View {
                 .padding(.horizontal, 6).padding(.vertical, 2).background(Capsule().fill(Color.white.opacity(0.12))).padding(.top, top)
         }
         if card.kind == .permission {
-            Text("Claude Code ✓").font(.system(size: 10.5, weight: .bold)).foregroundStyle(hexColor(0x7EE29B)).lineLimit(1).fixedSize()
+            Text("\(card.verifiedAgent) ✓").font(.system(size: 10.5, weight: .bold)).foregroundStyle(hexColor(0x7EE29B)).lineLimit(1).fixedSize()
                 .padding(.horizontal, 7).padding(.vertical, 2).background(Capsule().fill(hexColor(0x30D158, 0.16))).padding(.top, top)
-                .tip(tr("Подпись Claude Code проверена хабом", "Claude Code signature verified by the hub"))
+                .tip(tr("Подпись \(card.verifiedAgent) проверена хабом", "\(card.verifiedAgent) signature verified by the hub"))
         }
         if let until = card.expiresDate {
             TimelineView(.periodic(from: .now, by: 1)) { ctx in
@@ -108,10 +108,27 @@ struct ResponseCard: View {
                     .buttonStyle(CapsuleStyle(fill: hexColor(0x0A84FF), stroke: .clear, height: 32, expand: false))
                 Button(tr("Запретить", "Deny")) { send(.deny) }
                     .buttonStyle(CapsuleStyle(height: 32, expand: false))
+                terminalButton
                 tabLink
             }
             .disabled(busy)
         }
+    }
+
+    /// "Decide in terminal" — only when the core offers it (`decisions`): the hub gives no answer, the card goes away and
+    /// the agent asks in its own terminal prompt as if there were no hub.
+    @ViewBuilder private var terminalButton: some View {
+        if card.canDecideInTerminal {
+            Button(tr("Решить в терминале", "Decide in terminal")) { send(.terminal) }
+                .buttonStyle(CapsuleStyle(height: 32, expand: false))
+                .tip(tr("Хаб не отвечает — \(card.verifiedAgent) спросит в своём терминале", "The hub doesn't answer — \(card.verifiedAgent) asks in its own terminal"))
+        }
+    }
+
+    /// The card's session among other agents' sessions (`externalSessions`), case-insensitive by id.
+    private var externalSession: ExternalSession? {
+        guard card.external || card.agent.map({ $0 != "claude" }) == true else { return nil }
+        return store.state?.externalSessions.first { $0.sessionId.caseInsensitiveCompare(card.sessionId) == .orderedSame }
     }
 
     /// Jump to the card's session tab: `session.focus` if the core found the tab; for a daemon without it, `terminal.focus`
@@ -120,6 +137,7 @@ struct ResponseCard: View {
     private var focusRequest: (primitive: String, args: [String: JSONValue])? {
         if demo, card.surfaceId != nil, store.sessionFocusPrimitive { return ("session.focus", ["sessionId": .string(card.sessionId)]) }
         if let r = store.focusRequest(sessionId: card.sessionId) { return r }
+        if let ext = externalSession { return store.focusRequest(external: ext) }
         guard !store.sessionFocusPrimitive, let sf = card.surfaceId, let prim = store.tabFocusPrimitive else { return nil }
         return (prim, ["surfaceId": .string(sf)])
     }
@@ -127,6 +145,7 @@ struct ResponseCard: View {
     /// Why the tab link won't work: by the session's terminal when the hub knows the session, otherwise a cmux tab via the bridge.
     private func block(_ req: (primitive: String, args: [String: JSONValue])) -> ActionBlock? {
         if let s = store.sessions.first(where: { $0.sessionId == card.sessionId }) { return store.gate(primitive: req.primitive, session: s, capability: "focus") }
+        if let ext = externalSession { return store.gate(external: ext) }
         return store.gate(primitive: req.primitive)
     }
 
@@ -166,6 +185,7 @@ struct ResponseCard: View {
                 Button(tr("Ответить", "Reply")) { send(.answer(answers)) }
                     .buttonStyle(CapsuleStyle(fill: hexColor(0x0A84FF), stroke: .clear, height: 32, expand: false))
                     .disabled(!card.isComplete(answers))
+                terminalButton
             }
             .disabled(busy)
         }

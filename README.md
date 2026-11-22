@@ -24,7 +24,8 @@ read by the built-in `agents` and `quota` plugins, and three throwaway local plu
   Keychain, the Claude quota, OAuth connections, hub auto-update.
 - **Built-in plugins** that ship with the app: Claude Code sessions (`claude-sessions`), background workflow runs
   (`agents`), the subscription quota (`quota`) and a token spend journal with its API list price equivalent
-  (`spend`).
+  (`spend`); for Codex CLI — live sessions (`codex-sessions`), the plan limits (`codex-quota`) and token spend
+  (`codex-spend`).
 - **Plugins** — official ones from a signed registry, community ones, and your own from a local folder. A plugin's tier
   (`builtin | official | own | community | local`) comes from where it was installed, the signed registry index and
   your consent, never from the plugin's own metadata. Plugins can declare their own actions, notification rules,
@@ -166,7 +167,7 @@ contract in [`docs/extension-points.md`](docs/extension-points.md); registry, co
 | `daemon/lib/primitives/`, `routes/`, `services/`, `terminals/` | extension points (auto-loaded); on one Mac the same modules can live in `<state dir>/Extensions/`, loaded after a human approves each file — [`docs/extension-points.md`](docs/extension-points.md) |
 | `daemon/lib/push/`, `hook/`, `registry/` | push ([`push/README.md`](daemon/lib/push/README.md)), answer cards, minisign / tar / permissions linter shared with the registry |
 | `daemon/native/peercred/` | an N-API addon: pid, path and ancestors of the socket peer |
-| `plugins/` | built-in plugins (claude-sessions, agents, quota, spend): `<id>/<id>.<interval>.mjs`, README, fixtures |
+| `plugins/` | built-in plugins (claude-sessions, agents, quota, spend, codex-sessions, codex-quota, codex-spend): `<id>/<id>.<interval>.mjs`, README, fixtures |
 | `app/` | the SwiftUI shell (SwiftPM, macOS 26) — [`app/README.md`](app/README.md) |
 | `bridge/` | the cmux bridge — [`bridge/README.md`](bridge/README.md) |
 | `hook/` | `agenthub-hook` — [`docs/hook.md`](docs/hook.md) |

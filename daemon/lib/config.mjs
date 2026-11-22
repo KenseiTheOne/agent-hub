@@ -46,14 +46,19 @@ export const DEFAULTS = Object.freeze({
     app: null,
     claudeCode:
       'identifier "com.anthropic.claude-code" and anchor apple generic and certificate leaf[subject.OU] = "Q6L2SF6YDW"',
+    // Codex CLI (OpenAI's native `codex` binary, Developer ID, Team ID 2DC432GLL2) — the second agent whose hooks the hub
+    // answers (lib/hook/agents.mjs).
+    codex: 'identifier "codex" and anchor apple generic and certificate leaf[subject.OU] = "2DC432GLL2"',
   },
   peer: {
     // The app executable must live inside a bundle with this name.
     appBundleName: "AgentHub.app",
     // Hook and bridge scripts (the interpreter's argv[1] or the executable itself). ~ is expanded.
-    // The third path — the hook copy in the Claude Code plugin from this repo (`claude --plugin-dir <repo>/claude-plugin`).
+    // The second path — the same plugin installed into Codex (`codex plugin add agent-hub@agent-hub`:
+    // ~/.codex/plugins/cache/<marketplace>/<plugin>/<version>/hook/agenthub-hook).
+    // The rest — the hook copy in the Claude Code plugin from this repo (`claude --plugin-dir <repo>/claude-plugin`).
     // From an install (Versions/<label>) — both through the Versions/current symlink and the real version path (installOf).
-    hookPaths: ["~/.claude/plugins/**/agenthub-hook", ...RUN_DIRS.flatMap((d) => [`${d}/hook/agenthub-hook`, `${d}/claude-plugin/hook/agenthub-hook`])],
+    hookPaths: ["~/.claude/plugins/**/agenthub-hook", "~/.codex/plugins/**/agenthub-hook", ...RUN_DIRS.flatMap((d) => [`${d}/hook/agenthub-hook`, `${d}/claude-plugin/hook/agenthub-hook`])],
     // The shell shows the first path as the bridge launch command: for an install — via Versions/current, so that
     // a running bridge survives a hub update.
     bridgePaths: RUN_DIRS.flatMap((d) => [`${d}/bridge/agenthub-bridge`, `${d}/bridge/agenthub-bridge.mjs`]),
@@ -63,6 +68,10 @@ export const DEFAULTS = Object.freeze({
   },
   // The ~/.claude directory (synthetic in tests).
   claudeHome: "~/.claude",
+  // The Codex home ($CODEX_HOME, ~/.codex by default; synthetic in tests): thread-writer-locks/ and sessions/ prove a Codex
+  // hook's session (peer.verifyHookSession). The daemon does not see the user's shell environment, so a non-default
+  // CODEX_HOME is set here (config.json) rather than read from the environment.
+  codexHome: "~/.codex",
   // Built-in plugins. null → <repo>/plugins.
   builtinPluginsDir: null,
   plugins: {
@@ -188,6 +197,8 @@ export function loadConfig({ env = process.env, overrides = null, tolerant = fal
   cfg.damagedFiles = damaged ? [damaged] : [];
   if (env.AGENTHUB_CLAUDE_HOME) cfg.claudeHome = env.AGENTHUB_CLAUDE_HOME;
   cfg.claudeHome = resolve(expandHome(cfg.claudeHome));
+  if (env.AGENTHUB_CODEX_HOME) cfg.codexHome = env.AGENTHUB_CODEX_HOME;
+  cfg.codexHome = resolve(expandHome(cfg.codexHome || "~/.codex"));
   cfg.builtinPluginsDir = resolve(expandHome(cfg.builtinPluginsDir || join(REPO_DIR, "plugins")));
   if (env.AGENTHUB_BUILTIN_PLUGINS) cfg.builtinPluginsDir = resolve(env.AGENTHUB_BUILTIN_PLUGINS);
   // AGENTHUB_SERVICES=none | a,b — which services to start (for tests).

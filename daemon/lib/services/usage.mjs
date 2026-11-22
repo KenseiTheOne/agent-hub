@@ -29,6 +29,7 @@ import { request as httpsRequest } from "node:https";
 import { request as httpRequest } from "node:http";
 import { join } from "node:path";
 import { writeFileAtomic } from "../statefile.mjs";
+import { OnDemand } from "./_on-demand.mjs";
 
 export const name = "usage";
 
@@ -258,6 +259,7 @@ export class UsageService {
     this.timeoutMs = Number(cfg.timeoutMs) || 8_000;
     this.timer = null;
     this.stopped = false;
+    this.demand = new OnDemand(this, ENV_NAME, "usage-demand");
     this.lastError = undefined;
   }
 
@@ -337,7 +339,7 @@ export class UsageService {
   }
 
   schedule(ms) {
-    if (this.stopped) return;
+    if (this.stopped || !this.demand.active) return;
     clearTimeout(this.timer);
     this.timer = setTimeout(async () => {
       let next = ERROR_BACKOFF_MS;
@@ -353,11 +355,13 @@ export class UsageService {
 
   start() {
     this.ctx.providePluginEnv(ENV_NAME, this.file);
-    this.schedule(this.firstDelay());
+    // polls only while a running plugin reads the file (services/_on-demand.mjs; services.usage.onDemand = false — always)
+    this.demand.start();
   }
 
   stop() {
     this.stopped = true;
+    this.demand.stop();
     clearTimeout(this.timer);
     this.ctx.providePluginEnv(ENV_NAME, null);
   }

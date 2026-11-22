@@ -22,9 +22,12 @@ const FILES = {
   "claude-sessions": join(PLUGINS, "claude-sessions/claude-sessions.mjs"),
   quota: join(PLUGINS, "quota/quota.5m.mjs"),
   spend: join(PLUGINS, "spend/spend.mjs"),
+  "codex-sessions": join(PLUGINS, "codex-sessions/codex-sessions.mjs"),
+  "codex-quota": join(PLUGINS, "codex-quota/codex-quota.mjs"),
+  "codex-spend": join(PLUGINS, "codex-spend/codex-spend.mjs"),
 };
-// claude-sessions is declared for macOS only (agenthub.platforms): the host doesn't run it on other platforms.
-const LIVE = Object.keys(FILES).filter((id) => IS_DARWIN || id !== "claude-sessions");
+// claude-sessions and the codex-* plugins are declared for macOS only (agenthub.platforms): the host doesn't run them on other platforms.
+const LIVE = Object.keys(FILES).filter((id) => IS_DARWIN || (id !== "claude-sessions" && !id.startsWith("codex-")));
 
 test("built-in plugins: metadata per contract, permissions with why, effects only open.* (claude-sessions — sessions too)", () => {
   for (const [id, file] of Object.entries(FILES)) {
@@ -38,9 +41,16 @@ test("built-in plugins: metadata per contract, permissions with why, effects onl
     // spend has two actions — they only store the daily alert threshold and the chart range in its own PluginData
     if (id === "spend") assert.deepEqual(m.actions.map((a) => a.id), ["set-alert", "set-range"], id);
     else assert.deepEqual(m.actions, [], `${id}: read-only plugins have no actions`);
-    // the built-in claude-sessions also offers switching to the tab, interrupting and stopping a session; agents — the tab
+    // the built-in claude-sessions also offers switching to the tab, interrupting and stopping a session; agents — the tab;
+    // codex-sessions — only switching to the tab of a Codex session
     const allowed =
-      id === "claude-sessions" ? /^(open\.(url|file)|cmux\.focus|session\.(interrupt|stop))$/ : id === "agents" ? /^cmux\.focus$/ : /^open\.(url|file)$/;
+      id === "claude-sessions"
+        ? /^(open\.(url|file)|cmux\.focus|session\.(interrupt|stop))$/
+        : id === "agents"
+          ? /^cmux\.focus$/
+          : id === "codex-sessions"
+            ? /^session\.focus$/
+            : /^open\.(url|file)$/;
     for (const e of m.effects) assert.match(e, allowed, id);
     for (const k of ["fsRead", "fsWrite", "exec", "secrets", "net", "watch"]) {
       for (const entry of m[k]) assert.ok(splitWhy(entry).why, `${id}: ${k} without why: ${entry}`);
@@ -96,23 +106,25 @@ test("built-in plugins via the daemon: sessions, workflows and quota in /state, 
     // claude double in ~/.local/bin — first in the plugin's PATH
     writeFileSync(join(home, ".local/bin/claude"), `#!/bin/sh\ncat '${join(root, "agents.out")}'\n`);
     chmodSync(join(home, ".local/bin/claude"), 0o755);
-    // only these three plugins (plugins/ also has others — they don't belong here)
+    // only the built-ins listed in FILES (a copy, so nothing else from plugins/ gets in)
     const only = join(root, "plugins");
     for (const id of Object.keys(FILES)) cpSync(join(PLUGINS, id), join(only, id), { recursive: true });
     process.env.HOME = home;
+    // no ~/.codex in the synthetic HOME: the codex-* built-ins are held back by their declared requirement and never run
+    const RUN = LIVE.filter((id) => !id.startsWith("codex-"));
     h = await startHub({ pluginsDir: only, services: "usage", overrides: { services: { usage: { securityPath: join(root, "security"), url: `http://127.0.0.1:${api.address().port}/api/oauth/usage`, firstDelayMs: 10 } } } });
     const st = await waitFor(
       async () => {
         const r = await req(h.sock, "GET", "/state");
         const ids = Object.fromEntries(r.body.plugins.map((p) => [p.id, p]));
         if (ids.quota && ids.quota.header?.[0]?.params?.tile !== "20%") h.core.host.refresh("quota", "Manual");
-        const ready = LIVE.every((id) => ids[id]?.lastRunAt) && ids.quota.header?.[0]?.params?.tile === "20%";
+        const ready = RUN.every((id) => ids[id]?.lastRunAt) && ids.quota.header?.[0]?.params?.tile === "20%";
         const sess = ids["claude-sessions"]?.body?.find((i) => i.session);
         return ready && (!IS_DARWIN || (sess && sess.session.verified === false)) ? ids : null;
       },
       { timeoutMs: 30_000, stepMs: 200 },
     );
-    for (const id of LIVE) {
+    for (const id of RUN) {
       assert.equal(st[id].tier, "builtin", id);
       assert.equal(st[id].trusted, true, id);
     }
@@ -132,6 +144,16 @@ test("built-in plugins via the daemon: sessions, workflows and quota in /state, 
       assert.equal(sess.session.label, "подпись не подтверждена");
     } else {
       assert.equal(st["claude-sessions"], undefined, "claude-sessions is macOS only");
+    }
+    // no ~/.codex in the synthetic HOME: the codex-* built-ins are held back by their declared requirement — no section,
+    // nothing spawned; /state.heldPlugins names the requirement as the plugin declared it
+    if (IS_DARWIN) {
+      const held = Object.fromEntries((await req(h.sock, "GET", "/state")).body.heldPlugins.map((p) => [p.id, p]));
+      for (const id of ["codex-sessions", "codex-quota", "codex-spend"]) {
+        assert.equal(st[id], undefined, id);
+        assert.equal(held[id]?.reason, "requires", id);
+        assert.deepEqual(held[id].requires.map((r) => [r.name, r.present]), [["Codex", false]]);
+      }
     }
     // didn't get into the session registry
     const r = await req(h.sock, "GET", "/state");

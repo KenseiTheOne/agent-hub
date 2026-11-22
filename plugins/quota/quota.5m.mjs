@@ -3,11 +3,13 @@
 //
 // <agenthub.title>Claude Code Квота</agenthub.title>
 // <agenthub.title lang="en">Claude Code Quota</agenthub.title>
-// <agenthub.version>0.5.2</agenthub.version>
+// <agenthub.version>0.5.3</agenthub.version>
 // <agenthub.author.name>Kensei</agenthub.author.name>
 // <agenthub.author.github>KenseiTheOne</agenthub.author.github>
 // <agenthub.desc>Сколько осталось квоты Claude: неделя, 5-часовое окно и темп к сбросу</agenthub.desc>
 // <agenthub.desc lang="en">How much Claude quota is left: week, 5-hour window and pace to reset</agenthub.desc>
+// <agenthub.requires name="Claude Code" url="https://claude.com/product/claude-code" check="~/.claude">агент, чью квоту показывает плагин</agenthub.requires>
+// <agenthub.requires lang="en" name="Claude Code">the agent whose quota this plugin shows</agenthub.requires>
 // <agenthub.status value="ok" label="Запас есть">Квоты хватает до сброса при нынешнем темпе</agenthub.status>
 // <agenthub.status value="ok" lang="en" label="Plenty left">Quota will last until reset at the current pace</agenthub.status>
 // <agenthub.status value="wait" label="Квота на исходе">Неделя ≥ 80% или при таком темпе 85% наступит раньше сброса</agenthub.status>

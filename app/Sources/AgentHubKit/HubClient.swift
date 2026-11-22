@@ -208,6 +208,14 @@ public final class HubClient: Sendable {
         return (try? JSONDecoder().decode(Body.self, from: r.body))?.notifications
     }
 
+    /// `PUT /settings/builtin-plugins` (app only): turn a built-in plugin on or off. → the new built-in list.
+    public func setBuiltinEnabled(_ id: String, enabled: Bool) async throws -> [BuiltinPluginInfo]? {
+        let r = try await request(.PUT, "/settings/builtin-plugins", json: .object(["id": .string(id), "enabled": .bool(enabled)]))
+        guard r.status == 200 else { throw HubError.http(status: r.status, code: Self.errorCode(r.body)) }
+        let v = try? JSONDecoder().decode([String: JSONValue].self, from: r.body)
+        return BuiltinPluginInfo.list(from: v?["builtinPlugins"])
+    }
+
     /// `PUT /settings/hub-updates` (app only): "Check for hub updates". → the new hub update state.
     public func setCheckHubUpdates(_ enabled: Bool) async throws -> HubUpdateInfo? {
         let r = try await request(.PUT, "/settings/hub-updates", json: .object(["enabled": .bool(enabled)]))

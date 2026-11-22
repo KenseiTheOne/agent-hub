@@ -3,7 +3,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { closeSync, mkdirSync, mkdtempSync, openSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DEFAULTS, REPO_DIR } from "../lib/config.mjs";
 import { APP_DIAGNOSTIC_ARGS, createPeer, defaultSys } from "../lib/peer.mjs";
@@ -89,14 +90,14 @@ test("hook: node agenthub-hook ← sh -c ← signed Claude Code", async () => {
   assert.equal(r.claudePid, 100);
 });
 
-test("hook from a shell without Claude among ancestors → peer:no-claude-ancestor", async () => {
+test("hook from a shell without a signed agent among ancestors → peer:no-agent-ancestor", async () => {
   const procs = {
     300: { ppid: 200, path: "/opt/homebrew/bin/node", argv: ["node", HOOK] },
     200: { ppid: 1, path: "/bin/zsh" },
   };
   const r = await createPeer({ config: cfg(), sys: fakeSys(procs, { signed: SIGNED, peerPidByFd: { 7: 300 } }) }).classifyFd(7);
   assert.equal(r.class, "cli");
-  assert.equal(r.reason, "peer:no-claude-ancestor");
+  assert.equal(r.reason, "peer:no-agent-ancestor");
 });
 
 test("hook: Claude more than 4 levels up doesn't count", async () => {
@@ -109,7 +110,7 @@ test("hook: Claude more than 4 levels up doesn't count", async () => {
     301: { ppid: 1, path: CLAUDE },
   };
   const r = await createPeer({ config: cfg(), sys: fakeSys(procs, { signed: SIGNED, peerPidByFd: { 7: 306 } }) }).classifyFd(7);
-  assert.equal(r.reason, "peer:no-claude-ancestor");
+  assert.equal(r.reason, "peer:no-agent-ancestor");
 });
 
 test("hook: cmux shim (unsigned bash script) — not Claude", async () => {
@@ -118,7 +119,7 @@ test("hook: cmux shim (unsigned bash script) — not Claude", async () => {
     200: { ppid: 1, path: "/bin/bash", argv: ["bash", "/var/folders/x/cmux-cli-shims/claude"] },
   };
   const r = await createPeer({ config: cfg(), sys: fakeSys(procs, { signed: SIGNED, peerPidByFd: { 7: 300 } }) }).classifyFd(7);
-  assert.equal(r.reason, "peer:no-claude-ancestor");
+  assert.equal(r.reason, "peer:no-agent-ancestor");
 });
 
 test("the hook's session_id is checked against ~/.claude/sessions/<Claude pid>.json", async () => {
@@ -129,10 +130,10 @@ test("the hook's session_id is checked against ~/.claude/sessions/<Claude pid>.j
   const sessions = { "/Users/u/.claude/sessions/100.json": { pid: 100, sessionId: "11111111-1111-4111-8111-111111111111" } };
   const peer = createPeer({ config: cfg(), sys: fakeSys(procs, { signed: SIGNED, sessions, peerPidByFd: { 7: 300 } }) });
   const info = await peer.classifyFd(7);
-  assert.deepEqual(peer.verifyHookSession(info, "11111111-1111-4111-8111-111111111111"), { ok: true });
-  assert.equal(peer.verifyHookSession(info, "22222222-2222-4222-8222-222222222222").reason, "peer:session-mismatch");
-  assert.equal(peer.verifyHookSession(info, undefined).reason, "peer:session-mismatch");
-  assert.equal(peer.verifyHookSession({ class: "cli" }, "x").reason, "peer:not-hook");
+  assert.deepEqual(await peer.verifyHookSession(info, "11111111-1111-4111-8111-111111111111"), { ok: true });
+  assert.equal((await peer.verifyHookSession(info, "22222222-2222-4222-8222-222222222222")).reason, "peer:session-mismatch");
+  assert.equal((await peer.verifyHookSession(info, undefined)).reason, "peer:session-mismatch");
+  assert.equal((await peer.verifyHookSession({ class: "cli" }, "x")).reason, "peer:not-hook");
 });
 
 test("bridge and others: by script path; everything else — cli", async () => {
@@ -223,4 +224,162 @@ test("shell diagnostic flags: the daemon's list matches QuitPolicy.diagnosticArg
   assert.ok(fromSwift.length >= 5);
   assert.deepEqual([...APP_DIAGNOSTIC_ARGS].filter((a) => a !== "--probe-peer").sort(), fromSwift);
   assert.ok(APP_DIAGNOSTIC_ARGS.has("--probe-peer"));
+});
+
+// --- Codex CLI (lib/hook/agents.mjs): the same hook class with a signed codex ancestor, a different session proof
+
+const CODEX = "/opt/homebrew/Caskroom/codex/0.159.3/codex";
+const CODEX_HOOK = "/Users/u/.codex/plugins/cache/agent-hub/agent-hub/0.1.13/hook/agenthub-hook";
+const THREAD = "019a5b2c-1111-7222-8333-444455556666";
+const codexCfg = (over = {}) =>
+  cfg({
+    requirements: { ...cfg().requirements, codex: DEFAULTS.requirements.codex },
+    peer: { ...DEFAULTS.peer, hookPaths: ["/Users/u/.claude/plugins/**/agenthub-hook", "/Users/u/.codex/plugins/**/agenthub-hook"] },
+    ...over,
+  });
+const CODEX_SIGNED = { ...SIGNED, [CODEX]: ['identifier "codex"'] };
+
+test("hook: agenthub-hook ← $SHELL -lc ← signed codex → class hook, agent codex, no claudePid", async () => {
+  const procs = {
+    300: { ppid: 200, path: "/opt/homebrew/bin/node", argv: ["node", CODEX_HOOK] },
+    200: { ppid: 100, path: "/bin/zsh", argv: ["/bin/zsh", "-lc", "agenthub-hook"] },
+    100: { ppid: 1, path: CODEX, argv: ["codex", "app-server", "--listen", "unix://"] },
+  };
+  const r = await createPeer({ config: codexCfg(), sys: fakeSys(procs, { signed: CODEX_SIGNED, peerPidByFd: { 7: 300 } }) }).classifyFd(7);
+  assert.equal(r.class, "hook");
+  assert.equal(r.agent, "codex");
+  assert.equal(r.agentPid, 100);
+  assert.equal(r.claudePid, undefined, "claudePid stays Claude Code's: consumers that read it never see a codex pid");
+  // the Claude Code case carries both
+  const c = await createPeer({ config: codexCfg(), sys: fakeSys({ 300: { ppid: 100, path: "/opt/homebrew/bin/node", argv: ["node", HOOK] }, 100: { ppid: 1, path: CLAUDE } }, { signed: CODEX_SIGNED, peerPidByFd: { 7: 300 } }) }).classifyFd(7);
+  assert.deepEqual([c.agent, c.agentPid, c.claudePid], ["claude", 100, 100]);
+});
+
+test("hook: a codex binary with another signature, or without requirements.codex → peer:no-agent-ancestor", async () => {
+  const procs = {
+    300: { ppid: 100, path: "/opt/homebrew/bin/node", argv: ["node", CODEX_HOOK] },
+    100: { ppid: 1, path: CODEX },
+  };
+  const unsigned = await createPeer({ config: codexCfg(), sys: fakeSys(procs, { signed: SIGNED, peerPidByFd: { 7: 300 } }) }).classifyFd(7);
+  assert.equal(unsigned.reason, "peer:no-agent-ancestor");
+  const c = codexCfg();
+  c.requirements.codex = null;
+  const off = await createPeer({ config: c, sys: fakeSys(procs, { signed: CODEX_SIGNED, peerPidByFd: { 7: 300 } }) }).classifyFd(7);
+  assert.equal(off.reason, "peer:no-agent-ancestor");
+});
+
+test("Codex session proof: the thread lock open in the codex ancestor + transcript_path = that thread's rollout under sessions/", async () => {
+  const home = mkdtempSync(join(tmpdir(), "ah-codex-"));
+  try {
+    const codexHome = join(home, "codex");
+    const day = join(codexHome, "sessions", "2026", "11", "22");
+    mkdirSync(day, { recursive: true });
+    mkdirSync(join(codexHome, "thread-writer-locks"));
+    const lock = join(codexHome, "thread-writer-locks", `${THREAD}.lock`);
+    writeFileSync(lock, "");
+    const rollout = join(day, `rollout-2026-11-22T10-00-00-${THREAD}.jsonl`);
+    const procs = {
+      300: { ppid: 100, path: "/opt/homebrew/bin/node", argv: ["node", CODEX_HOOK] },
+      100: { ppid: 1, path: CODEX },
+    };
+    let holders = [100];
+    let lsof = 0;
+    const sys = {
+      ...fakeSys(procs, { signed: CODEX_SIGNED, peerPidByFd: { 7: 300 } }),
+      fileHolders: async (p) => {
+        lsof++;
+        return p === lock ? holders : [];
+      },
+    };
+    const peer = createPeer({ config: codexCfg({ codexHome, peer: { ...codexCfg().peer, hookSessionCacheMs: 0 } }), sys });
+    const info = await peer.classifyFd(7);
+    const v = (sid, transcript_path = rollout) => peer.verifyHookSession(info, sid, { transcript_path });
+    assert.deepEqual(await v(THREAD), { ok: true });
+    // the rollout file may not exist yet (Codex writes it with the first record): its directory is resolved
+    assert.deepEqual(await v(THREAD, join(codexHome, "sessions", "2026", "11", "23", `rollout-2026-11-23T00-00-00-${THREAD}.jsonl`)), { ok: true });
+    // another thread's id, a non-UUID, a foreign rollout name, a path outside sessions/, "..", a link out of sessions/
+    const OTHER = "019a5b2c-9999-7222-8333-444455556666";
+    assert.equal((await v(OTHER, join(day, `rollout-2026-11-22T10-00-00-${OTHER}.jsonl`))).reason, "peer:no-session-file", "no lock file for that thread");
+    assert.equal((await v("../../etc/x")).reason, "peer:session-mismatch");
+    // only the lowercase spelling Codex itself prints: the same thread in uppercase is another name — refused
+    assert.equal((await v(THREAD.toUpperCase(), join(day, `rollout-2026-11-22T10-00-00-${THREAD.toUpperCase()}.jsonl`))).reason, "peer:session-mismatch");
+    assert.equal((await v(THREAD, join(day, `rollout-2026-11-22T10-00-00-${THREAD.toUpperCase()}.jsonl`))).reason, "peer:session-mismatch");
+    assert.equal((await v(THREAD, join(day, `rollout-2026-11-22T10-00-00-${OTHER}.jsonl`))).reason, "peer:session-mismatch");
+    assert.equal((await v(THREAD, join(home, `rollout-2026-11-22T10-00-00-${THREAD}.jsonl`))).reason, "peer:session-mismatch");
+    assert.equal((await v(THREAD, `${day}/../22/rollout-2026-11-22T10-00-00-${THREAD}.jsonl`)).reason, "peer:session-mismatch");
+    assert.equal((await v(THREAD, "sessions/rollout-x-" + THREAD + ".jsonl")).reason, "peer:session-mismatch", "relative");
+    assert.equal((await v(THREAD, null)).reason, "peer:session-mismatch", "no transcript_path");
+    mkdirSync(join(home, "elsewhere"));
+    symlinkSync(join(home, "elsewhere"), join(codexHome, "sessions", "link"));
+    assert.equal((await v(THREAD, join(codexHome, "sessions", "link", `rollout-2026-11-22T10-00-00-${THREAD}.jsonl`))).reason, "peer:session-mismatch");
+    // the lock is held by another process (another codex hosts the thread) / lsof failed
+    holders = [555];
+    assert.equal((await v(THREAD)).reason, "peer:session-mismatch");
+    holders = null;
+    assert.equal((await v(THREAD)).reason, "peer:no-session-file");
+    // a lock that is a link, not a file
+    holders = [100];
+    rmSync(lock);
+    symlinkSync(rollout, lock);
+    assert.equal((await v(THREAD)).reason, "peer:no-session-file");
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("Codex session proof: a positive answer is cached for a single-session launch (TUI), never for the shared daemon; a negative one never", async () => {
+  const home = mkdtempSync(join(tmpdir(), "ah-codex-"));
+  try {
+    const codexHome = join(home, "codex");
+    mkdirSync(join(codexHome, "sessions"), { recursive: true });
+    mkdirSync(join(codexHome, "thread-writer-locks"));
+    writeFileSync(join(codexHome, "thread-writer-locks", `${THREAD}.lock`), "");
+    const rollout = join(codexHome, "sessions", `rollout-2026-11-22T10-00-00-${THREAD}.jsonl`);
+    for (const [argv, cached] of [
+      [["codex"], true],
+      [["codex", "app-server", "--listen", "unix://"], false],
+      [["codex", "app-server"], false],
+      [null, false],
+    ]) {
+      const procs = { 300: { ppid: 100, path: "/opt/homebrew/bin/node", argv: ["node", CODEX_HOOK] }, 100: { ppid: 1, path: CODEX, argv } };
+      let holders = [];
+      let lsof = 0;
+      const sys = { ...fakeSys(procs, { signed: CODEX_SIGNED, peerPidByFd: { 7: 300 } }), fileHolders: async () => (lsof++, holders) };
+      const peer = createPeer({ config: codexCfg({ codexHome }), sys });
+      const info = await peer.classifyFd(7);
+      const v = async () => (await peer.verifyHookSession(info, THREAD, { transcript_path: rollout })).ok;
+      assert.equal(await v(), false);
+      assert.equal(await v(), false);
+      assert.equal(lsof, 2);
+      holders = [100];
+      assert.equal(await v(), true);
+      assert.equal(await v(), true);
+      assert.equal(lsof, cached ? 3 : 4, JSON.stringify(argv));
+      // a thread closed (lock released) in the shared daemon is refused right away
+      holders = [];
+      assert.equal(await v(), cached, JSON.stringify(argv));
+      // the cache never skips the rollout check
+      assert.equal((await peer.verifyHookSession(info, THREAD, { transcript_path: "/tmp/x.jsonl" })).ok, false);
+    }
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("lsof wrapper: the pids that have the file open; none → []; a failure → null", async () => {
+  const sys = defaultSys();
+  const dir = mkdtempSync(join(tmpdir(), "ah-lsof-"));
+  try {
+    const f = join(dir, "x.lock");
+    writeFileSync(f, "");
+    assert.deepEqual(await sys.fileHolders(f), []);
+    const fd = openSync(f, "r");
+    try {
+      assert.deepEqual(await sys.fileHolders(f), [process.pid]);
+    } finally {
+      closeSync(fd);
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

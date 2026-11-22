@@ -43,7 +43,7 @@ async function fakeApi({ status = 200, body = LIST } = {}) {
   return { url: `http://127.0.0.1:${srv.address().port}${MODELS_PATH}`, seen, state, close: () => new Promise((r) => srv.close(r)) };
 }
 
-const modelsCfg = (extra) => ({ services: { models: { firstDelayMs: 10, intervalMs: 100, backoffCapMs: 100, ...extra } } });
+const modelsCfg = (extra) => ({ services: { models: { onDemand: false, firstDelayMs: 10, intervalMs: 100, backoffCapMs: 100, ...extra } } });
 
 function walk(dir) {
   const out = [];

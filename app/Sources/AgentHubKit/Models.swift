@@ -695,6 +695,11 @@ public struct HubState: Codable, Sendable, Hashable {
     public var limits: HubLimits? = nil
     /// The Claude Code hook as this hub sees it (`GET /state.hook`). nil — an older daemon: the shell says nothing.
     public var hook: HookInfo? = nil
+    /// Every built-in plugin with its on/off switch (`GET /state.builtinPlugins`, events `plugins.held` and `settings.changed`).
+    /// nil — an older daemon: the Plugins page shows built-ins without switches.
+    public var builtinPlugins: [BuiltinPluginInfo]? = nil
+    /// Plugins found but not run — turned off or missing a declared requirement (`GET /state.heldPlugins`, event `plugins.held`).
+    public var heldPlugins: [HeldPluginInfo] = []
 
     public init(plugins: [PluginState] = [], sessions: [SessionInfo] = [], estop: Bool = false, seq: Int = 0) {
         self.version = nil; self.contract = nil; self.now = nil; self.pid = nil; self.seq = seq; self.estop = estop
@@ -739,6 +744,8 @@ public struct HubState: Codable, Sendable, Hashable {
         registryKeys = c.lossyList(RegistryKeyChange.self, forKey: .registryKeys)
         limits = try? c.decodeIfPresent(HubLimits.self, forKey: .limits)
         hook = try? c.decodeIfPresent(HookInfo.self, forKey: .hook)
+        builtinPlugins = c.lossyList(BuiltinPluginInfo.self, forKey: .builtinPlugins)
+        heldPlugins = c.lossyList(HeldPluginInfo.self, forKey: .heldPlugins) ?? []
         status = (try? c.decode(HubStatus.self, forKey: .status)) ?? HubStatus.worst(plugins.map(\.status))
         waitingSessions = (try? c.decode(Int.self, forKey: .waitingSessions)) ?? sessions.filter(\.isWaiting).count
     }

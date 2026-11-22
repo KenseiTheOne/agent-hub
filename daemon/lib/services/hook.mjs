@@ -1,11 +1,12 @@
-// Stage 6 service: answering Claude Code sessions through the agenthub-hook hook.
+// Stage 6 service: answering Claude Code and Codex sessions through the agenthub-hook hook.
 //
-// Registers the POST /hook handler (ctx.onHook): SessionStart/SessionEnd/Stop — the registry of interactive
-// sessions and card removal; PermissionRequest — a card and waiting for a decision from the app
-// (the session.respond primitive). Logic — lib/hook/cards.mjs; routes for the app — routes/hook.mjs.
+// Registers the POST /hook handler (ctx.onHook): SessionStart/UserPromptSubmit/SessionEnd/Stop — the registry of
+// interactive sessions and card removal; PermissionRequest — a card and waiting for a decision from the app
+// (the session.respond primitive). Logic — lib/hook/cards.mjs (per-agent differences — lib/hook/agents.mjs); routes
+// for the app — routes/hook.mjs.
 //
-// Settings — config.services.hook.* on top of HOOK_DEFAULTS (waitMs, maxApprovalsPerMinute, pauseMs,
-// maxRequestsPerMinute, maxPending, interactiveKinds, interactiveEntrypoints, skipTools, sweepMs).
+// Settings — config.services.hook.* on top of HOOK_DEFAULTS (waitMs, codexWaitMs, codexModes, maxApprovalsPerMinute,
+// pauseMs, maxRequestsPerMinute, maxPending, maxPendingPerProcess, interactiveKinds, interactiveEntrypoints, skipTools, sweepMs).
 
 import { HOOK_DEFAULTS, HookState, hookStateFor } from "../hook/cards.mjs";
 

@@ -55,8 +55,15 @@ struct SessionsView: View {
                     LazyVGrid(columns: [GridItem(.flexible(), spacing: 12, alignment: .top), GridItem(.flexible(), spacing: 12, alignment: .top)], spacing: 12) {
                         ForEach(cards) { card in ResponseCard(store: store, card: card, demo: store.demoCards.contains(card)) }
                     }
-                    Text(tr("Можно ответить и в терминале, и с телефона через Remote Control — засчитается первый ответ.", "You can also answer in the terminal or from your phone via Remote Control — the first answer counts."))
-                        .font(.system(size: 11.5)).foregroundStyle(.white.opacity(0.5))
+                    if cards.contains(where: { $0.agent == nil || $0.agent == "claude" }) {
+                        Text(tr("Можно ответить и в терминале, и с телефона через Remote Control — засчитается первый ответ.", "You can also answer in the terminal or from your phone via Remote Control — the first answer counts."))
+                            .font(.system(size: 11.5)).foregroundStyle(.white.opacity(0.5))
+                    }
+                    // agents whose terminal prompt waits for the hook (Codex): it appears only after the card
+                    ForEach(Array(Set(cards.filter { $0.agent != nil && $0.agent != "claude" }.map(\.verifiedAgent))).sorted(), id: \.self) { label in
+                        Text(tr("\(label) спросит в своём терминале только после карточки: «Решить в терминале» или когда она истечёт.", "\(label) asks in its own terminal only after the card: \"Decide in terminal\" or when it expires."))
+                            .font(.system(size: 11.5)).foregroundStyle(.white.opacity(0.5))
+                    }
                 }
                 // the sessions plugin's page leads here (PanelSection.resolved): what isn't in the hub registry —
                 // died sessions with "Continue: claude --resume …" and the "no sessions visible" reason — comes from its frame
@@ -130,17 +137,27 @@ struct SessionsView: View {
 }
 
 /// A non-Claude agent session (`externalSessions`): name, agent, the plugin that reports it and its terminal; the only
-/// button is "Go to tab" (`session.focus`) when the core found the tab.
+/// button is "Go to tab" (`session.focus`) when the core found the tab. A reply card for the session (a hook of the agent
+/// the hub verified) turns the glyph into "waiting".
 struct ExternalSessionRow: View {
     let store: HubStore
     let session: ExternalSession
+
+    private var waitingCard: HookCard? {
+        store.visibleCards.first { $0.sessionId.caseInsensitiveCompare(session.sessionId) == .orderedSame }
+    }
 
     var body: some View {
         let owner = session.owner.map { store.plugin($0)?.title ?? $0 }
         let sub = [session.agent, owner.map { tr("от плагина «\($0)»", "via \"\($0)\"") }, session.terminalInfo?.label ?? session.terminal]
             .compactMap { $0 }.joined(separator: " · ")
         HStack(spacing: 10) {
-            Image(systemName: "terminal").font(.system(size: 13)).foregroundStyle(.white.opacity(0.6)).frame(width: 18)
+            if let card = waitingCard {
+                StatusGlyph(status: .wait, size: 18, question: card.kind == .question)
+                    .tip(tr("Ждёт ответа — карточка выше", "Waiting for an answer — see the card above"))
+            } else {
+                Image(systemName: "terminal").font(.system(size: 13)).foregroundStyle(.white.opacity(0.6)).frame(width: 18)
+            }
             VStack(alignment: .leading, spacing: 2) {
                 Text(session.displayName).font(.system(size: 13, weight: .medium)).lineLimit(1)
                     .reportsTruncation(session.displayName, font: .system(size: 13, weight: .medium))

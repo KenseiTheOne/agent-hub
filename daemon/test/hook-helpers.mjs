@@ -1,17 +1,19 @@
 // Stage 6 test helpers: a system double on top of the real addon and running the real agenthub-hook.
 //
 // Double: real peerPid/peerUid/procArgv (the peer on the socket is determined honestly), while the process
-// table can be extended with fictitious pids (Claude Code, AgentHub.app) and the real hook process can be reparented
-// to a fictitious Claude. codesign for fictitious paths answers from the signed list.
+// table can be extended with fictitious pids (Claude Code, Codex, AgentHub.app) and the real hook process can be
+// reparented to a fictitious agent. codesign for fictitious paths answers from the signed list; lsof (fileHolders) for
+// a Codex thread lock answers from sys.holders.
 
 import { spawn } from "node:child_process";
-import { writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { REPO_DIR, DEFAULTS } from "../lib/config.mjs";
 import { defaultSys } from "../lib/peer.mjs";
 
 export const HOOK_SCRIPT = join(REPO_DIR, "hook", "agenthub-hook");
 export const FAKE_CLAUDE = "/fake/.local/share/claude/versions/9.9.9";
+export const FAKE_CODEX = "/fake/opt/homebrew/Caskroom/codex/0.159.3/codex";
 export const FAKE_APP = "/fake/Applications/AgentHub.app/Contents/MacOS/AgentHub";
 export const APP_REQ = 'identifier "com.kensei.agenthub" and certificate leaf = H"0000000000000000000000000000000000000000"';
 
@@ -20,13 +22,21 @@ export function sysDouble() {
   const procs = new Map(); // pid → { ppid, path?, startSec? }
   const signed = new Map([
     [FAKE_CLAUDE, DEFAULTS.requirements.claudeCode],
+    [FAKE_CODEX, DEFAULTS.requirements.codex],
     [FAKE_APP, APP_REQ],
   ]);
+  const holders = new Map(); // lock path → [pid] (what lsof would say)
   const uid = process.getuid();
   return {
     ...real,
     procs,
     signed,
+    holders,
+    lsofCalls: 0,
+    async fileHolders(path) {
+      this.lsofCalls++;
+      return holders.has(path) ? [...holders.get(path)] : [];
+    },
     pidInfo(pid) {
       const p = procs.get(pid);
       if (!p) return real.pidInfo(pid);
@@ -64,6 +74,22 @@ export function fakeClaude(h, sys, pid, sessionId, { kind = "interactive", entry
   const print = kind !== "interactive";
   sys.procs.set(pid, { ppid: 1, path: FAKE_CLAUDE, startSec, argv: argv ?? (print ? ["claude", "-p", "x"] : ["claude"]), tty: tty ?? !print });
   writeFileSync(join(h.claudeHome, "sessions", `${pid}.json`), JSON.stringify({ pid, sessionId, kind, entrypoint, status: "idle", version: "9.9.9" }));
+}
+
+// A fictitious Codex process hosting a thread: the thread's writer lock is "open" in it (sys.holders) and its rollout
+// path is returned (the file itself is not created — Codex writes it with the first record). argv decides the launch
+// mode: the shared daemon by default (no terminal, like the real one under setsid).
+export const DAEMON_ARGV = ["codex", "app-server", "--listen", "unix://"];
+export function fakeCodex(h, sys, pid, threadId, { argv = DAEMON_ARGV, tty = false, startSec = 1000, lock = true, holder = pid } = {}) {
+  sys.procs.set(pid, { ppid: 1, path: FAKE_CODEX, startSec, argv, tty });
+  const lockPath = join(h.codexHome, "thread-writer-locks", `${threadId}.lock`);
+  if (lock) {
+    writeFileSync(lockPath, "");
+    sys.holders.set(lockPath, holder === null ? [] : [holder]);
+  }
+  const day = join(h.codexHome, "sessions", "2026", "11", "22");
+  mkdirSync(day, { recursive: true });
+  return join(day, `rollout-2026-11-22T10-00-00-${threadId}.jsonl`);
 }
 
 // The test process is the "app": req() requests from the test come as if from AgentHub.app.
