@@ -33,7 +33,7 @@ import SwiftUI
 ///                             (own window, no screen recording permission) and quit
 ///   --idle-expanded           the "Can I shut down" card in the popover starts expanded (snapshots)
 ///   --arrange-plugins         the panel sidebar starts in the plugin rearranging mode (snapshots)
-///   --open-tile <plugin id>   the popover starts with that plugin's tile expanded (its detail card; snapshots)
+///   --open-tile <plugin id>   the popover starts with that plugin's row expanded (its detail card; snapshots)
 ///   --snapshot-report <png>   draw the "It didn't work" window with sample content and quit (synthetic; nothing is run)
 ///   --snapshot-confirm <png>  draw the "Update the hub?" confirmation with sample content and quit (synthetic); with
 ///                             --confirm-sample <plugin|plugin-input|plugin-input-unplaced|plugin-fix:<parent row>|plugin-hostile|plugin-cost-community|cost|input|prompt|rollback|registry-key|expired> another window of the same kind instead:

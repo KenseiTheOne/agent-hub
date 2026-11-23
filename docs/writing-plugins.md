@@ -34,7 +34,7 @@ in [`plugins/`](../plugins) (`quota`, `agents`, `claude-sessions`, `spend`, `cod
 ### 1.1 A first plugin
 
 A plugin is one executable file (or a folder with one) that prints its state to stdout in a SwiftBar-like format. The
-hub runs it on a schedule and draws a popover tile and a panel page from what it printed. Save this as
+hub runs it on a schedule and draws a popover row and a panel page from what it printed. Save this as
 `hello.1m.sh` (`1m` is the run interval):
 
 ```sh
@@ -56,7 +56,7 @@ echo "Agent Hub docs | href=https://example.com/docs sfimage=book"
 
 - The `<agenthub.*>` tags in comments are the plugin's metadata (section 3). The hub reads them from the first 64 KB of
   the file; the comment prefix (`#`, `//`, `--`, `;`) does not matter.
-- Everything before the first `---` line is the **header** (the tile and the first line of the plugin page), everything
+- Everything before the first `---` line is the **header** (the popover row and the first line of the plugin page), everything
   after it is the **body**. `Title | key=value …` — the text, then parameters after the last `|` (section 4).
 
 ### 1.2 Where to put it
@@ -317,11 +317,11 @@ Body line | sfimage=checkmark.circle color=green
 Line after a separator
 ```
 
-- **Header** — lines before the first `---`. The first header line is the main one: the tile and the page title. The
+- **Header** — lines before the first `---`. The first header line is the main one: the popover row value and the page title. The
   plugin status is the worst `status=` among header lines.
 - **Header buttons reach the popover.** A header line with an offer (`action=`, `effect=`, `href=`) is a button in the
-  page header; the first three of them are also buttons in the popover. The tile itself is not a button: a click on it
-  expands a card under the tiles (the headline, up to four body lines, then those buttons), and a click on the card's
+  page header; the first three of them are also buttons in the popover. The plugin's row itself is not a button: a click on it
+  expands a card right under the row (the headline, up to four body lines, then those buttons), and a click on the card's
   text opens the plugin page. The buttons behave as on the page — the same gate, confirmation and spinner; an `input=`
   action asks for its text in a sheet. Put what people press without opening the panel (Start, Skip) on header lines,
   most important first; body buttons are on the page only. A hub app older than 0.1.3 shows no buttons in the popover.
@@ -394,8 +394,8 @@ every hub.
 | Parameter | Where | Meaning |
 |---|---|---|
 | `status=ok\|wait\|block\|error\|unknown` | header (body — a colored dot on the line) | the plugin status (4.5) |
-| `tile="…"` | first header line | a short value for the popover tile and the panel badge: "04:30", "2 waiting", "62%". Say what is happening, not "!" — the status icon already shows alarm |
-| `tileLabel="…"` | first header line | a short tile caption instead of the plugin name (the tile fits ~110 pt): "Agents" instead of "Background agents" |
+| `tile="…"` | first header line | a short value for the plugin's popover row (on the right, after the plugin title) and the panel badge: "04:30", "2 waiting", "62%". Say what is happening, not "!" — the status icon already shows alarm |
+| `tileLabel="…"` | first header line | a short caption instead of the plugin name (~110 pt): "Agents" instead of "Background agents". Kept for compatibility: after hub 0.1.14 the popover shows plugins as rows with the full plugin title, as in the sidebar, and does not show `tileLabel`; older apps used it as the tile caption |
 | `gauge=0…100`, `gaugeLabel="…"` | first header line — a ring on the plugin page; body — a card with a bar (`note` on the right, children under the bar) | |
 | `stat="caption"`, `note="…"` | body | a number card: the line title is the value ("04:30"), `stat` the caption, `note` a line under it; consecutive ones form a row |
 | `strip=true` | body | the line's children form a strip of cells (`sfimage`, title, `note`; a cell with an effect is a button): "Recent runs" |
@@ -406,8 +406,8 @@ every hub.
 | `chart=bars`, `values="1,2"`, `labels=`, `valueLabels=`, `avg=`, `highlight=`, `tips=`, `stack=`/`series=`/`colors=` | body | a bar chart card; a segment child sits in its title row ([4.4](#44-charts)) |
 | `chart=share` + children with `value=` | body | one bar of shares and a legend with percents and `note=` ([4.4](#44-charts)) |
 | `bar=0…100`, `barColumn=<n>` | body line, table row | a thin progress bar; in a table — in column `n` ([4.4](#44-charts)) |
-| `spark="1,2,3"`, `sparkAvg=`, `sparkMax=`, `sparkLabel=`, `sparkNote=` | first header line | a sparkline in the page header (a large value, [4.4](#44-charts)) and the popover tile |
-| `until=<ISO-8601>` | first header line | a live countdown the app runs itself (hub 0.1.3+): the tile value and the page header value show `mm:ss` (from an hour on `h:mm:ss`) to that moment and stop at `00:00`; no frames needed while it runs. Give a time zone (`2026-11-12T18:30:00Z` or `…+03:00`); unparsable — ignored. Keep a `tile=` too: an older hub shows it instead |
+| `spark="1,2,3"`, `sparkAvg=`, `sparkMax=`, `sparkLabel=`, `sparkNote=` | first header line | a sparkline in the page header (a large value, [4.4](#44-charts)) and a small one before the value in the popover row |
+| `until=<ISO-8601>` | first header line | a live countdown the app runs itself (hub 0.1.3+): the popover row value and the page header value show `mm:ss` (from an hour on `h:mm:ss`) to that moment and stop at `00:00`; no frames needed while it runs. Give a time zone (`2026-11-12T18:30:00Z` or `…+03:00`); unparsable — ignored. Keep a `tile=` too: an older hub shows it instead |
 | `font=mono` | any line | the line title in a monospaced font (ids, hashes, aligned figures; hub 0.1.3+): plain lines, header lines, `stat=`/`gauge=`/`strip=` cards (and strip cells), chart titles and `chart=share` legend rows, `bar=` lines, table rows (the title and its `cells=`) and `group=true` headings, buttons and links, the popover's expanded tile card; captions, notes and badges stay in the regular font; other `font=` values are ignored |
 | `activity="…"`, `needsOn="…"` | header | the "can I shut down" verdict (4.6) |
 | `event=<key>` | any line | a notification key (section 9) |
@@ -578,7 +578,7 @@ Models · 7 days
   `note=` (or the headline) and the other header lines under it, the sparkline on the right with `sparkLabel=` /
   `sparkNote=` above it and a dashed `sparkAvg=` line (bars above it tinted). `sparkMax=<number>` — a fixed scale top,
   like `max=` on a chart (hub 0.1.3+). The status line shows only when the
-  status is not `ok`. The popover tile draws the sparkline in its icon row.
+  status is not `ok`. The popover row draws a small sparkline right before its value (not when every value is 0).
 - **Size:** the data keys `values`, `labels`, `valueLabels`, `tips`, `series` and `spark` may be up to 8000
   characters each (other values — 2000); the line itself is at most 64 KB (hub 0.1.3+; 16 KB before) — enough for
   every data key of a chart at its maximum. Send numbers without exponents and
@@ -598,7 +598,7 @@ Models · 7 days
 | `block` | "Blocking" | something is in the way and will not resolve without the human |
 | `error` | "Failure" | the plugin itself failed |
 
-- `/state.status` is the **worst status of all plugins** (`ok < unknown < wait < block < error`). The popover tile
+- `/state.status` is the **worst status of all plugins** (`ok < unknown < wait < block < error`). The popover row
   and the sidebar show each plugin's own status. The menu bar icon reacts only to `block` and `error`: its emblem turns
   red and the tooltip names the plugin ("<plugin> — <headline>"). `wait` does not tint the icon — the orange emblem
   and the number next to it count only Claude Code sessions awaiting a reply and question cards. `activity=`/`needsOn=`

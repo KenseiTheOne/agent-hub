@@ -31,7 +31,7 @@ read by the built-in `agents` and `quota` plugins, and three throwaway local plu
   your consent, never from the plugin's own metadata. Plugins can declare their own actions, notification rules,
   icons and connections; the hub builds the UI from those declarations and knows no plugin by name.
 - **The app** `AgentHub.app`:
-  - popover: plugin tiles, "Needs you", a "Can I shut down" verdict, Panel / Session / Pause hub;
+  - popover: plugin rows, "Needs you", a "Can I shut down" verdict, Panel / Session / Pause hub;
   - panel: sessions with "go to tab / interrupt / stop", answer cards for permission requests and questions
     (allow once / deny, options, multi-select, "Other"), a session launch form, the plugin manager with a
     permissions window, the journal, settings;

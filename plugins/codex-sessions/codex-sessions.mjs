@@ -3,7 +3,7 @@
 //
 // <agenthub.title>Codex Сессии</agenthub.title>
 // <agenthub.title lang="en">Codex Sessions</agenthub.title>
-// <agenthub.version>0.1.1</agenthub.version>
+// <agenthub.version>0.1.2</agenthub.version>
 // <agenthub.author.name>Kensei</agenthub.author.name>
 // <agenthub.author.github>KenseiTheOne</agenthub.author.github>
 // <agenthub.desc>Живые сессии Codex: кто работает, кто свободен, папка, модель и effort, переход во вкладку</agenthub.desc>
@@ -625,7 +625,7 @@ const pl = {
 };
 export const T = {
   ru: {
-    tileLabel: "Codex",
+    tileLabel: "Codex сессии",
     min: (m) => (m < 1 ? "меньше минуты" : m < 60 ? `${m} мин` : `${Math.floor(m / 60)} ч ${pad2(m % 60)} мин`),
     headBusy: (n, idle) => `Codex: ${n} в работе${idle ? ` · ${idle} ${pl.ru(idle, "свободна", "свободны", "свободны")}` : ""}`,
     headIdle: (n) => `Codex: ${n} ${pl.ru(n, "сессия свободна", "сессии свободны", "сессий свободны")}`,
@@ -659,7 +659,7 @@ export const T = {
     pluginError: "Сбой плагина сессий Codex",
   },
   en: {
-    tileLabel: "Codex",
+    tileLabel: "Codex sessions",
     min: (m) => (m < 1 ? "under a minute" : m < 60 ? `${m} min` : `${Math.floor(m / 60)} h ${pad2(m % 60)} min`),
     headBusy: (n, idle) => `Codex: ${n} working${idle ? ` · ${idle} idle` : ""}`,
     headIdle: (n) => `Codex: ${n} ${pl.en(n, "session", "sessions")} idle`,

@@ -34,9 +34,9 @@ test("quota: push labels don't repeat the plugin name in the banner", () => {
 
 test("built-in plugins: the broken frame keeps the tile caption", async () => {
   const cases = [
-    ["agents/agents.mjs", { ru: "Агенты", en: "Agents" }],
-    ["spend/spend.mjs", { ru: "Расход сегодня", en: "Spend today" }],
-    ["claude-sessions/claude-sessions.mjs", { ru: "Сессии", en: "Sessions" }],
+    ["agents/agents.mjs", { ru: "Claude агенты", en: "Claude agents" }],
+    ["spend/spend.mjs", { ru: "Claude расход", en: "Claude spend" }],
+    ["claude-sessions/claude-sessions.mjs", { ru: "Claude сессии", en: "Claude sessions" }],
   ];
   for (const [file, want] of cases) {
     const mod = await import(join(PLUGINS, file));

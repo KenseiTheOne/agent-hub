@@ -174,6 +174,13 @@ public final class HubStore {
     /// For the menu: those needing attention first, otherwise in the panel's order.
     public var pluginsByAttention: [PluginState] { HubState.byAttention(orderedPlugins) }
 
+    /// Plugins exactly as the panel's sidebar lists them: the sessions plugin first (the sidebar gives it its own row
+    /// at the top), then the panel's order. The popover rows use it so both lists read the same (2026-11-23).
+    public var pluginsAsInSidebar: [PluginState] {
+        let all = orderedPlugins
+        return all.filter { $0.id == NotifyTarget.sessionsPlugin } + all.filter { $0.id != NotifyTarget.sessionsPlugin }
+    }
+
     /// The order the human arranged (ids of all plugins); the alphabetical one is kept as "default".
     public func arrangePlugins(_ ids: [String]) {
         let raw = PluginOrder.toSave(ids, plugins: state?.plugins ?? [])

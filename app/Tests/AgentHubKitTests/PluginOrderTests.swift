@@ -83,4 +83,18 @@ private let daemonOrder = [p("q", "Quota"), p("bg", "background agents"), p("c",
         #expect(defaults.string(forKey: key) == nil)
         #expect(second.orderedPlugins.map(\.id) == ["a9", "a10", "bg", "c", "q"])
     }
+
+    @Test @MainActor func popoverListsPluginsAsTheSidebarDoes() throws {
+        // the sidebar: the sessions plugin's row first, then the panel's order; attention does not move rows
+        let suite = "agenthub.test.pluginOrder.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let sessions = p(NotifyTarget.sessionsPlugin, "Sessions")
+        let store = HubStore(client: HubClient(socketPath: "/tmp/order-sidebar.sock"),
+                             preview: HubState(plugins: [p("q", "Quota"), p("c", "ClickUp", .error), sessions, p("bg", "BG")]))
+        store.rememberPluginOrder(in: defaults)
+        #expect(store.pluginsAsInSidebar.map(\.id) == [NotifyTarget.sessionsPlugin, "bg", "c", "q"])
+        store.arrangePlugins(["q", NotifyTarget.sessionsPlugin, "c", "bg"])
+        #expect(store.pluginsAsInSidebar.map(\.id) == [NotifyTarget.sessionsPlugin, "q", "c", "bg"])
+    }
 }

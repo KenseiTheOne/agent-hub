@@ -771,9 +771,40 @@ public enum PluginText {
         help(tooltip: it.tooltip, it.stat, it.title, it.note)
     }
 
-    /// A popover tile: name, status label and header.
+    /// A popover plugin row (formerly a tile): name, status label and header.
     public static func tileHelp(_ p: PluginState) -> String {
         help("\(p.title): \(p.statusLabel())", p.headline) ?? p.title
+    }
+}
+
+/// One plugin row of the popover list (2026-11-23: rows instead of a tile grid — ten-plus tiles with short captions
+/// were hard to tell apart). The row names the plugin by its full title, as the panel sidebar does (`tileLabel=` is not
+/// shown); the value is the tile value (`tile=`, or a countdown to `until=`), and `spark=` on the first header line
+/// draws a small sparkline before it.
+public struct PopoverPluginRow: Equatable, Sendable {
+    public var title: String
+    public var value: String
+    public var until: Date?
+    public var spark: [Double]
+    public var sparkAvg: Double?
+    public var sparkMax: Double?
+
+    /// The title keeps at least this width before the value starts to truncate: a row never loses its name to a
+    /// runaway `tile=`, and a normal value never truncates while the name still has room to give.
+    public static let titleMinWidth: Double = 72
+
+    /// The sparkline is drawn only when it has a bar to show: an all-zero series is a row of 1-pt stubs that reads as a
+    /// dotted leader line, not as data.
+    public var showsSpark: Bool { spark.contains { $0 > 0 } }
+
+    public init(_ p: PluginState) {
+        let head = p.header.first(where: { !$0.separator })
+        title = p.title
+        value = p.tileValue
+        until = head?.until
+        spark = head?.spark ?? []
+        sparkAvg = head?.sparkAvg
+        sparkMax = head?.sparkMax
     }
 }
 

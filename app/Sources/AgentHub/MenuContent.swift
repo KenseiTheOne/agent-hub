@@ -78,7 +78,7 @@ enum StatusItemTip {
 }
 
 /// The menu bar popover (MenuBarExtra, .window style) per the approved prototype (Main.dc.html): glass, plugin
-/// tiles, tile expansion, "Needs you" with an inline action, Panel / Session / Pause hub capsules.
+/// rows (a tile grid until 2026-11-23), row expansion, "Needs you" with an inline action, Panel / Session / Pause hub capsules.
 struct PopoverView: View {
     static let width: CGFloat = 372
 
@@ -99,19 +99,13 @@ struct PopoverView: View {
         VStack(alignment: .leading, spacing: 12) {
             header
             connectionLine
-            // "Safe to shut down?" — above the tiles (mockup F)
+            // "Safe to shut down?" — above the plugin rows (mockup F)
             IdleVerdictCard(store: store, router: router)
-            let plugins = store.pluginsByAttention
+            // the same order as the panel's sidebar (user decision 2026-11-23), not by attention: what needs attention
+            // already has its own block below ("Needs you") and its status glyph on the row
+            let plugins = store.pluginsAsInSidebar
             if !plugins.isEmpty {
-                Grid(horizontalSpacing: 8, verticalSpacing: 8) {
-                    ForEach(Array(stride(from: 0, to: plugins.count, by: 3)), id: \.self) { i in
-                        GridRow {
-                            ForEach(plugins[i..<min(i + 3, plugins.count)]) { p in tile(p) }
-                            if plugins.count - i < 3 { ForEach(0..<(3 - (plugins.count - i)), id: \.self) { _ in Color.clear.frame(height: 1) } }
-                        }
-                    }
-                }
-                if let id = openTile, let p = store.plugin(id) { detail(p) }
+                pluginRows(plugins)
             } else if store.state != nil {
                 Text(tr("Плагинов нет — установите их в «Плагинах»", "No plugins — install some in Plugins"))
                     .font(.system(size: 12)).foregroundStyle(.white.opacity(0.62))
@@ -222,50 +216,71 @@ struct PopoverView: View {
         }
     }
 
-    // MARK: tiles
+    // MARK: plugin rows
 
-    private func tile(_ p: PluginState) -> some View {
+    /// The plugins as one rounded list (2026-11-23: rows instead of a 3-column tile grid — with ten-plus plugins the
+    /// short tile captions were hard to tell apart). A row: icon, the full plugin title (as in the sidebar), an optional
+    /// sparkline, the value on the right, the status. A click expands the plugin's detail card right under its row.
+    private func pluginRows(_ plugins: [PluginState]) -> some View {
+        VStack(spacing: 0) {
+            ForEach(Array(plugins.enumerated()), id: \.element.id) { i, p in
+                if i > 0 {
+                    // a thin separator from the title column on, like a system list
+                    Rectangle().fill(Color.white.opacity(0.08)).frame(height: 0.5).padding(.leading, 36)
+                }
+                pluginRow(p)
+                if openTile == p.id, let live = store.plugin(p.id) {
+                    detail(live).padding(.horizontal, 6).padding(.bottom, 6)
+                }
+            }
+        }
+        .background(RoundedRectangle(cornerRadius: 12).fill(Color.white.opacity(0.05)))
+        .clipShape(RoundedRectangle(cornerRadius: 12))
+    }
+
+    private func pluginRow(_ p: PluginState) -> some View {
         let on = openTile == p.id
+        let m = PopoverPluginRow(p)
+        let titleFont = Font.system(size: 12.5, weight: .medium)
+        let valueFont = Font.system(size: 13, weight: .semibold)
         return Button {
             openTile = on ? nil : p.id
         } label: {
-            VStack(alignment: .leading, spacing: 4) {
-                HStack(alignment: .top) {
-                    Image(systemName: pluginSymbol(p)).font(.system(size: 15)).foregroundStyle(.white.opacity(0.8))
-                    // `spark=` on the first header line: a mini sparkline between the icon and the status (the tile has
-                    // no spare height under the value, so it takes the icon row)
-                    if let spark = p.header.first(where: { !$0.separator })?.spark, !spark.isEmpty {
-                        SparkBars(values: spark, avg: p.header.first(where: { !$0.separator })?.sparkAvg, highlight: pluginAccent(p), spacing: 1.5, radius: 1,
-                                  fixedTop: p.header.first(where: { !$0.separator })?.sparkMax)
-                            .frame(height: 16)
-                            .padding(.horizontal, 3)
+            HStack(spacing: 8) {
+                Image(systemName: pluginSymbol(p)).font(.system(size: 13)).foregroundStyle(.white.opacity(0.8))
+                    .frame(width: 18)
+                // the name gives way first (tail truncation); it keeps `titleMinWidth` against a runaway value
+                Text(m.title).font(titleFont).lineLimit(1).truncationMode(.tail)
+                    .reportsTruncation(m.title, font: titleFont)
+                    .frame(minWidth: PopoverPluginRow.titleMinWidth, maxWidth: .infinity, alignment: .leading)
+                // `spark=` on the first header line: a small sparkline right before the value
+                if m.showsSpark {
+                    SparkBars(values: m.spark, avg: m.sparkAvg, highlight: pluginAccent(p), spacing: 1, radius: 0.75, fixedTop: m.sparkMax)
+                        .frame(width: 42, height: 13)
+                }
+                Group {
+                    // `until=` on the first header line: the value counts down to the moment (G18)
+                    if let until = m.until {
+                        CountdownText(until: until, font: valueFont).lineLimit(1)
                     } else {
-                        Spacer()
+                        Text(m.value).font(valueFont).monospacedDigit().lineLimit(1).truncationMode(.tail)
+                            .reportsTruncation(m.value, font: valueFont)
                     }
-                    StatusGlyph(status: p.status, size: 15)
                 }
-                .padding(.bottom, 4)
-                // `until=` on the first header line: the value counts down to the moment (G18)
-                if let until = p.header.first(where: { !$0.separator })?.until {
-                    CountdownText(until: until, font: .system(size: 15, weight: .bold)).tracking(-0.15).lineLimit(1)
-                } else {
-                    Text(p.tileValue).font(.system(size: 15, weight: .bold)).tracking(-0.15).lineLimit(1).minimumScaleFactor(0.7)
-                        .reportsTruncation(p.tileValue, font: .system(size: 15, weight: .bold))
-                }
-                Text(p.tileLabel).font(.system(size: 11)).foregroundStyle(.white.opacity(0.62)).lineLimit(1).truncationMode(.tail)
-                    .reportsTruncation(p.tileLabel, font: .system(size: 11))
+                .layoutPriority(1)
+                StatusGlyph(status: p.status, size: 14)
             }
-            .padding(10)
-            .frame(maxWidth: .infinity, minHeight: 76, maxHeight: 76, alignment: .topLeading)
-            .background(RoundedRectangle(cornerRadius: 12).fill(Color.white.opacity(on ? 0.16 : 0.07)))
-            .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(Color.white.opacity(on ? 0.28 : 0.06), lineWidth: on ? 1 : 0.5))
-            .contentShape(RoundedRectangle(cornerRadius: 12))
+            .padding(.horizontal, 10)
+            // 28 pt: ten rows come out lower than the old grid's four 76-pt tile rows
+            .frame(height: 28)
+            .background(on ? Color.white.opacity(0.12) : Color.clear)
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .hoverHelp(PluginText.tileHelp(p))
     }
 
-    /// Up to four top-level body lines for the tile's short detail. Controls (2026-11-12) show their value, not a bare
+    /// Up to four top-level body lines for the row's short detail. Controls (2026-11-12) show their value, not a bare
     /// label: a segment or popup — "Model: Opus 5.5" (its `selected=true` child), a switch — "Ultracode: off"; a table —
     /// its title. A label-only line right before a control group ("For new sessions") is skipped: alone it says nothing.
     /// `mono` — the line asked for `font=mono`.
@@ -293,7 +308,7 @@ struct PopoverView: View {
     }
 
     /// Up to three offers of the plugin's header (G5): the same buttons as in the page header — same gate, confirmation
-    /// and spinner. Fixed-height tiles have no room for them, so they live in the expanded detail card only.
+    /// and spinner. One-line rows have no room for them, so they live in the expanded detail card only.
     static func headerOffers(_ p: PluginState) -> [(item: Item, offer: Offer)] {
         Array(p.header.filter { !$0.separator }.compactMap { it in it.offer.map { (it, $0) } }.prefix(3))
     }

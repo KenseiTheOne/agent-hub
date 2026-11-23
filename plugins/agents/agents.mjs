@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // <agenthub.title>Claude Code Фоновые агенты</agenthub.title>
 // <agenthub.title lang="en">Claude Code Background Agents</agenthub.title>
-// <agenthub.version>1.3.1</agenthub.version>
+// <agenthub.version>1.3.2</agenthub.version>
 // <agenthub.desc>Фоновые агенты и прогоны Workflow в Claude Code: что идёт, что упало, сколько потрачено</agenthub.desc>
 // <agenthub.desc lang="en">Claude Code background agents and Workflow runs: what's running, what failed, what it cost</agenthub.desc>
 // <agenthub.requires name="Claude Code" url="https://claude.com/product/claude-code" check="~/.claude">агент, чьи фоновые агенты и прогоны показывает плагин</agenthub.requires>
@@ -81,7 +81,7 @@ export function envLang() {
   return process.env.AGENTHUB_LANG === "en" ? "en" : "ru";
 }
 // The popover tile caption: "Claude Code Background Agents" does not fit the tile (~110 pt, one line)
-const TILE_LABEL = (lang) => (lang === "en" ? "Agents" : "Агенты");
+const TILE_LABEL = (lang) => (lang === "en" ? "Claude agents" : "Claude агенты");
 export function fmtTokens(n, lang = "ru") {
   if (lang === "en") {
     if (n >= 1e9) return `${(n / 1e9).toFixed(2)}B`;

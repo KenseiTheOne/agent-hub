@@ -4,7 +4,7 @@
 //
 // <agenthub.title>Claude Code Расход</agenthub.title>
 // <agenthub.title lang="en">Claude Code Spend</agenthub.title>
-// <agenthub.version>0.2.3</agenthub.version>
+// <agenthub.version>0.2.4</agenthub.version>
 // <agenthub.author.name>Kensei</agenthub.author.name>
 // <agenthub.author.github>KenseiTheOne</agenthub.author.github>
 // <agenthub.desc>Журнал расхода токенов Claude Code: сколько и когда потрачено, стоимость по ценам API за день, неделю и месяц</agenthub.desc>
@@ -592,7 +592,7 @@ const cntRu = (n) => group3(n, " ");
 const cntEn = (n) => group3(n, ",");
 export const T = {
   ru: {
-    tileLabel: "Расход сегодня",
+    tileLabel: "Claude расход",
     head: (c, t) => `Сегодня ${c} · ${t} токенов`,
     headIndexing: (c, p) => `Сегодня ≥ ${c} · считаю журналы, ${p}`,
     headMissing: "Журналов Claude Code нет — считать нечего",
@@ -655,7 +655,7 @@ export const T = {
     broken: "Не получается посчитать расход",
   },
   en: {
-    tileLabel: "Spend today",
+    tileLabel: "Claude spend",
     head: (c, t) => `Today ${c} · ${t} tokens`,
     headIndexing: (c, p) => `Today ≥ ${c} · indexing transcripts, ${p}`,
     headMissing: "No Claude Code transcripts — nothing to count",

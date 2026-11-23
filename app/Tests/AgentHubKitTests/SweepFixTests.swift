@@ -63,6 +63,25 @@ import Testing
         #expect(PluginState(id: "x", title: "Икс", status: .ok, header: [Item(title: "ok")]).tileLabel == "Икс")
     }
 
+    // the popover lists plugins as rows (2026-11-23): the full title as in the sidebar, not the short `tileLabel=`;
+    // the value, countdown and sparkline come from the first non-separator header line
+    @Test func popoverRowUsesFullTitle() {
+        let p = PluginState(id: "agents", title: "Claude Code Фоновые агенты", status: .ok,
+                            header: [Item(title: "", separator: true),
+                                     Item(title: "2 идут", status: .ok, params: ["tile": "2 идут", "tileLabel": "Агенты", "spark": "1,0,3", "sparkAvg": "2", "sparkMax": "5"])])
+        let row = PopoverPluginRow(p)
+        #expect(row.title == "Claude Code Фоновые агенты")
+        #expect(row.title != p.tileLabel)
+        #expect(row.value == "2 идут")
+        #expect(row.spark == [1, 0, 3] && row.sparkAvg == 2 && row.sparkMax == 5)
+        #expect(row.until == nil && row.showsSpark)
+        let bare = PopoverPluginRow(PluginState(id: "x", title: "Икс", status: .error, header: [Item(title: "сломался", params: ["until": "2030-01-01T00:00:00Z"])]))
+        #expect(bare.value == "!" && bare.spark.isEmpty && !bare.showsSpark && bare.until != nil)
+        let idle = PopoverPluginRow(PluginState(id: "s", title: "Расход", status: .ok, header: [Item(title: "$0", params: ["tile": "$0", "spark": "0,0,0"])]))
+        #expect(idle.spark.count == 3 && !idle.showsSpark, "an all-zero series draws no sparkline")
+        #expect(PopoverPluginRow.titleMinWidth > 0)
+    }
+
     // journal: a confirmation request shows the plugin and the action, not the proposal id; a hub update shows the version
     @Test func journalTargets() {
         let confirm = JournalEntry(index: 0, raw: ["type": .string("action-confirm-requested"), "action": .string("b13fd09157e55b7f"), "plugin": .string("hermes"), "title": .string("Поставить на паузу"), "peer": .string("app")])

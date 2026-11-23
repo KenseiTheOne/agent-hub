@@ -3,7 +3,7 @@
 //
 // <agenthub.title>Codex Расход</agenthub.title>
 // <agenthub.title lang="en">Codex Spend</agenthub.title>
-// <agenthub.version>0.1.1</agenthub.version>
+// <agenthub.version>0.1.2</agenthub.version>
 // <agenthub.author.name>Kensei</agenthub.author.name>
 // <agenthub.author.github>KenseiTheOne</agenthub.author.github>
 // <agenthub.desc>Журнал токенов Codex: сколько и когда потрачено по дням, сессиям и моделям, плюс весь расход аккаунта по данным Codex</agenthub.desc>
@@ -720,7 +720,7 @@ const cntRu = (n) => group3(n, " ");
 const cntEn = (n) => group3(n, ",");
 export const T = {
   ru: {
-    tileLabel: "Codex сегодня",
+    tileLabel: "Codex расход",
     head: (t, n) => `Codex сегодня ${t} токенов · ${cntRu(n)} ${plural(n, "запрос", "запроса", "запросов")}`,
     headIndexing: (t, p) => `Codex сегодня ≥ ${t} токенов · считаю файлы сессий, ${p}`,
     headMissing: "Codex не найден — считать нечего",
@@ -778,7 +778,7 @@ export const T = {
     broken: "Не получается посчитать расход Codex",
   },
   en: {
-    tileLabel: "Codex today",
+    tileLabel: "Codex spend",
     head: (t, n) => `Codex today ${t} tokens · ${cntEn(n)} ${n === 1 ? "request" : "requests"}`,
     headIndexing: (t, p) => `Codex today ≥ ${t} tokens · indexing session files, ${p}`,
     headMissing: "Codex not found — nothing to count",

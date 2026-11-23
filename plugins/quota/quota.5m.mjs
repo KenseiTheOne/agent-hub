@@ -3,7 +3,7 @@
 //
 // <agenthub.title>Claude Code Квота</agenthub.title>
 // <agenthub.title lang="en">Claude Code Quota</agenthub.title>
-// <agenthub.version>0.5.3</agenthub.version>
+// <agenthub.version>0.5.4</agenthub.version>
 // <agenthub.author.name>Kensei</agenthub.author.name>
 // <agenthub.author.github>KenseiTheOne</agenthub.author.github>
 // <agenthub.desc>Сколько осталось квоты Claude: неделя, 5-часовое окно и темп к сбросу</agenthub.desc>
@@ -67,7 +67,7 @@ export function envLang() {
   return process.env.AGENTHUB_LANG === "en" ? "en" : "ru";
 }
 // The popover tile caption: "Claude Code Quota" does not fit the tile (~110 pt, one line)
-const TILE_LABEL = () => (envLang() === "en" ? "Quota" : "Квота");
+const TILE_LABEL = () => (envLang() === "en" ? "Claude quota" : "Claude квота");
 const WD = { ru: ["вс", "пн", "вт", "ср", "чт", "пт", "сб"], en: ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"] };
 const MON = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 export function fmtWhen(ms, nowMs, lang = "ru") {

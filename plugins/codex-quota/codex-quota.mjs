@@ -3,7 +3,7 @@
 //
 // <agenthub.title>Codex Квота</agenthub.title>
 // <agenthub.title lang="en">Codex Quota</agenthub.title>
-// <agenthub.version>0.1.1</agenthub.version>
+// <agenthub.version>0.1.2</agenthub.version>
 // <agenthub.author.name>Kensei</agenthub.author.name>
 // <agenthub.author.github>KenseiTheOne</agenthub.author.github>
 // <agenthub.desc>Сколько осталось лимитов Codex: 5-часовое окно, неделя и темп к сбросу</agenthub.desc>
@@ -396,7 +396,7 @@ export function rolloutLimits(home, { limit = FALLBACK_FILES } = {}) {
 // ---------- texts ----------
 export const T = {
   ru: {
-    tileLabel: "Codex Квота",
+    tileLabel: "Codex квота",
     week: "Неделя",
     h5: "5-часовое окно",
     window: (m) => (m % 1440 === 0 ? `Окно ${m / 1440} дн` : m % 60 === 0 ? `Окно ${m / 60} ч` : `Окно ${m} мин`),

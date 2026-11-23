@@ -3,7 +3,7 @@
 //
 // <agenthub.title>Claude Code Сессии</agenthub.title>
 // <agenthub.title lang="en">Claude Code Sessions</agenthub.title>
-// <agenthub.version>0.5.3</agenthub.version>
+// <agenthub.version>0.5.4</agenthub.version>
 // <agenthub.author.name>Kensei</agenthub.author.name>
 // <agenthub.author.github>KenseiTheOne</agenthub.author.github>
 // <agenthub.desc>Сессии Claude Code по вкладкам cmux: кто работает, кто ждёт вас, кто оборвался</agenthub.desc>
@@ -725,7 +725,7 @@ export function envLang() {
   return process.env.AGENTHUB_LANG === "en" ? "en" : "ru";
 }
 // The popover tile caption: "Claude Code Sessions" does not fit the tile (~110 pt, one line)
-const TILE_LABEL = (lang = envLang()) => (lang === "en" ? "Sessions" : "Сессии");
+const TILE_LABEL = (lang = envLang()) => (lang === "en" ? "Claude sessions" : "Claude сессии");
 
 const pl = {
   ru: (n, one, few, many) => {

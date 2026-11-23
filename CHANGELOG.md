@@ -4,6 +4,18 @@ Releases are git tags `vX.Y.Z` (also published as GitHub releases); the current 
 The plugin contract has its own version history in
 [`docs/extension-points.md`](docs/extension-points.md#contract-versions).
 
+## Unreleased
+
+### Changed
+
+- **Plugins in the popover are rows, not tiles.** With ten-plus plugins the 3-column grid of short captions ("Quota",
+  "Codex") was hard to read. Each plugin is now one row of a rounded list: its icon, the full title as in the sidebar,
+  the value on the right (or the `until=` countdown), a small sparkline before it when `spark=` has data, and the
+  status. The title truncates first; a click still expands the detail card, now right under the row. Ten plugins take
+  less height than the grid did. The rows come in the sidebar's order (sessions first, then alphabetical or the order
+  you arranged), not by attention: what needs you is in "Needs you" below. `tileLabel=` stays in the contract for older
+  apps but is no longer shown; the built-in plugins' tile captions now name the agent ("Claude quota", "Codex spend").
+
 ## 0.1.14 — 2026-11-22
 
 ### Added
