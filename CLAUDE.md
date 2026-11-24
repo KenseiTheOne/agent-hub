@@ -20,6 +20,8 @@ The hub (daemon `daemon/`, shell `app/`, CLI) is a generic engine. It knows noth
 
 ## Other
 
-- After code changes, restart the live daemon and shell (`scripts/bundle.sh --pin-live`, `agenthub builtin update`,
-  `launchctl kickstart -k gui/$(id -u)/com.kensei.agenthub`) so the changes are visible right away.
+- **The live hub runs releases only.** Never put unreleased code into the live hub (no `scripts/bundle.sh --pin-live`,
+  no `agenthub builtin update` from the repo, no live restart onto a dev build): users get changes only through a release,
+  so the live hub must show exactly what they have. Show and check a change on a separate stand (its own data dir and
+  socket); the live hub moves to it with the next release's update.
 - Commits, pushes, tags and publishing to the registry happen only on an explicit command.
