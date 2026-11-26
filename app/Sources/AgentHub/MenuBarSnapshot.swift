@@ -6,18 +6,25 @@ import AppKit
 /// the system does it: in the menu bar text color; the number — in the menu bar font.
 @MainActor
 enum MenuBarSnapshot {
-    static let looks: [(MenuBarLook, Bool, String)] = [
-        (.calm, false, tr("обычный", "normal")),
-        (.working, false, tr("идёт работа", "work in progress")),
-        (.waiting(2), false, tr("ждут: 2", "waiting: 2")),
+    /// (look, test copy, caption, "stay awake with the lid closed" is on).
+    static let looks: [(MenuBarLook, Bool, String, Bool)] = [
+        (.calm, false, tr("обычный", "normal"), false),
+        (.working, false, tr("идёт работа", "work in progress"), false),
+        (.waiting(2), false, tr("ждут: 2", "waiting: 2"), false),
         // the number on the red badge is the waiting count, not the blockers
-        (.blocked(1), false, tr("блокер, ждут 1", "blocker, 1 waiting")),
-        (.paused(0, blocker: false), false, tr("пауза хаба", "hub paused")),
-        (.paused(1, blocker: true), false, tr("пауза + блокер", "paused + blocker")),
-        (.quiet, false, tr("тихо", "quiet")),
-        (.quietNeedsOn, false, tr("тихо, но позже нужен", "quiet, needs on")),
-        (.offline, false, tr("нет связи", "offline")),
-        (.waiting(2), true, tr("тестовая копия", "test copy")),
+        (.blocked(1), false, tr("блокер, ждут 1", "blocker, 1 waiting"), false),
+        (.paused(0, blocker: false), false, tr("пауза хаба", "hub paused"), false),
+        (.paused(1, blocker: true), false, tr("пауза + блокер", "paused + blocker"), false),
+        (.quiet, false, tr("тихо", "quiet"), false),
+        (.quietNeedsOn, false, tr("тихо, но позже нужен", "quiet, needs on"), false),
+        (.offline, false, tr("нет связи", "offline"), false),
+        (.waiting(2), true, tr("тестовая копия", "test copy"), false),
+        // the lid mark is added to any look: on its own, next to the number, after "‖" and after "?"
+        (.calm, false, tr("не спит с крышкой", "awake, lid closed"), true),
+        (.waiting(2), false, tr("не спит + ждут: 2", "awake + waiting: 2"), true),
+        (.paused(0, blocker: false), false, tr("не спит + пауза", "awake + paused"), true),
+        (.quiet, false, tr("не спит + тихо", "awake + quiet"), true),
+        (.offline, false, tr("не спит + нет связи", "awake + offline"), true),
     ]
 
     static func write(to path: String) {
@@ -39,9 +46,9 @@ enum MenuBarSnapshot {
                 NSRect(x: 0, y: y, width: size.width, height: cell.height).fill()
                 // menu bar text color (labelColor in this appearance) — macOS paints the template and the number with it
                 let ink = StatusImages.menuBarInk(dark: dark)
-                for (i, (look, test, label)) in looks.enumerated() {
+                for (i, (look, test, label, awake)) in looks.enumerated() {
                     let x = CGFloat(i) * cell.width
-                    let img = StatusImages.menuBarIcon(look: look, dark: dark)
+                    let img = StatusImages.menuBarIcon(look: look, dark: dark, awake: awake)
                     let iconRect = NSRect(x: x + 30, y: y + 22, width: img.size.width, height: 22)
                     if img.isTemplate { MenuBarArt.draw(img, tint: ink, in: iconRect) } else { img.draw(in: iconRect) }
                     if let t = look.labelText(test: test) {

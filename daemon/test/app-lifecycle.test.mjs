@@ -1077,6 +1077,34 @@ test("agenthubd: \"Launch at login\" off, the app did not show up → exit with 
   }
 });
 
+test("agenthubd: the login-off exit returns sleep before the process is gone — nobody is left to guard the battery (the awake double; no pmset, no sudo)", async () => {
+  const dir = tempHome("ah-lga-");
+  const home = join(dir, "home");
+  mkdirSync(home, { mode: 0o700 });
+  const w = appWorld(dir);
+  w.up();
+  writeFileSync(join(home, "config.json"), JSON.stringify(w.config({ restartDelayMs: 100, loginGraceMs: 700 })), { mode: 0o600 });
+  writeFileSync(join(home, "settings.json"), JSON.stringify({ launchAtLogin: false }), { mode: 0o600 });
+  const awake = join(dir, "awake.json");
+  writeFileSync(awake, JSON.stringify({ flag: true, granted: true, lid: true, charge: 80, onBattery: false }));
+  const env = hookEnv({ AGENTHUB_HOME: home, AGENTHUB_BUILTIN_PLUGINS: join(dir, "none"), AGENTHUB_SERVICES: "app,awake", AGENTHUB_TEST_EXEC_LOG: join(dir, "exec.log"), AGENTHUB_TEST_AWAKE_FILE: awake });
+  const d = spawn(process.execPath, [join(BIN, "agenthubd")], { env, stdio: ["ignore", "ignore", "pipe"] });
+  let err = "";
+  d.stderr.on("data", (c) => (err += c));
+  try {
+    await waitFor(() => d.exitCode !== null, { timeoutMs: 8000 });
+    assert.equal(d.exitCode, 0, err);
+    assert.equal(JSON.parse(readFileSync(awake, "utf8")).flag, false, "sleep is back");
+    const j = readFileSync(join(home, "journal.jsonl"), "utf8").trim().split("\n").map((l) => JSON.parse(l));
+    const set = j.findIndex((e) => e.type === "awake-set");
+    assert.deepEqual([j[set]?.on, j[set]?.peer, j[set]?.reason, j[set]?.stop], [false, "hub", "quit", "login-off"]);
+    assert.ok(set < j.findIndex((e) => e.type === "stop" && e.reason === "login-off"), "before the daemon is gone");
+  } finally {
+    if (d.exitCode === null) d.kill("SIGKILL");
+    cleanup(dir);
+  }
+});
+
 // ---------- POST /shutdown ----------
 
 test("POST /shutdown: from app → 202 and a normal stop (journal and audit); from cli → 403; closing connections during shutdown is not a crash", async () => {

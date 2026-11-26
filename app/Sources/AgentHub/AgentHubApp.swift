@@ -32,6 +32,10 @@ import SwiftUI
 ///   --snapshot-popover <png>  show the popover as a window (like --show-popover), wait for a live snapshot, save an image
 ///                             (own window, no screen recording permission) and quit
 ///   --idle-expanded           the "Can I shut down" card in the popover starts expanded (snapshots)
+///   --demo-awake <look>       the "Stay awake with the lid closed" switch in a made-up state: off | on | unavailable |
+///                             on-unavailable (`AwakeDemo`). The app shows a ready state and connects to nothing (a
+///                             click or quitting sends nothing either), so the switch can be seen without a daemon;
+///                             test copy only (--home, AGENTHUB_HOME)
 ///   --arrange-plugins         the panel sidebar starts in the plugin rearranging mode (snapshots)
 ///   --open-tile <plugin id>   the popover starts with that plugin's row expanded (its detail card; snapshots)
 ///   --snapshot-report <png>   draw the "It didn't work" window with sample content and quit (synthetic; nothing is run)
@@ -167,7 +171,16 @@ final class AppModel {
         HubDefaults.prune(keep: socketPath)
         // language without a daemon connection: the last effective one for this hub, not the macOS language
         L10n.shared.remember(socketPath: socketPath)
-        store = HubStore(client: HubClient(socketPath: socketPath))
+        // `--demo-awake`: a ready state with a made-up switch instead of a connection (snapshots without a daemon)
+        let demoAwake = AwakeDemo.info()
+        if let demoAwake {
+            var preview = HubState()
+            preview.awake = demoAwake
+            // a client that reaches nothing: a click on the made-up switch or quitting must not get to a daemon
+            store = HubStore(client: HubClient(socketPath: socketPath, detached: true), preview: preview)
+        } else {
+            store = HubStore(client: HubClient(socketPath: socketPath))
+        }
         store.rememberPluginOrder()
         store.presenter = presenter
         statusMenu = StatusItemMenu(store: store, router: router)
@@ -194,7 +207,7 @@ final class AppModel {
         // No daemon (after a normal exit launchd does not keep it running): start the job with `launchctl kickstart`.
         // Default directory only: DaemonStarter leaves a test copy (--home, AGENTHUB_HOME) alone. And not for a
         // diagnostic launch (snapshots, self-checks, --print-status-item): it quits by itself.
-        if QuitPolicy.startsDaemon(arguments: CommandLine.arguments) { store.daemonStarter = DaemonStarter(home: HubPaths.home()) }
+        if demoAwake == nil, QuitPolicy.startsDaemon(arguments: CommandLine.arguments) { store.daemonStarter = DaemonStarter(home: HubPaths.home()) }
         // "Launch at login" is now a daemon setting for the daemon + app pair (decision 2026-11-07): at login the daemon
         // launches the app. The old Login Items registration would launch it a second way, even with the setting off,
         // so remove it, but only based on a state snapshot showing that the daemon will launch the app itself
@@ -205,7 +218,8 @@ final class AppModel {
         // terminate runs on the next main loop pass, not inside the stream event handler: otherwise the nested terminate
         // loop spins inside a main-thread task and quitting hangs until SIGTERM from the daemon.
         if !QuitPolicy.isDiagnostic(arguments: CommandLine.arguments) { store.onHubRestart = { DispatchQueue.main.async { NSApp.terminate(nil) } } }
-        store.start()
+        // a made-up state stays as it is: a stream would replace it with "no connection"
+        if demoAwake == nil { store.start() }
         statusMenu.install()
         if LaunchOptions.current.openPanel { Task { await reportPanelWindow() } }
         if LaunchOptions.current.showPopover { Task { await showPopoverWindow() } }

@@ -25,6 +25,13 @@
 //                                      built-ins and update state; settings, log, plugins and their data —
 //                                      only with --purge
 //
+//                                      uninstall also returns sleep and removes the sudoers rule of `agenthub awake`
+//   awake grant | revoke               (agenthub awake …) the sudoers rule that lets the daemon switch
+//                                      `pmset -a disablesleep` without a password: grant checks the text with visudo and
+//                                      installs /etc/sudoers.d/agenthub-sleep (sudo asks for the administrator password);
+//                                      revoke returns sleep first, then removes the file. hub install / setup offer
+//                                      grant once, after the hub is running; declining does not fail the install
+//
 // install --apply and uninstall --apply also run only from a human's terminal (confirm by typing "y"); --yes
 // (no prompt and no TTY) only in a test directory (AGENTHUB_HOME). launchd from a test directory only with
 // a launchctl double (AGENTHUB_TEST_LAUNCHCTL) and a temporary HOME: the plist goes to $HOME/Library/LaunchAgents.
@@ -32,7 +39,7 @@
 //   hub watch --home <dir>             internal: watchdog for the trial run of a new version (run by the daemon)
 
 import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { request } from "node:http";
 import { homedir, tmpdir, userInfo } from "node:os";
 import { dirname, join, resolve, sep } from "node:path";
@@ -43,7 +50,7 @@ import { Journal } from "../journal.mjs";
 import { pinFingerprint, requirementSha } from "../app-pin.mjs";
 import { builtinCopyDir, builtinStatus } from "../builtin-copy.mjs";
 import { bootstrapJob, daemonLocation, hasLaunchd, installPlan, LABEL, launchdNode, plistXml } from "../launchd.mjs";
-import { appControl, samePath } from "../platform.mjs";
+import { appControl, AWAKE_SUDOERS, awakeControl, awakeSudoersCommands, awakeSudoersRule, samePath } from "../platform.mjs";
 import { compareVersions, isLabel, parseVersionFile } from "../version.mjs";
 import { parseFileName, readPluginMeta, splitWhy } from "../meta.mjs";
 import { buildVersion, HubUpdateError, liveCodeOf, testCodeOf, verifyApp } from "./build.mjs";
@@ -247,29 +254,83 @@ function plistFor(home, isLiveHome) {
   return plistXml({ stateDir: home, node: daemonNode(isLiveHome), ...(isLiveHome ? {} : { env: { AGENTHUB_HOME: home } }) });
 }
 
+// stdin between questions. One run may ask twice (the install, then the awake rule): answers piped in arrive in one chunk,
+// and the end of input may come while no question is waiting — so the listeners stay for the whole run and remember both.
+let stdinRest = "";
+let stdinEnded = false;
+let stdinWaiter = null;
+let stdinHooked = false;
+const isYes = (line) => ["y", "yes", "д", "да"].includes(line.trim().toLowerCase());
+
+function hookStdin() {
+  if (stdinHooked) return;
+  stdinHooked = true;
+  process.stdin.setEncoding("utf8");
+  process.stdin.on("data", (c) => {
+    stdinRest += c;
+    stdinWaiter?.();
+  });
+  process.stdin.on("end", () => {
+    stdinEnded = true;
+    stdinWaiter?.();
+  });
+}
+
+// How long a terminal gets to hand over what was typed before a question, ms.
+const TTY_DRAIN_MS = 60;
+
+// Forget what was typed on the terminal so far. Raw mode for the moment of reading: the terminal then hands over the
+// characters of an unfinished line too (a "y" without Enter would otherwise become the start of the answer).
+async function dropTyped() {
+  const tty = process.stdin;
+  let raw = false;
+  try {
+    tty.setRawMode(true);
+    raw = true;
+  } catch {}
+  // raw mode also takes Ctrl-C as a character: one pressed in this very moment is still an interrupt
+  let interrupted = false;
+  const seen = (c) => {
+    if (String(c).includes("\u0003")) interrupted = true;
+  };
+  tty.on("data", seen);
+  tty.resume();
+  await new Promise((done) => setTimeout(done, TTY_DRAIN_MS));
+  tty.pause();
+  tty.off("data", seen);
+  if (raw) {
+    try {
+      tty.setRawMode(false);
+    } catch {}
+  }
+  stdinRest = "";
+  if (interrupted) process.kill(process.pid, "SIGINT");
+}
+
 // Yes/no question in the terminal. yes — answer yes right away (--yes in a test directory). End of input — no.
+// On a real terminal whatever was typed before the question appeared is dropped: an Enter hit during the long build
+// must not decline it, and a stray "y" must not accept it. Piped input is different — there the answers are written
+// ahead on purpose — and is kept.
 async function confirm(question, { yes = false } = {}) {
   if (yes) return true;
+  hookStdin();
+  if (process.stdin.isTTY && !stdinEnded) await dropTyped();
   process.stdout.write(question);
   return new Promise((done) => {
-    let buf = "";
-    const finish = (v) => {
-      process.stdin.off("data", onData);
-      process.stdin.off("end", onEnd);
+    // one line out of what has been read; the last one may end with the input instead of a newline
+    const answer = () => {
+      const nl = stdinRest.indexOf("\n");
+      if (nl < 0 && !stdinEnded) return;
+      const line = nl < 0 ? stdinRest : stdinRest.slice(0, nl);
+      stdinRest = nl < 0 ? "" : stdinRest.slice(nl + 1);
+      stdinWaiter = null;
+      // paused between questions: a waiting stdin would keep the process from exiting
       process.stdin.pause();
-      done(v);
+      done(isYes(line));
     };
-    const onData = (c) => {
-      buf += c;
-      const nl = buf.indexOf("\n");
-      if (nl < 0) return;
-      finish(["y", "yes", "д", "да"].includes(buf.slice(0, nl).trim().toLowerCase()));
-    };
-    const onEnd = () => finish(["y", "yes", "д", "да"].includes(buf.trim().toLowerCase()));
-    process.stdin.setEncoding("utf8");
-    process.stdin.on("data", onData);
-    process.stdin.on("end", onEnd);
-    process.stdin.resume();
+    stdinWaiter = answer;
+    answer();
+    if (stdinWaiter) process.stdin.resume();
   });
 }
 
@@ -873,6 +934,7 @@ async function install({ config, isLiveHome, opt, has, home, codeOf, setup = fal
       console.log(msg("cli.hub.runs", { label: LABEL }));
       await launchApp(config, home, target.label, isLiveHome);
     }
+    await awakeOffer({ config, isLiveHome, yes });
     finishText(home, target.label, origin, launchd, brewDir);
     return 0;
   } finally {
@@ -938,6 +1000,8 @@ async function repair({ config, isLiveHome, has, home, codeOf, label, apply, yes
   }
   if (pinOk && builtinOk && plistOk && up && sourceOk) {
     console.log(msg("cli.hub.rep.fine", { label, brew: Boolean(brewDir), formula: BREW_FORMULA }));
+    // nothing to repair, so nothing was confirmed either: only the reminder
+    if (apply) await awakeOffer({ config, isLiveHome, ask: false });
     return 0;
   }
   if (!apply) {
@@ -987,8 +1051,212 @@ async function repair({ config, isLiveHome, has, home, codeOf, label, apply, yes
     console.log(msg("cli.hub.rep.staleApp", { app: staleApp, killed, live: isLiveHome }));
   }
   if (launchd) await launchApp(config, home, label, isLiveHome);
+  await awakeOffer({ config, isLiveHome, yes });
   finishText(home, label, readBuild(home, label)?.origin || DEFAULT_ORIGIN, launchd, brewDir);
   return 0;
+}
+
+// ---------- awake: the sudoers rule (agenthub awake grant | revoke, the question in install, the step in uninstall) ----------
+
+// Run a command that may ask for a password on the terminal (sudo), waiting for it. Ctrl-C at that prompt goes to the
+// whole foreground group — to this process too, and without a handler it would die right there: an install before its
+// closing text, an uninstall with its files already deleted and no word about the rule that stayed, the temporary
+// directory left behind. With a handler held for the time of the call only the child stops; its non-zero result is
+// then an ordinary "declined". → spawnSync result
+export function spawnHoldingSigint(argv, options = {}) {
+  const hold = () => {};
+  process.on("SIGINT", hold);
+  try {
+    return spawnSync(argv[0], argv.slice(1), options);
+  } finally {
+    process.off("SIGINT", hold);
+  }
+}
+
+// Where the flag and the rule live for this run. Both are machine-wide, so only the account's live directory touches
+// them (lib/config.mjs awakeTest — also when AGENTHUB_HOME points there); a test directory touches neither unless told
+// to: the doubles (AGENTHUB_TEST_AWAKE_FILE, AGENTHUB_TEST_SUDOERS_DIR) or AGENTHUB_AWAKE_REAL=1 for a check on a stand.
+// dir: null — there is nothing this run may touch.
+// works() — the rights are there: the rule file is in place and sudo answers for it (the file alone where nothing but
+// the sudoers double stands in for the machine). Never the probe alone: sudo also says yes for a few minutes after any
+// sudo in this terminal and for an account with some other password-free rule.
+function awakeEnv(config) {
+  const ruleFile = config.testSudoersDir ? join(config.testSudoersDir, AWAKE_SUDOERS.name) : undefined;
+  const ctl = awakeControl({ testMode: config.awakeTest, testFile: config.testAwakeFile, real: config.awakeReal, ruleFile });
+  const dir = config.testSudoersDir ?? (ctl.mode === "system" ? AWAKE_SUDOERS.dir : null);
+  const file = dir ? join(dir, AWAKE_SUDOERS.name) : null;
+  const works = async () => Boolean(file) && existsSync(file) && (ctl.mode === "off" || (await ctl.granted()));
+  return { ctl, dir, file, double: Boolean(config.testSudoersDir), works };
+}
+
+function awakeUnavailable(config) {
+  console.error(process.platform === "darwin" ? msg("cli.awake.testHome", { home: config.paths.home }) : msg("cli.awake.noMac"));
+  return 2;
+}
+
+// GET /awake makes the daemon look at the rule and the flag now (it re-checks the rights only every few minutes), so the
+// switch in the app follows a grant or a revoke at once. Best effort: no daemon — nothing to tell.
+function awakeNudge(socket) {
+  return new Promise((done) => {
+    if (!existsSync(socket)) return done();
+    const r = request({ socketPath: socket, path: "/awake", agent: false, timeout: 3000 }, (res) => {
+      res.resume();
+      res.on("end", () => done());
+      res.on("error", () => done());
+    });
+    r.on("error", () => done());
+    r.on("timeout", () => {
+      r.destroy();
+      done();
+    });
+    r.end();
+  });
+}
+
+// Install the rule. user — the account the rule names (a parameter for tests). → exit code
+export async function awakeGrant({ config, isLiveHome, user = userInfo().username }) {
+  const a = awakeEnv(config);
+  if (!a.dir) return awakeUnavailable(config);
+  // only a definite "no lid" stops it: a lid that could not be read is no reason to refuse the rule
+  if (a.ctl.mode !== "off" && (await a.ctl.lid()) === false) {
+    console.error(msg("cli.awake.err.awake:unsupported"));
+    return 1;
+  }
+  if (await a.works()) {
+    console.log(msg("cli.awake.grant.already", { file: a.file }));
+    return 0;
+  }
+  const rule = awakeSudoersRule(user);
+  if (!rule) {
+    console.error(msg("cli.awake.grant.badUser", { user: JSON.stringify(String(user)) }));
+    return 2;
+  }
+  if (!a.double && !humanTerminal(isLiveHome)) {
+    console.error(msg("cli.awake.tty"));
+    return 3;
+  }
+  // the text goes through a file of our own first: visudo checks it there, and only a checked file is copied into place.
+  // A private directory (0700) — nobody else can swap the file between the check and the copy
+  const tmpDir = mkdtempSync(join(tmpdir(), "agenthub-sudoers-"));
+  try {
+    const tmp = join(tmpDir, AWAKE_SUDOERS.name);
+    writeFileSync(tmp, rule, { mode: 0o600 });
+    const cmds = awakeSudoersCommands(tmp, a.file);
+    if (cmds) {
+      // a rule file with a syntax error in sudoers.d breaks sudo for the whole machine
+      const v = spawnSync(cmds.check[0], cmds.check.slice(1), { encoding: "utf8", timeout: 15_000 });
+      if (v.status !== 0) {
+        console.error(msg("cli.awake.grant.invalid", { why: String(v.stderr || v.stdout || v.error?.code || "").trim().split("\n")[0].slice(0, 200) }));
+        return 1;
+      }
+    }
+    if (a.double) {
+      mkdirSync(a.dir, { recursive: true });
+      // the file may be there already (0440, a rule that did not work): replaced, as `install` does
+      rmSync(a.file, { force: true });
+      copyFileSync(tmp, a.file);
+      chmodSync(a.file, 0o440);
+      // inert — the double of a machine where the installed rule does not work
+      if (!a.ctl.inert?.()) a.ctl.setGranted?.(true);
+    } else {
+      console.log(msg("cli.awake.grant.sudo", { file: a.file }));
+      // Ctrl-C at the password prompt is a "no", not the end of this process (the install that asked goes on)
+      const r = spawnHoldingSigint(cmds.install, { stdio: "inherit" });
+      if (r.status !== 0) {
+        console.error(msg("cli.awake.grant.failed"));
+        return 1;
+      }
+    }
+    // the file is there; whether sudo applies it is a separate question (sudoers.d not included, a rule sudo skips)
+    if (!(await a.works())) {
+      console.error(msg("cli.awake.grant.notWorking", { file: a.file }));
+      return 1;
+    }
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true });
+  }
+  cliJournal(config, { op: "awake-grant", file: a.file, under: process.stdin.isTTY ? "terminal" : "no-tty" });
+  await awakeNudge(config.paths.socket);
+  console.log(msg("cli.awake.grant.done", { file: a.file, user }));
+  return 0;
+}
+
+// Give the machine back: return sleep, then remove the rule — in this order, because once the rule is gone the hub cannot
+// switch the flag without a password. → { rule, removed, returned, stillOn }: the rule was there, it is gone now, sleep
+// was returned here, the flag is still on after all of it.
+async function awakeRelease(a, { isLiveHome }) {
+  const out = { rule: Boolean(a.file) && existsSync(a.file), removed: false, returned: false, stillOn: false };
+  const watching = a.ctl.mode !== "off";
+  if (watching && (await a.ctl.flag()) === true && (await a.ctl.granted())) {
+    await a.ctl.set(false);
+    out.returned = (await a.ctl.flag()) === false;
+  }
+  if (out.rule) {
+    if (a.double) {
+      // a file that cannot be removed is a result ("remove it yourself"), not a crash — as with sudo saying no
+      try {
+        rmSync(a.file, { force: true });
+        a.ctl.setGranted?.(false);
+      } catch {}
+    } else {
+      const cmds = awakeSudoersCommands(null, a.file);
+      // no terminal — no way to ask for the password: try without one (sudo may still remember the last one)
+      const tty = humanTerminal(isLiveHome);
+      if (tty) console.log(msg("cli.awake.revoke.sudo", { file: a.file }));
+      const argv = tty ? cmds.remove : [cmds.remove[0], "-n", ...cmds.remove.slice(1)];
+      // Ctrl-C at the password prompt: the rule stays, and the caller still gets to say so
+      spawnHoldingSigint(argv, { stdio: tty ? "inherit" : "ignore" });
+    }
+    out.removed = !existsSync(a.file);
+  }
+  // a flag set by hand, a rule of another account, a refused command: whatever the reason, say it
+  out.stillOn = watching && (await a.ctl.flag()) === true;
+  return out;
+}
+
+// The machine was not given back in full: the rule is still there, or sleep is still disabled.
+const awakeReleaseIncomplete = (r) => (r.rule && !r.removed) || r.stillOn;
+
+// problemsOnly — just the lines about what is left to do by hand.
+function awakeReleaseText(a, r, { problemsOnly = false } = {}) {
+  if (r.returned && !problemsOnly) console.log(msg("cli.awake.sleepBack"));
+  if (r.rule && !(problemsOnly && r.removed)) console.log(msg(r.removed ? "cli.awake.revoke.done" : "cli.awake.revoke.failed", { file: a.file }));
+  if (r.stillOn) console.log(msg("cli.awake.stillOn"));
+}
+
+// Remove the rule (sleep is returned first). → exit code
+export async function awakeRevoke({ config, isLiveHome }) {
+  const a = awakeEnv(config);
+  if (!a.dir) return awakeUnavailable(config);
+  const r = await awakeRelease(a, { isLiveHome });
+  if (!r.rule) console.log(msg("cli.awake.revoke.none"));
+  awakeReleaseText(a, r);
+  if (r.rule || r.returned) cliJournal(config, { op: "awake-revoke", file: a.file, removed: r.removed, sleepReturned: r.returned, stillOn: r.stillOn, under: process.stdin.isTTY ? "terminal" : "no-tty" });
+  await awakeNudge(config.paths.socket);
+  return awakeReleaseIncomplete(r) ? 1 : 0;
+}
+
+// The question at the end of an install: the hub is already running, the rule is an extra. Nothing is asked where there is
+// nothing to grant (no lid, a test directory without doubles) or the rights are already there; without a terminal
+// (or with --yes) — one line about `agenthub awake grant`. A refusal or a failed grant never fails the install.
+async function awakeOffer({ config, isLiveHome, yes = false, ask = true }) {
+  try {
+    const a = awakeEnv(config);
+    if (!a.dir) return;
+    if (a.ctl.mode !== "off" && (await a.ctl.lid()) === false) return;
+    if (await a.works()) return;
+    if (!ask || yes || !humanTerminal(isLiveHome)) {
+      console.log(msg("cli.awake.hint"));
+      return;
+    }
+    if (!(await confirm(msg("cli.awake.ask", { file: a.file })))) {
+      console.log(msg("cli.awake.declined"));
+      return;
+    }
+    await awakeGrant({ config, isLiveHome });
+  } catch (e) {
+    console.error(msg("cli.awake.grant.invalid", { why: e.code || e.message }));
+  }
 }
 
 // ---------- uninstall (agenthub uninstall) ----------
@@ -1101,6 +1369,11 @@ export async function uninstallCli({ config, isLiveHome, has, home }) {
     console.log(msg("cli.un.planDelete", { list: `${p.versions}, ${p.dir}, ${copy}` }));
     console.log(msg("cli.un.planKeep"));
   }
+  // sleep and the sudoers rule of `agenthub awake` are machine-wide: they would outlive the hub's directory
+  const aw = awakeEnv(config);
+  const awRule = Boolean(aw.file) && existsSync(aw.file);
+  const awOff = aw.ctl.mode !== "off" && (await aw.ctl.flag()) === true && (await aw.ctl.granted());
+  if (awRule || awOff) console.log(msg("cli.un.planAwake", { off: awOff, rule: awRule, file: aw.file, sudo: awRule && !aw.double }));
   if (brew) console.log(msg("cli.un.planBrew", { formula: BREW_FORMULA }));
   if (!apply) {
     console.log(msg("cli.un.nothing"));
@@ -1141,13 +1414,20 @@ export async function uninstallCli({ config, isLiveHome, has, home }) {
     }
     console.log(msg("cli.un.forced", { socket: config.paths.socket, who }));
   }
-  // 2. app: the daemon is gone — supervision won't restart it; the app won't start the daemon either (there's no job)
+  // 2. sleep and the rule — before anything is deleted, so that nothing that goes wrong later can skip it; and after
+  // the daemon, which would switch the flag itself. Sleep first: while the rule still lets the hub do it without a
+  // password. A flag that stays on (set by hand, no rule) is named with the command that returns sleep: the hub must not
+  // leave a Mac that silently never sleeps
+  const released = await awakeRelease(aw, { isLiveHome });
+  awakeReleaseText(aw, released);
+  if (!purge && (released.rule || released.returned)) cliJournal(config, { op: "awake-revoke", file: aw.file, removed: released.removed, sleepReturned: released.returned, stillOn: released.stillOn, under: process.stdin.isTTY ? "terminal" : "no-tty" });
+  // 3. app: the daemon is gone — supervision won't restart it; the app won't start the daemon either (there's no job)
   const killed = await stopApps(appPaths, isLiveHome);
   if (killed) console.log(msg("cli.un.appClosed", { n: killed }));
   // keychain entries come from the installed plugins' declarations (<agenthub.secrets>): collect before deleting files (with --purge
   // the Plugins/ directory is gone after that)
   const services = keychainServices(home);
-  // 3. files
+  // 4. files
   if (purge) {
     rmSync(home, { recursive: true, force: true });
     console.log(msg("cli.un.deletedHome", { home }));
@@ -1184,5 +1464,12 @@ export async function uninstallCli({ config, isLiveHome, has, home }) {
   console.log(msg("cli.un.hook"));
   console.log(msg("cli.un.hookSafe"));
   if (brew) console.log(msg("cli.un.brew", { formula: BREW_FORMULA }));
+  // the hub is removed, but the machine was not given back in full: the last lines say what is left, and the exit code
+  // says it to a script (as `agenthub awake revoke` does)
+  if (awakeReleaseIncomplete(released)) {
+    console.log("");
+    awakeReleaseText(aw, released, { problemsOnly: true });
+    return 1;
+  }
   return 0;
 }

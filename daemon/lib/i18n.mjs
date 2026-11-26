@@ -98,6 +98,9 @@ const CORE_MESSAGES = {
     "push.rule.hub-update-suspect": "Обновление Agent Hub остановлено — возможна подмена",
     "push.rule.plugin-own-unexpected": "Свой плагин записан мимо Agent Hub",
     "push.rule.plugin-own-updated": "Плагин обновлён",
+    // "keep the Mac awake with the lid closed" switched off by the battery guard (the awake service)
+    "push.rule.awake-low-battery": "Низкий заряд — сон возвращён",
+    "awake.low-battery.detail": (p) => `Заряд ${p.charge}% — ниже порога ${p.threshold}%. Мак снова засыпает с закрытой крышкой`,
     "own.updated.detail": (p) => (p.same ? `«${p.title}» обновлён из своей папки (версия ${p.version})` : `«${p.title}» обновлён до ${p.version}`),
     "own.unexpected.detail": (p) => `«${p.title}»: запись в plugins.lock сделана не после вашего согласия — плагин работает как сторонний. Если это были не вы — откройте журнал; иначе подтвердите заявку в «Плагинах»`,
     "hub-update.detail.available": (p) => `${p.version}${p.notes ? ` — ${p.notes}` : ""}${p.notes?.endsWith("…") ? "" : "."} Сейчас ${p.current} · обновить — в меню Agent Hub`,
@@ -208,6 +211,8 @@ const CORE_MESSAGES = {
     "push.rule.hub-update-suspect": "Agent Hub update stopped — possible substitution",
     "push.rule.plugin-own-unexpected": "Own plugin written behind Agent Hub's back",
     "push.rule.plugin-own-updated": "Plugin updated",
+    "push.rule.awake-low-battery": "Battery low — sleep is back",
+    "awake.low-battery.detail": (p) => `Charge ${p.charge}% — below the ${p.threshold}% threshold. The Mac sleeps with the lid closed again`,
     "own.updated.detail": (p) => (p.same ? `"${p.title}" updated from its folder (version ${p.version})` : `"${p.title}" updated to ${p.version}`),
     "own.unexpected.detail": (p) => `"${p.title}": the plugins.lock entry wasn't made after your consent — the plugin runs as third-party. If this wasn't you, open the log; otherwise approve the request in Plugins`,
     "hub-update.detail.available": (p) => `${p.version}${p.notes ? ` — ${p.notes}` : ""}${p.notes?.endsWith("…") ? "" : "."} Now ${p.current} · update from the Agent Hub menu`,

@@ -92,6 +92,11 @@ export const DEFAULT_RULES = Object.freeze([
   // window; plugins.own-updated from the manager). Key — plugin-own-updated:<id>:<version>; every such update is announced
   // (no flapping window: the same version may be rebuilt), switched off together with the other updates ("updates").
   { name: "plugin-own-updated", label: L("plugin-own-updated"), cooldownMs: 0, kind: "updates" },
+  // Hub event: "keep the Mac awake with the lid closed" was on, the charge fell below the threshold on the battery and the
+  // awake service returned sleep (awake.low-battery). Key — awake-low-battery:<charge>:<threshold>; every trip is announced
+  // (no flapping window: the service never turns the switch back on, so the next trip is a new decision of the human).
+  // Not urgent: the Mac is already safe, during quiet hours it waits for the digest.
+  { name: "awake-low-battery", label: L("awake-low-battery"), cooldownMs: 0, kind: "other" },
 ]);
 
 // macOnly — the event goes to the Mac banner only, never to the extra channels (webhook, ntfy, channels of services;

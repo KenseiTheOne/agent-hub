@@ -9,7 +9,7 @@ import { existsSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { isLiveStateDir, standardPath as platformPath, stateDir, transportPath } from "./platform.mjs";
+import { isAccountLiveDir, isLiveStateDir, standardPath as platformPath, stateDir, transportPath } from "./platform.mjs";
 import { isLabel } from "./version.mjs";
 import { msg } from "./i18n.mjs";
 import { loadStateJson, readJsonFile } from "./statefile.mjs";
@@ -208,12 +208,32 @@ export function loadConfig({ env = process.env, overrides = null, tolerant = fal
   cfg.paths = paths;
   cfg.configLoadedSig = loadedSig;
   cfg.testMode = Boolean(env.AGENTHUB_HOME);
+  Object.assign(cfg, awakeModeOf(env, home));
   cfg.testTier = testTierOf(env, home);
   cfg.testExtensions = testExtensionsOf(env, home);
   // AGENTHUB_PLUGIN_HOME=<dir> — plugins' HOME (a synthetic ~ for checks). Test mode only.
   cfg.pluginHome = cfg.testMode && env.AGENTHUB_PLUGIN_HOME ? resolve(env.AGENTHUB_PLUGIN_HOME) : null;
   cfg.systemLang = systemLangOverride(env);
   return cfg;
+}
+
+// "Awake" (lib/services/awake.mjs, `agenthub awake`): the system flag and the sudoers rule are machine-wide, so only the
+// hub in the account's real live directory touches them (awakeTest: false) — whether it got there by default or through
+// AGENTHUB_HOME. Every other directory is a test one for this purpose, a fake-HOME "live" directory included: such a
+// directory runs nothing at all.
+// AGENTHUB_TEST_AWAKE_FILE=<file> — a JSON double {flag, granted, lid, charge, onBattery} read and written instead of
+// pmset, sudo and ioreg; AGENTHUB_TEST_SUDOERS_DIR=<dir> — instead of /etc/sudoers.d (no sudo, the rule file is
+// copied); AGENTHUB_AWAKE_REAL=1 — the system commands after all (a check on a stand). The three are honoured only
+// when AGENTHUB_HOME points to a directory other than the live one, like AGENTHUB_TEST_TIER: the live hub never has them.
+// → { awakeTest, testAwakeFile, testSudoersDir, awakeReal }
+export function awakeModeOf(env = process.env, home = defaultHome(env)) {
+  const vars = Boolean(env.AGENTHUB_HOME) && !isLiveStateDir(home, { env });
+  return {
+    awakeTest: !isAccountLiveDir(home, { env }),
+    testAwakeFile: vars && env.AGENTHUB_TEST_AWAKE_FILE ? resolve(env.AGENTHUB_TEST_AWAKE_FILE) : null,
+    testSudoersDir: vars && env.AGENTHUB_TEST_SUDOERS_DIR ? resolve(env.AGENTHUB_TEST_SUDOERS_DIR) : null,
+    awakeReal: vars && env.AGENTHUB_AWAKE_REAL === "1",
+  };
 }
 
 // AGENTHUB_TEST_TIER=own (G15): plugins from Plugins/local of a TEST hub get the own tier — actions, own push rules, hub

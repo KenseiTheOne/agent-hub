@@ -79,6 +79,20 @@ public enum MenuBarLook: Equatable, Sendable {
     /// The "?" sign to the right of the bot — no connection: the hub knows nothing (the image is wider by `pauseMarkWidth`).
     public var unknownMark: Bool { self == .offline }
 
+    /// The small marks to the right of the bot, left to right. "Stay awake with the lid closed" is not a look of its
+    /// own: its mark is added to whatever the icon shows (calm, waiting, paused, no connection, …), after the look's
+    /// own mark, and the image grows wider by each mark. With no connection it stays as last known — the flag lives
+    /// in the system, a lost connection doesn't turn it off.
+    public enum SideMark: Equatable, Sendable { case pause, unknown, awake }
+
+    public func sideMarks(awake: Bool) -> [SideMark] {
+        var marks: [SideMark] = []
+        if pauseMark { marks.append(.pause) }
+        if unknownMark { marks.append(.unknown) }
+        if awake { marks.append(.awake) }
+        return marks
+    }
+
     /// Opacity of the template part (the bot) over the menu bar text color.
     public var glyphAlpha: Double {
         switch self {
@@ -110,8 +124,8 @@ public enum MenuBarLook: Equatable, Sendable {
     }
 
     /// The icon tooltip: the state, the blocker (also while paused — the pause doesn't hide it) with the name of the culprit plugin
-    /// (`culprit`), the waiting ones, the test copy label.
-    public func tooltip(status: HubStatus, waiting: Int, testMark: String?, idle: IdleVerdict? = nil, culprit: String? = nil) -> String {
+    /// (`culprit`), the waiting ones, "stays awake with the lid closed" (`awake`), the test copy label.
+    public func tooltip(status: HubStatus, waiting: Int, testMark: String?, idle: IdleVerdict? = nil, culprit: String? = nil, awake: Bool = false) -> String {
         var state: String
         switch self {
         case .offline: state = tr("нет связи со службой хаба", "no connection to the hub service")
@@ -127,8 +141,10 @@ public enum MenuBarLook: Equatable, Sendable {
         default: state = status.label
         }
         let w = waiting > 0 && self != .offline ? tr(", ждут вас: \(waiting)", ", waiting for you: \(waiting)") : ""
+        // what the mark next to the bot means, on a line of its own
+        let lid = awake ? "\n" + AwakeText.iconNote : ""
         let test = testMark.map { "\n\($0)" } ?? ""
-        return "Agent Hub: \(state)\(w)\(test)"
+        return "Agent Hub: \(state)\(w)\(lid)\(test)"
     }
 }
 

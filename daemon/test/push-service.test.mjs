@@ -200,6 +200,43 @@ test("service: an own plugin updated from its folder (plugins.own-updated) — \
   }
 });
 
+test("service: the battery guard returned sleep (awake.low-battery) — a banner with the charge and the threshold, kind other; at start too", async () => {
+  const h = await startHub({ services: "push", overrides: { services: { push: { ackTimeoutMs: 100 } } } });
+  try {
+    const { _engine } = await import("../lib/services/push.mjs");
+    h.core.emit({ type: "awake.low-battery", charge: 7, threshold: 10 });
+    h.core.emit({ type: "awake.low-battery", charge: "7", threshold: 10 });
+    h.core.emit({ type: "awake.low-battery", charge: 170, threshold: 10 });
+    const osa = await waitFor(() => execLog(h.home).find((c) => c.file === "/usr/bin/osascript" && /Низкий заряд/.test(bannerText(c))));
+    assert.equal(bannerText(osa), "Низкий заряд — сон возвращён: Заряд 7% — ниже порога 10%. Мак снова засыпает с закрытой крышкой");
+    assert.ok(h.core.recent.some((e) => e.type === "push.notify" && e.key === "@hub:awake-low-battery:7:10"), "through the shell first, like other notifications");
+    await _engine().idle();
+    assert.deepEqual([..._engine().entries.keys()].filter((k) => k.includes("awake-low-battery")), ["@hub:awake-low-battery:7:10"], "a charge that is not a percent is dropped");
+    const sent = h.core.journal.tail(200).filter((e) => e.type === "push-sent" && e.rule === "awake-low-battery");
+    assert.equal(sent.length, 1);
+    // the next trip is a new decision of the human (the hub never turns the switch back on): announced again
+    h.core.emit({ type: "awake.low-battery", charge: 7, threshold: 10 });
+    await waitFor(() => h.core.journal.tail(200).filter((e) => e.type === "push-sent" && e.rule === "awake-low-battery").length === 2);
+  } finally {
+    await h.stop();
+  }
+  // English, and the whole path: the flag is already on at start with the charge below the threshold on the battery — the
+  // awake service starts before this one, and the notification is not lost
+  const dir = tempHome("ah-push-awk-");
+  const file = join(dir, "awake.json");
+  writeFileSync(file, JSON.stringify({ flag: true, granted: true, lid: true, charge: 7, onBattery: true }));
+  const e = await startHub({ services: "awake,push", env: { AGENTHUB_TEST_AWAKE_FILE: file, AGENTHUB_SYSTEM_LANG: "en" }, overrides: { services: { push: { ackTimeoutMs: 100 } } } });
+  try {
+    const osa = await waitFor(() => execLog(e.home).find((c) => c.file === "/usr/bin/osascript" && /Battery low/.test(bannerText(c))));
+    assert.equal(bannerText(osa), "Battery low — sleep is back: Charge 7% — below the 10% threshold. The Mac sleeps with the lid closed again");
+    assert.equal(JSON.parse(readFileSync(file, "utf8")).flag, false);
+    assert.deepEqual(e.core.journal.tail(200).filter((x) => x.type === "awake-low-battery").map((x) => [x.charge, x.threshold]), [[7, 10]]);
+  } finally {
+    await e.stop();
+    cleanup(dir);
+  }
+});
+
 test("service: hub-update.failed with a tampering sign (commit-mismatch) raises hub-update-suspect, an ordinary failure — hub-update-failed", async () => {
   const h = await startHub({ services: "push" });
   try {

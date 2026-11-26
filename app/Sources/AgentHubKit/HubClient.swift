@@ -72,13 +72,17 @@ public enum ActionOutcome: Sendable {
 /// No TCP at all: the URL has the socket path in place of the host.
 public final class HubClient: Sendable {
     public let socketPath: String
+    /// A client that reaches nothing: every request and the stream fail before a connection is opened. For a made-up
+    /// state (`AwakeDemo`), which must not send a click or `/shutdown` to a daemon that happens to run on that socket.
+    public let detached: Bool
     private let http: HTTPClient
     /// A separate client for SSE: 45 s read timeout (the daemon sends `: ping` every 15 s) — that way a hung daemon
     /// without a FIN is detected and the stream reconnects.
     private let stream: HTTPClient
 
-    public init(socketPath: String) {
+    public init(socketPath: String, detached: Bool = false) {
         self.socketPath = socketPath
+        self.detached = detached
         var cfg = HTTPClient.Configuration()
         cfg.timeout = .init(connect: .seconds(2), read: nil)
         cfg.redirectConfiguration = .disallow
@@ -97,6 +101,8 @@ public final class HubClient: Sendable {
     }
 
     private func url(_ uri: String) throws -> String {
+        // the one place every request and the stream take their address from
+        if detached { throw HubError.socket(tr("показано выдуманное состояние — службе хаба ничего не отправляется", "a made-up state is shown — nothing is sent to the hub service")) }
         guard let u = URL(httpURLWithSocketPath: socketPath, uri: uri) else { throw HubError.socket(tr("плохой путь сокета", "bad socket path")) }
         return u.absoluteString
     }
@@ -104,7 +110,7 @@ public final class HubClient: Sendable {
     /// A request with a JSON body; returns the status and the whole body (up to 32 MB).
     public func request(_ method: HTTPMethod, _ uri: String, json: JSONValue? = nil,
                         timeout: TimeAmount = .seconds(15)) async throws -> (status: Int, body: Data) {
-        if let problem = HubPaths.checkSocket(socketPath) { throw HubError.socket(problem) }
+        if !detached, let problem = HubPaths.checkSocket(socketPath) { throw HubError.socket(problem) }
         var req = HTTPClientRequest(url: try url(uri))
         req.method = method
         // in http+unix:// the socket path acts as the host; Node rejects such a Host (400) — send a nominal "hub"
@@ -189,6 +195,13 @@ public final class HubClient: Sendable {
         guard r.status == 200 else { throw HubError.http(status: r.status, code: Self.errorCode(r.body)) }
         struct Body: Decodable { var pluginUpdates: PluginUpdates? }
         return (try? JSONDecoder().decode(Body.self, from: r.body))?.pluginUpdates
+    }
+
+    /// `POST /awake`: "Stay awake with the lid closed" — the daemon sets the system flag. → the reply, a refusal
+    /// included: both carry the section as it is now (`AwakeReply`).
+    public func setAwake(_ on: Bool) async throws -> AwakeReply {
+        let r = try await request(.POST, "/awake", json: .object(["on": .bool(on)]))
+        return AwakeReply(status: r.status, body: r.body)
     }
 
     /// `PUT /settings/launch-at-login` (app only): "Launch at login" — the daemon + application pair. → the new setting.
@@ -440,7 +453,7 @@ public final class HubClient: Sendable {
         AsyncThrowingStream { continuation in
             let task = Task {
                 do {
-                    if let problem = HubPaths.checkSocket(socketPath) { throw HubError.socket(problem) }
+                    if !detached, let problem = HubPaths.checkSocket(socketPath) { throw HubError.socket(problem) }
                     var req = HTTPClientRequest(url: try url("/events"))
                     req.method = .GET
                     req.headers.replaceOrAdd(name: "host", value: "hub")

@@ -91,6 +91,8 @@ log(`listening on ${config.paths.socket} (pid ${process.pid})`);
 // Versions/current already points to the new version — exit with code 75 so launchd brings it up instead of leaving the hub down.
 let stopping = false;
 let exitCode = 0;
+const EXIT_LIMIT_MS = 5000;
+const EXIT_HOLD_MS = 3000;
 async function shutdown(reason) {
   if (reason === "update") exitCode = EXIT_RESTART;
   if (stopping) {
@@ -105,7 +107,14 @@ async function shutdown(reason) {
     "login-off": "\"Launch at login\" is off and the app did not show up",
   };
   log(`${why[reason] || reason}: shutting down`);
-  const t = setTimeout(() => process.exit(exitCode), 5000);
+  // The hard limit of a shutdown. One thing may outlast it for a moment: a service finishing what must not be cut short
+  // (the "exit.hold" fact — the awake service returning sleep on a final exit, lib/services/awake.mjs). Its own work
+  // fits into the limit; the extra wait covers a quit that began after the stop did (SIGTERM first, POST /shutdown next).
+  const t = setTimeout(async () => {
+    const hold = core.facts.get("exit.hold");
+    if (hold) await Promise.race([hold, new Promise((done) => setTimeout(done, EXIT_HOLD_MS))]);
+    process.exit(exitCode);
+  }, EXIT_LIMIT_MS);
   t.unref();
   await stopHub({ srv, core, reason });
   process.exit(exitCode);

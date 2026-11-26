@@ -9,13 +9,15 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { chmodSync, cpSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { userInfo } from "node:os";
 import { dirname, join } from "node:path";
 import { DAEMON_DIR, REPO_DIR } from "../lib/config.mjs";
 import { cdhashRequirement } from "../lib/app-pin.mjs";
 import { currentLabel, previousLabel, readBuild, versionApp } from "../lib/hub-update/layout.mjs";
 import { readInstall, writeInstall } from "../lib/hub-update/trial.mjs";
 import { LABEL, launchdNode, probeNode } from "../lib/launchd.mjs";
-import { cleanup, tempHome, waitFor } from "./helpers.mjs";
+import { AWAKE_SUDOERS, awakeSudoersRule } from "../lib/platform.mjs";
+import { cleanup, scrubAwakeEnv, tempHome, waitFor } from "./helpers.mjs";
 
 const A = "a".repeat(40);
 const B = "b".repeat(40);
@@ -23,7 +25,7 @@ const GIT = "/usr/bin/git";
 const INSTALLER = join(REPO_DIR, "scripts", "install.sh");
 // AGENTHUB_SYSTEM_LANG=en: the installer and the CLI speak the hub language; these checks read the English output
 const env0 = () => {
-  const e = { ...process.env, AGENTHUB_SYSTEM_LANG: "en" };
+  const e = scrubAwakeEnv({ ...process.env, AGENTHUB_SYSTEM_LANG: "en" });
   delete e.NODE_OPTIONS;
   delete e.AGENTHUB_HOME;
   delete e.AGENTHUB_TEST_TTY;
@@ -636,5 +638,299 @@ test("removal: the daemon didn't leave after bootout (started by hand) — nothi
     assert.match(live.stderr, /--no-launchd is for a test directory/);
   } finally {
     cleanup(w2.root);
+  }
+});
+
+// ---------- awake: the question at the end of an install, the step in uninstall ----------
+
+// The machine for the awake rule: the flag double and the sudoers directory double (no sudo, no pmset -a, no /etc).
+function awakeDoubles(w, state = {}) {
+  const file = join(w.root, "awake.json");
+  const dir = join(w.root, "sudoers.d");
+  const a = {
+    file,
+    dir,
+    rule: join(dir, AWAKE_SUDOERS.name),
+    env: { AGENTHUB_TEST_AWAKE_FILE: file, AGENTHUB_TEST_SUDOERS_DIR: dir },
+    read: () => JSON.parse(readFileSync(file, "utf8")),
+    set: (st) => writeFileSync(file, JSON.stringify({ flag: false, granted: false, lid: true, charge: 80, onBattery: false, ...st })),
+    // the rule as `agenthub awake grant` leaves it
+    grant: () => {
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(a.rule, awakeSudoersRule("someone"), { mode: 0o440 });
+    },
+  };
+  a.set(state);
+  return a;
+}
+const plainUser = awakeSudoersRule(userInfo().username) !== null;
+
+test("hub install: the awake question comes once the hub is installed — declined: no rule, the install is done; accepted: the rule passes visudo and lands in the sudoers double; a rule in place, no lid or no doubles — no question; --yes or no terminal — one line about `agenthub awake grant`", { skip: !plainUser && "the account name cannot go into a sudoers rule" }, async () => {
+  const w = world();
+  try {
+    w.release("0.2.0");
+    const a = awakeDoubles(w);
+    const base = (hub, extra = {}) => w.env({ AGENTHUB_HOME: join(w.root, hub), AGENTHUB_TEST_TTY: "1", ...a.env, ...extra });
+    const install = (hub, input, extra = {}, more = []) => cli(["hub", "install", "--origin", w.bare, "--apply", "--no-launchd", ...more], base(hub, extra), input);
+    const ASK = /Let the hub keep the Mac awake with the lid closed\? The administrator password is needed: .* \[y\/N\] /;
+
+    // "y" to the install, "n" to the rule: both answers arrive in one chunk — each question takes its own line
+    const no = install("hub-no", "y\nn\n");
+    assert.equal(no.status, 0, no.stderr + no.stdout);
+    assert.match(no.stdout, ASK);
+    assert.match(no.stdout, /\[y\/N\] Fine, without it\. Later: agenthub awake grant\n/);
+    assert.ok(no.stdout.includes(a.rule), "the question names the file the rule goes to");
+    assert.ok(!existsSync(a.dir), "declined — nothing is written");
+    assert.equal(currentLabel(join(w.root, "hub-no")), "0.2.0", "declining the rule does not undo the install");
+    assert.ok(no.stdout.indexOf("Fine, without it") < no.stdout.indexOf("Done: Agent Hub 0.2.0"), "the question comes before the closing text");
+    // input ends after the first answer: the second question is answered "no", the installer does not hang
+    const eof = install("hub-eof", "y\n");
+    assert.equal(eof.status, 0, eof.stderr + eof.stdout);
+    assert.match(eof.stdout, /\[y\/N\] Fine, without it\./);
+    // the same version again — nothing to repair, nothing is asked: only the reminder
+    const again = install("hub-no", "");
+    assert.equal(again.status, 0, again.stderr + again.stdout);
+    assert.doesNotMatch(again.stdout, ASK);
+    assert.match(again.stdout, /^Awake with the lid closed: grant the rights once — agenthub awake grant/m);
+
+    const yes = install("hub-yes", "y\ny\n");
+    assert.equal(yes.status, 0, yes.stderr + yes.stdout);
+    assert.match(yes.stdout, ASK);
+    assert.match(yes.stdout, /Rights granted: /);
+    assert.equal(readFileSync(a.rule, "utf8"), awakeSudoersRule(userInfo().username));
+    assert.equal(a.read().granted, true);
+    assert.equal(currentLabel(join(w.root, "hub-yes")), "0.2.0");
+    // the text that went into the double is one visudo accepts
+    execFileSync("/usr/sbin/visudo", ["-cf", a.rule], { stdio: "ignore" });
+
+    // the rule is in place: nothing is asked and nothing is said
+    const has = install("hub-has", "y\n");
+    assert.equal(has.status, 0, has.stderr + has.stdout);
+    assert.doesNotMatch(has.stdout, /awake/i);
+
+    // a rule file that sudo does not apply is not "in place": the question comes again, and a grant that does not take
+    // is said — while the install itself is done
+    a.set({ granted: false, inert: true });
+    const broken = install("hub-broken", "y\ny\n");
+    assert.equal(broken.status, 0, broken.stderr + broken.stdout);
+    assert.match(broken.stdout, ASK);
+    assert.match(broken.stderr, /^awake grant: the rule is in .*, but sudo does not apply it/m);
+    assert.doesNotMatch(broken.stdout, /Rights granted/);
+    assert.match(broken.stdout, /Done: Agent Hub 0\.2\.0/);
+    assert.equal(currentLabel(join(w.root, "hub-broken")), "0.2.0");
+
+    // --yes (a test directory) or no terminal for the question: one line, no rule
+    rmSync(a.dir, { recursive: true });
+    a.set();
+    const auto = install("hub-auto", "", { AGENTHUB_TEST_TTY: "" }, ["--yes"]);
+    assert.equal(auto.status, 0, auto.stderr + auto.stdout);
+    assert.doesNotMatch(auto.stdout, ASK);
+    assert.match(auto.stdout, /^Awake with the lid closed: grant the rights once — agenthub awake grant/m);
+    assert.ok(!existsSync(a.dir));
+    // a Mac without a lid: there is nothing to offer
+    a.set({ lid: false });
+    const noLid = install("hub-nolid", "y\n");
+    assert.equal(noLid.status, 0, noLid.stderr + noLid.stdout);
+    assert.doesNotMatch(noLid.stdout, /awake/i);
+    // a test directory without the doubles touches nothing machine-wide and says nothing
+    const bare = install("hub-bare", "y\n", { AGENTHUB_TEST_AWAKE_FILE: "", AGENTHUB_TEST_SUDOERS_DIR: "" });
+    assert.equal(bare.status, 0, bare.stderr + bare.stdout);
+    assert.doesNotMatch(bare.stdout, /awake/i);
+  } finally {
+    cleanup(w.root);
+  }
+});
+
+test("removal leaves the Mac with normal sleep: the flag on and the rule in place — sleep is returned, then the rule is removed, both before anything is deleted; the flag still on or the rule still there at the end — the line with the command as the closing one and exit 1, never a clean report", async () => {
+  const w = world();
+  try {
+    w.release("0.2.0");
+    const a = awakeDoubles(w);
+    const STILL = /^Sleep is still disabled \(SleepDisabled 1\): .* Return sleep: sudo pmset -a disablesleep 0$/m;
+    const KEPT = /^The rule .* was not removed\. Remove it yourself: sudo rm .*$/m;
+    const lastLine = (r) => r.stdout.trimEnd().split("\n").at(-1);
+    const hubDir = (name) => {
+      const d = join(w.root, name);
+      mkdirSync(d, { recursive: true, mode: 0o700 });
+      writeFileSync(join(d, "config.json"), "{}\n");
+      return d;
+    };
+    const un = (dir, more = [], extra = {}) => cli(["uninstall", "--yes", "--no-launchd", ...more], w.env({ AGENTHUB_HOME: dir, ...a.env, ...extra }));
+
+    // 1. through the installer, with launchd: installed (--yes — only the reminder), the rule granted, the flag on
+    const inst = await runInstaller(["--origin", w.bare, "--home", w.hub, "--yes"], w.env(a.env));
+    assert.equal(inst.code, 0, inst.stderr + inst.stdout);
+    assert.match(inst.stdout, /^Awake with the lid closed: grant the rights once/m);
+    a.grant();
+    a.set({ flag: true, granted: true });
+    const plan = cli(["uninstall"], w.env({ AGENTHUB_HOME: w.hub, ...a.env }));
+    assert.equal(plan.status, 0, plan.stderr + plan.stdout);
+    assert.ok(plan.stdout.includes(`  return sleep (pmset -a disablesleep 0); remove the rule ${a.rule}\n`), plan.stdout);
+    assert.deepEqual([a.read().flag, existsSync(a.rule)], [true, true], "the plan changes nothing");
+    const pid = w.jobPid();
+    const gone = await runInstaller(["--uninstall", "--home", w.hub, "--yes"], w.env(a.env));
+    assert.equal(gone.code, 0, gone.stderr + gone.stdout);
+    await waitFor(() => !alive(pid), { timeoutMs: 5000 });
+    assert.equal(a.read().flag, false, "sleep is back");
+    assert.ok(!existsSync(a.rule), "the rule is removed");
+    assert.equal(a.read().granted, false);
+    const at = (re) => gone.stdout.search(re);
+    assert.ok(at(/^Sleep is back \(pmset -a disablesleep 0\)\.$/m) >= 0, gone.stdout);
+    assert.ok(at(/^Sleep is back/m) < at(/^The rule .* is removed/m), "sleep first — while the rule still allows it");
+    assert.ok(at(/^The rule .* is removed/m) < at(/^deleted: versions /m), "both before anything is deleted");
+    assert.ok(at(/^deleted: versions /m) < at(/claude plugin uninstall agent-hub/));
+    assert.doesNotMatch(gone.stdout, STILL);
+    assert.doesNotMatch(lastLine(gone), /sleep|rule/i, "a clean removal ends with the usual hints");
+    const j = readFileSync(join(w.hub, "journal.jsonl"), "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l)).find((e) => e.op === "awake-revoke");
+    assert.deepEqual({ type: j?.type, removed: j?.removed, sleepReturned: j?.sleepReturned, stillOn: j?.stillOn }, { type: "hub-update-cli", removed: true, sleepReturned: true, stillOn: false });
+
+    // 2. the flag was set by hand, there is no rule: nothing to remove, nothing the hub can switch — the line with the command
+    a.set({ flag: true, granted: false });
+    const hand = hubDir("hub-hand");
+    const handPlan = un(hand);
+    assert.doesNotMatch(handPlan.stdout, /return sleep|remove the rule/);
+    const byHand = un(hand, ["--apply"]);
+    assert.equal(byHand.status, 1, "the hub is removed, the Mac is not back to normal: not a clean exit\n" + byHand.stderr + byHand.stdout);
+    assert.match(byHand.stdout, STILL);
+    assert.doesNotMatch(byHand.stdout, /Sleep is back/);
+    assert.ok(byHand.stdout.search(STILL) < byHand.stdout.search(/^deleted: versions /m), "said before anything is deleted");
+    assert.match(lastLine(byHand), STILL, "and once more as the closing line, after the hints");
+    assert.ok(!existsSync(join(hand, "Versions")), "the removal itself went through");
+    assert.equal(a.read().flag, true, "the hub did not switch what it has no rights to");
+    assert.ok(!existsSync(a.rule), "no rule appears on the way");
+    assert.match(un(hubDir("hub-hand-ru"), ["--apply"], { AGENTHUB_SYSTEM_LANG: "ru" }).stdout, /^Сон всё ещё отключён \(SleepDisabled 1\): .* Вернуть сон: sudo pmset -a disablesleep 0$/m);
+
+    // 3. the rule is there, but the command is refused: the rule goes, the flag is re-read — still on, the same line
+    a.grant();
+    a.set({ flag: true, granted: true, fail: true });
+    const refused = un(hubDir("hub-refused"), ["--apply"]);
+    assert.equal(refused.status, 1, refused.stderr + refused.stdout);
+    assert.ok(!existsSync(a.rule));
+    assert.match(refused.stdout, /^The rule .* is removed/m);
+    assert.match(refused.stdout, STILL);
+    assert.doesNotMatch(refused.stdout, /Sleep is back/);
+    assert.match(lastLine(refused), STILL);
+    assert.equal(refused.stdout.match(/The rule .* is removed/g).length, 1, "what went well is not repeated at the end");
+    assert.equal(a.read().flag, true);
+    // …and when sudo itself refuses it
+    a.grant();
+    a.set({ flag: true, granted: true, refuse: true });
+    const sudoNo = un(hubDir("hub-sudo-no"), ["--apply"]);
+    assert.equal(sudoNo.status, 1, sudoNo.stderr + sudoNo.stdout);
+    assert.match(lastLine(sudoNo), STILL);
+    assert.equal(a.read().flag, true);
+
+    // 3a. the rule cannot be removed (sudo said no, Ctrl-C at its prompt): sleep is returned all the same, the closing
+    // line names the file and the command, exit 1
+    if (process.getuid() !== 0) {
+      a.grant();
+      a.set({ flag: true, granted: true });
+      chmodSync(a.dir, 0o555);
+      const kept = un(hubDir("hub-kept"), ["--apply"]);
+      chmodSync(a.dir, 0o755);
+      assert.equal(kept.status, 1, kept.stderr + kept.stdout);
+      assert.match(kept.stdout, /^Sleep is back/m);
+      assert.equal(a.read().flag, false);
+      assert.ok(existsSync(a.rule));
+      assert.match(lastLine(kept), KEPT);
+      assert.ok(lastLine(kept).includes(`sudo rm ${a.rule}`));
+      assert.doesNotMatch(kept.stdout, STILL);
+
+      // 3b. the deletion itself breaks: sleep and the rule were dealt with before it, so they are not skipped
+      a.set({ flag: true, granted: true });
+      const stuck = hubDir("hub-stuck");
+      mkdirSync(join(stuck, "Versions", "0.1.0"), { recursive: true });
+      chmodSync(join(stuck, "Versions"), 0o555);
+      const thrown = un(stuck, ["--apply"]);
+      chmodSync(join(stuck, "Versions"), 0o755);
+      assert.notEqual(thrown.status, 0, thrown.stdout);
+      assert.ok(existsSync(join(stuck, "Versions", "0.1.0")), "the deletion did fail");
+      assert.equal(a.read().flag, false, "sleep was returned before that");
+      assert.ok(!existsSync(a.rule), "and the rule removed");
+    }
+
+    // 4. the rule alone (the flag is off): removed, also with --purge — and the deleted directory is not brought back by a journal line
+    a.grant();
+    a.set({ granted: true });
+    const purged = hubDir("hub-purge");
+    const purge = un(purged, ["--apply", "--purge"]);
+    assert.equal(purge.status, 0, purge.stderr + purge.stdout);
+    assert.ok(!existsSync(a.rule));
+    assert.match(purge.stdout, /^The rule .* is removed/m);
+    assert.doesNotMatch(purge.stdout, /Sleep is/);
+    assert.ok(!existsSync(purged));
+
+    // 5. nothing of ours on the machine: not a word about sleep
+    a.set();
+    const clean = un(hubDir("hub-clean"), ["--apply"]);
+    assert.equal(clean.status, 0, clean.stderr + clean.stdout);
+    assert.doesNotMatch(clean.stdout, /sleep|sudoers|awake/i);
+    // the flag double without the sudoers double: sleep is still returned (the daemon's rights are all it takes)
+    a.set({ flag: true, granted: true });
+    const half = un(hubDir("hub-half"), ["--apply"], { AGENTHUB_TEST_SUDOERS_DIR: "" });
+    assert.match(half.stdout, /^Sleep is back/m);
+    assert.equal(a.read().flag, false);
+  } finally {
+    w.stop();
+    cleanup(w.root);
+  }
+});
+
+// ---------- the y/N question on a real terminal ----------
+
+// expect(1) gives the CLI a real terminal: argv — what is typed before the question, what is typed after it, the text
+// of the question, the command. The exit code is the command's.
+const ASK_ON_TTY = `
+set timeout 30
+set early [lindex $argv 0]
+set late [lindex $argv 1]
+set question [lindex $argv 2]
+spawn -noecho {*}[lrange $argv 3 end]
+if {$early ne ""} { send -- $early }
+expect {
+  -ex $question {}
+  timeout { exit 98 }
+  eof { exit 97 }
+}
+after 200
+send -- $late
+expect {
+  eof {}
+  timeout { exit 98 }
+}
+lassign [wait] pid spawnid oserr status
+exit $status
+`;
+
+test("the y/N question on a real terminal: what was typed before it appeared is dropped — a stray Enter does not decline, a stray \"y\" does not accept, not even one without Enter", { skip: !existsSync("/usr/bin/expect") && "needs /usr/bin/expect for a terminal" }, () => {
+  const root = tempHome("ah-tty-");
+  try {
+    const script = join(root, "ask.exp");
+    writeFileSync(script, ASK_ON_TTY);
+    // uninstall of a test directory asks exactly one question and deletes Versions/ on "y"
+    const ask = (name, early, late) => {
+      const dir = join(root, name);
+      mkdirSync(join(dir, "Versions", "0.1.0"), { recursive: true, mode: 0o700 });
+      writeFileSync(join(dir, "config.json"), "{}\n");
+      const r = spawnSync("/usr/bin/expect", [script, early, late, "[y/N] ", process.execPath, join(DAEMON_DIR, "bin", "agenthub"), "uninstall", "--no-launchd", "--apply"], { encoding: "utf8", env: { ...env0(), AGENTHUB_HOME: dir }, timeout: 90_000 });
+      return { status: r.status, out: r.stdout, deleted: !existsSync(join(dir, "Versions")) };
+    };
+    // typed at the question: the plain case still works
+    const yes = ask("yes", "", "y\r");
+    assert.deepEqual([yes.status, yes.deleted], [0, true], yes.out);
+    const no = ask("no", "", "n\r");
+    assert.deepEqual([no.status, no.deleted], [1, false], no.out);
+    // "y" + Enter typed ahead must not accept: the answer given at the question counts
+    const strayYes = ask("stray-yes", "y\r", "n\r");
+    assert.deepEqual([strayYes.status, strayYes.deleted], [1, false], strayYes.out);
+    assert.match(strayYes.out, /Cancelled — nothing deleted/);
+    // an Enter typed ahead must not decline
+    const strayEnter = ask("stray-enter", "\r", "y\r");
+    assert.deepEqual([strayEnter.status, strayEnter.deleted], [0, true], strayEnter.out);
+    // a "y" left on the line without Enter must not become the start of the answer
+    const half = ask("half", "y", "\r");
+    assert.deepEqual([half.status, half.deleted], [1, false], half.out);
+  } finally {
+    cleanup(root);
   }
 });

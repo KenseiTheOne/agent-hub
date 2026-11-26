@@ -3,7 +3,7 @@ import AppKit
 import SwiftUI
 
 /// The menu bar icon: a cop bot in a peaked cap (template), the emblem on the cap is the state color, when paused a "‖"
-/// sign on the right, and next to it as text — "TEST" for a test copy and the number waiting (`MenuBarLook`). The icon tooltip is the state
+/// sign on the right, while "stay awake with the lid closed" is on a cup mark after it, and next to it as text — "TEST" for a test copy and the number waiting (`MenuBarLook`). The icon tooltip is the state
 /// (with a blocker and when paused) and the "TEST · <dir>" label for a test copy.
 struct MenuBarLabel: View {
     let store: HubStore
@@ -19,10 +19,12 @@ struct MenuBarLabel: View {
         let waiting = max(store.waitingCount, store.visibleCards.count)
         let idle = store.state?.idle
         let look = MenuBarLook.make(status: store.worstStatus, waiting: waiting, live: store.connection.isLive, estop: store.estop, idle: idle)
+        // "stay awake with the lid closed" is on: a mark next to the bot, whatever the look
+        let awake = store.awake?.marksIcon ?? false
         let tip = look.tooltip(status: store.worstStatus, waiting: waiting, testMark: store.testMark, idle: idle,
-                               culprit: MenuBarLook.culprit(store.state?.plugins ?? []))
+                               culprit: MenuBarLook.culprit(store.state?.plugins ?? []), awake: awake)
         HStack(spacing: 3) {
-            Image(nsImage: StatusImages.menuBarIcon(look: look, dark: scheme == .dark))
+            Image(nsImage: StatusImages.menuBarIcon(look: look, dark: scheme == .dark, awake: awake))
             // "TEST" for a test copy — right in the menu bar: next to the real one it must not look the same
             if let t = look.labelText(test: store.testMark != nil) { Text(t).monospacedDigit() }
         }
@@ -541,6 +543,8 @@ struct PopoverView: View {
             PauseHubButton(store: store)
             RestartHubButton(store: store)
         }
+        // a row of its own when the daemon offers the switch; otherwise nothing, the stack doesn't space an empty view
+        AwakeToggleRow(store: store)
         }
         .labelStyle(.titleAndIcon)
     }

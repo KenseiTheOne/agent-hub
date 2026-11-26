@@ -171,6 +171,8 @@ export class Core {
     // A regular shutdown is in progress (SIGTERM, /shutdown — bin/agenthubd, lib/lifecycle.mjs): the hub-update service does not
     // start switching if the shutdown arrived while the app was leaving.
     this.shuttingDown = false;
+    // POST /shutdown was journaled and announced (markShutdown) — once per daemon.
+    this.shutdownAsked = false;
   }
 
   // ---------- hub update (lib/services/hub-update.mjs) ----------
@@ -226,10 +228,15 @@ export class Core {
   }
   // POST /shutdown (app only): the app quits and asks the daemon to exit cleanly (code 0 — launchd with
   // KeepAlive.SuccessfulExit=false will not restart it). Also recorded in the audit journal.
+  // hub.stopping tells the services that this exit is final — nothing will bring the daemon back (the awake service
+  // returns sleep on it). The request is journaled and announced once, also when a stop is already under way: at a logout
+  // launchd's SIGTERM can reach the daemon before the app's request does. Not during a hub update (beginUpdate): the
+  // daemon comes back by itself and the request changes nothing.
   markShutdown(peerInfo) {
     const first = !this.stopping;
     this.stopping = true;
-    if (first) {
+    if (!this.shutdownAsked && !this.updating) {
+      this.shutdownAsked = true;
       this.journal.write({ type: "shutdown-requested", peer: peerInfo?.class ?? null, pid: peerInfo?.pid ?? null });
       this.emit({ type: "hub.stopping", reason: "shutdown" });
     }
@@ -238,6 +245,9 @@ export class Core {
   runShutdown(reason = "shutdown") {
     // the app is leaving for a hub update and asks for /shutdown out of habit: the daemon will restart itself
     if (reason === "shutdown" && this.updating) return;
+    // a stop a service asked for ("login-off": launch at login is off and the app never showed up) is as final as the
+    // app's own quit — announced the same way; "shutdown" was announced by markShutdown, "update" is a restart
+    if (reason !== "shutdown" && reason !== "update") this.emit({ type: "hub.stopping", reason });
     const h = this.shutdownHandler;
     if (typeof h === "function") Promise.resolve().then(() => h(reason)).catch(() => {});
   }

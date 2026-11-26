@@ -176,7 +176,7 @@ extension HubStore {
             if managerVisible { Task { [weak self] in await self?.loadRegistry() } }
         case .raised(let key, _, _): activeEvents.insert(key)
         case .cleared(let key, _): activeEvents.remove(key)
-        case .action, .estop:
+        case .action, .estop, .awake:
             if journalVisible { Task { [weak self] in await self?.loadJournal() } }
             if case .estop(true) = hub { cards = []; cardsChangedByEvent() }
         case .pushNotify(let n):

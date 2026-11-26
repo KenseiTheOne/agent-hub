@@ -12,7 +12,7 @@
 // platform — a parameter for tests (process.platform by default).
 
 import { execFile, spawn } from "node:child_process";
-import { closeSync, lstatSync, openSync, readFileSync, readSync, realpathSync } from "node:fs";
+import { closeSync, lstatSync, openSync, readFileSync, readSync, realpathSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { homedir, userInfo } from "node:os";
 import { dirname, isAbsolute, join, posix, resolve, sep, win32 } from "node:path";
 import { msg } from "./i18n.mjs";
@@ -57,6 +57,14 @@ export function accountHome() {
 // tools run with a fake HOME rely on it to stay out of the real directory.
 export function isLiveStateDir(dir, { env = process.env, platform = PLATFORM } = {}) {
   if (samePath(dir, liveStateDir({ env, platform }), { platform })) return true;
+  const real = accountHome();
+  return Boolean(real) && samePath(dir, liveStateDir({ env, home: real, platform }), { platform });
+}
+
+// Whether dir is the live state directory of the account this process runs as — by the user database only, never by
+// $HOME. What is machine-wide (the sleep flag and the sudoers rule of the awake service) is touched from there alone: a
+// fake HOME (install tests, tools) makes a directory look live to liveStateDir, and it must not reach the real machine.
+export function isAccountLiveDir(dir, { env = process.env, platform = PLATFORM } = {}) {
   const real = accountHome();
   return Boolean(real) && samePath(dir, liveStateDir({ env, home: real, platform }), { platform });
 }
@@ -307,6 +315,79 @@ export function osInfoCommands({ platform = PLATFORM } = {}) {
   };
 }
 
+// ---------- staying awake with the lid closed (awake service, `agenthub awake`) ----------
+// `pmset -a disablesleep 1` is the one switch that keeps a MacBook running with the lid closed (caffeinate and power
+// assertions do not). It needs root, and no hub code runs as root: a sudoers rule for exactly these two commands
+// (awakeSudoersRule, installed by `agenthub setup` / `agenthub awake grant`) lets the daemon run them through `sudo -n`.
+const PMSET = "/usr/bin/pmset";
+const SUDO = "/usr/bin/sudo";
+const disableSleep = (on) => [PMSET, "-a", "disablesleep", on ? "1" : "0"];
+
+// Commands of the "awake" switch. null — the platform has no such switch.
+export function awakeCommands({ platform = PLATFORM } = {}) {
+  if (platform !== "darwin") return null;
+  return {
+    flag: [PMSET, "-g"],
+    battery: [PMSET, "-g", "batt"],
+    lid: ["/usr/sbin/ioreg", "-r", "-k", "AppleClamshellState", "-d", "1"],
+    // The probe behind `granted`: exit code 0 — sudo would run the switch for this user without a password; it asks nothing
+    // and runs nothing. -k: cached credentials are ignored. Without it the answer is also 0 for a few minutes after any
+    // `sudo` in the same terminal (so the check right after `sudo install` of the rule could never fail). The probe alone
+    // still is not "our rule is in place" — an unrelated NOPASSWD entry answers 0 too — so it is asked only when the rule
+    // file exists (awakeControl.granted).
+    granted: [SUDO, "-n", "-k", "-l", ...disableSleep(true)],
+    set: (on) => [SUDO, "-n", ...disableSleep(on)],
+  };
+}
+
+// `pmset -g` → the system flag: true | false; null — no such line in the output.
+export function parseSleepDisabled(text) {
+  const m = /^\s*SleepDisabled\s+([01])\s*$/m.exec(String(text ?? ""));
+  return m ? m[1] === "1" : null;
+}
+
+// `pmset -g batt` → { onBattery, charge }: onBattery — true on the battery, false on a charger, null — unknown (a UPS, no
+// such line); charge — percent of the internal battery, null — the Mac has none.
+export function parseBattery(text) {
+  const s = String(text ?? "");
+  const src = /Now drawing from '([^']*)'/.exec(s)?.[1] ?? null;
+  const line = s.split("\n").find((l) => l.includes("InternalBattery")) ?? "";
+  const pct = /\b(\d{1,3})%/.exec(line);
+  const charge = pct && Number(pct[1]) <= 100 ? Number(pct[1]) : null;
+  return { onBattery: src === "Battery Power" ? true : src === "AC Power" ? false : null, charge };
+}
+
+// `ioreg -r -k AppleClamshellState -d 1` → whether this Mac has a lid: only a laptop's power root domain has the key.
+export function parseHasLid(text) {
+  return /"AppleClamshellState"\s*=/.test(String(text ?? ""));
+}
+
+// The sudoers rule file. One fixed name: the flag is machine-wide, and the rule belongs to whoever installed the hub.
+export const AWAKE_SUDOERS = Object.freeze({ dir: "/etc/sudoers.d", name: "agenthub-sleep" });
+
+// The rule text for a short user name; null — the name is not a plain account name. The name goes into a file sudo
+// reads as root, so anything that could add a second rule or change the meaning of this one is refused, not escaped:
+// separators and specials (spaces, commas, "%", "#", "+", "!", "=", ":", quotes, a leading "-" or "."), and a name made
+// of capitals, digits and "_" only — sudoers reads such a word as an alias, and "ALL" as every user. Letters of both
+// cases, digits, "_", "-" and a non-leading "." stay: first.last, First.Last and 1user are real macOS short names.
+// visudo checks the finished file after this (awakeSudoersCommands.check).
+export function awakeSudoersRule(user) {
+  if (typeof user !== "string" || user.length > 32 || !/^[A-Za-z0-9_][A-Za-z0-9_.-]*$/.test(user) || /^[A-Z][A-Z0-9_]*$/.test(user)) return null;
+  return `# Agent Hub: lets ${user} keep this Mac awake with the lid closed (agenthub awake revoke removes this file)\n${user} ALL=(root) NOPASSWD: ${disableSleep(false).join(" ")}, ${disableSleep(true).join(" ")}\n`;
+}
+
+// Installing and removing the rule (lib/hub-update/cli.mjs). check needs no root and writes nothing: a rule file with a
+// syntax error in sudoers.d breaks sudo altogether, so the text is checked before it gets there. install and remove ask
+// for the administrator password in the terminal (plain sudo, no -n).
+export function awakeSudoersCommands(tmpFile, target, { platform = PLATFORM } = {}) {
+  if (platform !== "darwin") return null;
+  return {
+    check: ["/usr/sbin/visudo", "-cf", tmpFile],
+    install: [SUDO, "/usr/bin/install", "-m", "0440", "-o", "root", "-g", "wheel", tmpFile, target],
+    remove: [SUDO, "/bin/rm", "-f", target],
+  };
+}
+
 // Process table without the peercred addon: ps (POSIX). null — the platform doesn't provide it (Windows).
 export function psCommand({ platform = PLATFORM } = {}) {
   return isWindows(platform) ? null : "/bin/ps";
@@ -438,8 +519,8 @@ export function bundleVerifyCommand(bundlePath, requirement, { platform = PLATFO
 
 function run(argv, timeoutMs) {
   return new Promise((done) => {
-    execFile(argv[0], argv.slice(1), { timeout: timeoutMs, maxBuffer: 4 * 1024 * 1024 }, (err, stdout) => {
-      done({ code: err ? (typeof err.code === "number" ? err.code : -1) : 0, stdout: String(stdout ?? ""), timedOut: Boolean(err?.killed) });
+    execFile(argv[0], argv.slice(1), { timeout: timeoutMs, maxBuffer: 4 * 1024 * 1024 }, (err, stdout, stderr) => {
+      done({ code: err ? (typeof err.code === "number" ? err.code : -1) : 0, stdout: String(stdout ?? ""), stderr: String(stderr ?? ""), timedOut: Boolean(err?.killed) });
     });
   });
 }
@@ -504,4 +585,131 @@ export function appControl({ platform = PLATFORM, testMode = false, test = {}, r
       return null;
     },
   };
+}
+
+// Platform adapter for the awake service and the CLI: read the flag, the rights, the lid and the battery; switch the flag.
+// The flag and the sudoers rule are machine-wide, so a test directory (testMode) never runs the system commands: with
+// the double testFile — a JSON file {flag, granted, lid, charge, onBattery} that is read and written instead; without
+// it — nothing at all (mode "off": no lid, nothing granted). real (AGENTHUB_AWAKE_REAL=1) turns the system commands on
+// in a test directory — for a check on a stand.
+// More fields of the double, for the cases a healthy machine does not show: refuse: true — sudo refuses the switch
+// although the rule looks granted; fail: true — the command itself fails; blind: true — the flag cannot be read;
+// lid: null — the lid cannot be read; inert: true — a rule installed by `agenthub awake grant` does not work.
+//
+// ruleFile — the sudoers rule file: `granted` is never true without it, and no sudo is run to find that out. By default
+// the system file; with the double — only when given (the sudoers double directory).
+export function awakeControl({ platform = PLATFORM, testMode = false, testFile = null, real = false, runner = run, ruleFile = undefined } = {}) {
+  const double = testMode && typeof testFile === "string" && testFile ? testFile : null;
+  const cmds = !double && (!testMode || real) ? awakeCommands({ platform }) : null;
+  const rule = typeof ruleFile === "string" && ruleFile ? ruleFile : double ? null : join(AWAKE_SUDOERS.dir, AWAKE_SUDOERS.name);
+  const readDouble = () => {
+    try {
+      const d = JSON.parse(readFileSync(double, "utf8"));
+      return d && typeof d === "object" && !Array.isArray(d) ? d : {};
+    } catch {
+      return {};
+    }
+  };
+  // The rule file as it is now: a signature that changes when the file is replaced; null — no file. The file belongs to
+  // root with mode 0440: its presence is all this process can see, and all it needs.
+  const ruleSig = () => {
+    let sig = "-";
+    if (rule) {
+      try {
+        const st = statSync(rule);
+        sig = `${st.ino}:${st.mtimeMs}:${st.size}`;
+      } catch {
+        return null;
+      }
+    }
+    if (!double) return sig;
+    const d = readDouble();
+    return `${sig}|${d.granted === true}|${d.refuse === true}`;
+  };
+  // sudo refused the switch although the probe had said yes (a rule that names another account, a file sudo does not
+  // read): the probe would say yes again, so the answer stays "not granted" until the rule file changes
+  let refusedSig = null;
+  // a Mac does not grow a lid: asked until the first answer
+  let lid = null;
+  const ctl = {
+    mode: double ? "double" : cmds ? "system" : "off",
+    // → true | false; null — could not be read (the caller keeps what it knew)
+    async lid() {
+      if (double) {
+        const d = readDouble();
+        return d.lid === null ? null : d.lid === true;
+      }
+      if (!cmds) return false;
+      if (lid !== null) return lid;
+      const r = await runner(cmds.lid, 5000);
+      if (r.code !== 0) return null;
+      lid = parseHasLid(r.stdout);
+      return lid;
+    },
+    // the system flag → true | false; null — could not be read
+    async flag({ timeoutMs = 5000 } = {}) {
+      if (double) {
+        const d = readDouble();
+        return d.blind === true ? null : d.flag === true;
+      }
+      if (!cmds) return null;
+      const r = await runner(cmds.flag, timeoutMs);
+      return r.code === 0 ? parseSleepDisabled(r.stdout) === true : null;
+    },
+    // Whether the hub may switch the flag: the rule file is there AND sudo would run the switch without a password AND
+    // sudo has not refused the switch since the file was written. No file — false, and sudo is not run at all.
+    async granted() {
+      if (ctl.mode === "off") return false;
+      const sig = ruleSig();
+      if (sig === null || sig === refusedSig) return false;
+      if (double) return readDouble().granted === true;
+      return (await runner(cmds.granted, 5000)).code === 0;
+    },
+    // → { onBattery, charge }
+    async battery() {
+      if (double) {
+        const d = readDouble();
+        return { onBattery: typeof d.onBattery === "boolean" ? d.onBattery : null, charge: Number.isInteger(d.charge) && d.charge >= 0 && d.charge <= 100 ? d.charge : null };
+      }
+      if (!cmds) return { onBattery: null, charge: null };
+      const r = await runner(cmds.battery, 5000);
+      return r.code === 0 ? parseBattery(r.stdout) : { onBattery: null, charge: null };
+    },
+    // Switch the flag. → { ok, code?, refused? } — whether the command succeeded; the caller reads the flag back.
+    // refused — sudo itself said no (it wants a password: the rule is not there for this account), as opposed to pmset
+    // failing or the command timing out.
+    async set(on, { timeoutMs = 10_000 } = {}) {
+      let out;
+      if (double) {
+        const d = readDouble();
+        if (d.granted !== true || d.refuse === true) out = { ok: false, code: 1, refused: true };
+        else if (d.fail === true) out = { ok: false, code: 1 };
+        else {
+          const tmp = `${double}.tmp-${process.pid}`;
+          writeFileSync(tmp, JSON.stringify({ ...d, flag: Boolean(on) }));
+          renameSync(tmp, double);
+          out = { ok: true, code: 0 };
+        }
+      } else {
+        if (!cmds) return { ok: false, skipped: "test-mode" };
+        const r = await runner(cmds.set(Boolean(on)), timeoutMs);
+        out = { ok: r.code === 0, code: r.code };
+        // sudo's own messages start with its name; a command it did run reports under its own
+        if (r.code !== 0 && !r.timedOut && /^sudo: /m.test(String(r.stderr ?? ""))) out.refused = true;
+      }
+      refusedSig = out.refused ? ruleSig() : out.ok ? null : refusedSig;
+      return out;
+    },
+  };
+  // The double only: the rule was installed into or removed from the sudoers double (`agenthub awake grant | revoke`) —
+  // the two doubles together behave like one machine.
+  if (double) {
+    ctl.setGranted = (granted) => {
+      const tmp = `${double}.tmp-${process.pid}`;
+      writeFileSync(tmp, JSON.stringify({ ...readDouble(), granted: Boolean(granted) }));
+      renameSync(tmp, double);
+    };
+    ctl.inert = () => readDouble().inert === true;
+  }
+  return ctl;
 }

@@ -102,7 +102,7 @@ written only by the app class (the pinned build) via `PUT /settings/notification
 | `sessions` — waiting for an answer / session questions | `session-waiting`, `approvals-paused` | — |
 | `updates` — hub and plugin updates | `plugin-update`, `plugin-own-updated`, `hub-update`, `hub-update-ready`, `hub-update-installed`, `hub-update-failed` | — |
 | `problems` — plugin failures and warnings | `source-broken`, `plugin-error`, `auth-failed` (and plugin rules with `kind="problems"`, for example quota) | a rule with `kind="problems"` or a key from the table (`auth-failed`) |
-| `other` — everything else from plugins | a key without a rule; events of third-party plugins (except community keys with a `kind="plugin"` rule) | a rule without `kind` and without a match in the table |
+| `other` — everything else from plugins | `awake-low-battery`; a key without a rule; events of third-party plugins (except community keys with a `kind="plugin"` rule) | a rule without `kind` and without a match in the table |
 | `plugin:<id>` — **the plugin's own toggle** | — | rules with `kind="plugin"` (and the deprecated `kind="runs"`/`"night"`; a community plugin's `kind="plugin"` labels too): a line in "Settings" with the plugin name, only while the plugin is installed |
 | `security` — **cannot be turned off** | `app-pin-changed`, `app-pin-path-changed`, `app-restart-stopped`, `hub-update-tag-moved`, `hub-update-suspect` | rules with `kind="security"` (tampering signals) |
 
@@ -202,6 +202,9 @@ banner buttons, without them — the plain "Open" button) and answers `POST /pus
 - Time is in the `services.push.timezone` zone (the system one by default: the service checks it on every tick and
   writes `push-timezone` to the journal when it changes); DST transitions follow wall-clock time. The zone is exposed
   in `/state.notifications.quiet.timezone`, the idle threshold in `awayAfterMs`.
+- The battery guard of "keep the Mac awake with the lid closed" (the awake service, `awake.low-battery`) uses the key
+  `awake-low-battery:<charge>:<threshold>` (`other`): "Battery low — sleep is back", the charge and the threshold (always
+  10 — on the battery below 10 % the hub returns sleep) in the text. Every trip is announced (no flapping window); during quiet hours it waits for the digest.
 - A hub update failure that looks like tampering (`commit-mismatch`, `not-on-main`, `untrusted-build`, `verify-failed`,
   `tag-moved`) uses the key `hub-update-suspect:<label>` (`security`); other failures use `hub-update-failed:<label>`
   (`updates`).

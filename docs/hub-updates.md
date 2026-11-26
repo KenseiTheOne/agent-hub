@@ -435,14 +435,36 @@ takes releases only.
      installer does not touch `~/.claude` and prints `claude --plugin-dir "<home>/Versions/current/src/claude-plugin"`
      (per session; the path is in the installation's `peer.hookPaths`) and a pointer to the permanent installation
      through a marketplace ([`claude-plugin/README.md`](../claude-plugin/README.md)).
+   - **the awake question** (a Mac with a lid only, after the hub is up and before the result): "Allow keeping the Mac
+     awake with the lid closed? [y/N]" — "y" installs the sudoers rule `/etc/sudoers.d/agenthub-sleep` (`sudo` asks for
+     the password; [`api.md`](api.md), "Awake"), "n" prints that `agenthub awake grant` does it later. Asked only in a
+     human's terminal and only while there is no working rule (a rule file that `sudo` does not apply is asked about
+     again); a re-run of the installer that finds the install in order, a run with `--yes` or without a terminal prints
+     the one-line hint instead. After the rule is installed it is checked: a rule that is in place but does not work is
+     said so. A refusal, a failed `sudo` or Ctrl-C at its password prompt never fails the install — the interrupt stops
+     `sudo`, the command goes on to its closing text.
+   - **y/N questions** on a terminal drop whatever was typed before the question appeared (an Enter or a "y" pressed
+     during the long build answers nothing); answers piped in are read as they are.
 
 **`agenthub uninstall [--apply] [--purge] [--no-launchd]`** (and `hub uninstall`; from the installer — `--uninstall`):
 `bootout` (the daemon stops normally, SIGTERM; with the job removed, KeepAlive will not bring it up), the plist is
 deleted; wait until the socket stops answering (if it does not — the daemon was started by hand: **nothing is deleted**,
 code 1, a hint with the pid; to delete from under it — `--force`, and even then the socket of an answering daemon is not
-touched); the app (builds of all versions and `appPin.path`) gets SIGTERM: the daemon is gone, supervision will not bring
-it up, and the app itself will not bring up the daemon — there is no job; `Versions/`, `HubUpdate/`, `Builtin/`, build
-logs `logs/hub-update-*` and `builtinPluginsDir` in `config.json` (if it pointed at the deleted copy) are removed.
+touched); **sleep comes back** (below); the app (builds of all versions and `appPin.path`) gets SIGTERM: the daemon is
+gone, supervision will not bring it up, and the app itself will not bring up the daemon — there is no job; `Versions/`,
+`HubUpdate/`, `Builtin/`, build logs `logs/hub-update-*` and `builtinPluginsDir` in `config.json` (if it pointed at the
+deleted copy) are removed.
+**Sleep comes back**: right after the daemon is down and before anything is deleted — so that a failure while deleting
+cannot skip it — the command returns the Mac to normal sleep: a switched-on `disablesleep` flag is turned off first
+(`sudo -n pmset -a disablesleep 0`, possible while the rule is there), then the rule `/etc/sudoers.d/agenthub-sleep` is
+removed (`sudo rm`, may ask for the password; the plan names both steps; Ctrl-C at the prompt counts as "not
+removed", the command goes on), then the flag is read again. If it is still on — set by hand with no rule, or the
+command was refused — the command prints "Sleep is still disabled (SleepDisabled 1) … Return sleep: sudo pmset -a
+disablesleep 0" and does not ask for a password just for that; a rule that could not be removed is named with `sudo rm
+<file>`. In both cases the hub is removed all the same, the line is repeated as the last one, after the closing hints,
+and the exit code is **1** (as with `agenthub awake revoke`): the uninstall is never reported as clean while
+`SleepDisabled` is 1 or the rule is still there. Journal (unless `--purge`) — `hub-update-cli op=awake-revoke`.
+Removing the Homebrew package alone does none of this.
 Settings (`config.json`, `settings.json`), the journal, `Plugins/`, `PluginData/` stay — `--purge` removes them (the
 whole hub directory only if it has a hub marker: `config.json`, `journal.jsonl`, `Versions/` or `HubUpdate/` — and no
 foreign entries at the top level; otherwise refusal, code 2). It prints what is left, how to remove the secrets from the
@@ -453,7 +475,10 @@ the job would stay loaded with a plist pointing at the deleted `Versions/current
 **Test mode.** `--home <dir>` (= `AGENTHUB_HOME`) and `--yes`. launchd from a test directory — only with the
 `AGENTHUB_TEST_LAUNCHCTL` double and a temporary `HOME` (the plist goes into `$HOME/Library/LaunchAgents`; the real home
 directory is refused, `launchdAllowed`); the test job carries `AGENTHUB_HOME` in its environment and this process's
-node. Otherwise — `--no-launchd`. Tests: `daemon/test/hub-install.test.mjs`.
+node. Otherwise — `--no-launchd`. The awake steps (the question, the rule, returning sleep) touch the system only in
+the account's own live directory; in a test directory they go to the doubles `AGENTHUB_TEST_AWAKE_FILE` /
+`AGENTHUB_TEST_SUDOERS_DIR` or do nothing, and those variables are ignored when `AGENTHUB_HOME` names the live
+directory ([`api.md`](api.md), "Awake"). Tests: `daemon/test/hub-install.test.mjs`.
 
 **The path to releases.** Homebrew (§8b) is done: a formula over the release tarball of the same source tree. The
 repository is public: (1) the installer runs as a one-liner

@@ -22,6 +22,14 @@ read by the built-in `agents` and `quota` plugins, and three throwaway local plu
   confirmations decided by the core, a metadata-only journal, and a hub pause that stops every action at once. Services:
   push notifications, answers to sessions (hook), actions and the cmux bridge, the plugin manager, secrets from the
   Keychain, the Claude quota, OAuth connections, hub auto-update.
+- **Keep the Mac awake with the lid closed** — a switch in the app and `agenthub awake on | off` for long agent runs on
+  a closed laptop. It is the system flag `pmset -a disablesleep`, which needs root: the hub switches it through one
+  narrow sudoers rule (`/etc/sudoers.d/agenthub-sleep` — exactly `pmset -a disablesleep 0` and `1` for your account,
+  nothing else), installed once with your password by `agenthub setup`, the installer or `agenthub awake grant`.
+  Without the rule the switch is unavailable. On the battery the hub watches the charge and returns sleep below
+  10 %, with a notification; it never turns the switch back on by itself. Quitting the
+  hub returns sleep too (so does the daemon exiting because launch at login is off); an update or a restart does not
+  touch it. Macs without a lid do not have the switch.
 - **Built-in plugins** that ship with the app: Claude Code sessions (`claude-sessions`), background workflow runs
   (`agents`), the subscription quota (`quota`) and a token spend journal with its API list price equivalent
   (`spend`); for Codex CLI — live sessions (`codex-sessions`), the plan limits (`codex-quota`) and token spend
@@ -63,6 +71,10 @@ clang, macOS 26 SDK — `xcode-select --install`), builds the app from the Homeb
 the built-in plugins, adds the launchd job and starts the hub. It asks for confirmation ("y"); `agenthub setup --plan`
 only shows the plan.
 
+On a laptop the install then asks one more question — whether to allow "keep the Mac awake with the lid closed" (the
+sudoers rule above; `sudo` asks for your password). "n" skips it: the hub works without it, and `agenthub awake grant`
+installs the rule later; `agenthub awake revoke` removes it.
+
 A Homebrew-installed hub does not look at git tags — new versions come from Homebrew:
 
 ```sh
@@ -77,6 +89,11 @@ To uninstall — in this order, since Homebrew knows nothing about the hub's lau
 agenthub uninstall --apply    # --purge also removes settings, the journal and plugin data
 brew uninstall agent-hub
 ```
+
+Uninstalling through `agenthub uninstall` returns sleep and removes the sudoers rule (`sudo` may ask for your
+password); removing the package alone (`brew uninstall` without it) does not — the rule and a switched-on
+`disablesleep` flag stay. If sleep could not be returned or the rule could not be removed, the command says so, prints
+what to run (`sudo pmset -a disablesleep 0`, `sudo rm /etc/sudoers.d/agenthub-sleep`) and exits with code 1.
 
 Homebrew downloads the release tarball from GitHub; no credentials are needed. Details:
 [`docs/hub-updates.md`](docs/hub-updates.md) §8b.
@@ -112,6 +129,9 @@ After that, new versions arrive by tags: "Update" in the hub menu ([`docs/hub-up
 the plan without changing anything — `bash install.sh --plan`. To uninstall — `bash install.sh --uninstall` (settings,
 the journal and plugin data stay; `--purge` removes them too). Confirmation is typing "y"; without a terminal the
 installer refuses.
+
+On a laptop the installer also asks whether to allow "keep the Mac awake with the lid closed" (see Homebrew above: one
+sudoers rule, `sudo` asks for your password, "n" skips it); `--uninstall` returns sleep and removes the rule.
 
 ### Answering sessions from the hub
 
@@ -253,13 +273,16 @@ itself. An optional certificate mode suits those who do not want to re-pin after
 | `agenthub refresh <plugin>` | restart a plugin |
 | `agenthub pause` | hub pause: answers to sessions, launches, stops and plugin actions are off; lift it with "Resume hub" in the app or by deleting the file `<AGENTHUB_HOME>/ESTOP` (old name — `agenthub estop on`) |
 | `agenthub lang` | the hub language: setting and effective value; change it only from the app |
+| `agenthub awake [status [--json]]` | "keep the Mac awake with the lid closed": on or off, whether the rule is installed, the power source, the charge and the 10 % battery threshold |
+| `agenthub awake on \| off` | switch it; refused without the sudoers rule. `on` below 10 % on the battery is returned at once (exit code 1) |
+| `agenthub awake grant \| revoke` | install or remove the sudoers rule `/etc/sudoers.d/agenthub-sleep` (your own Terminal; `sudo` asks for the password). `revoke` returns sleep first. Both work without the daemon |
 | `agenthub restart` | restart the hub daemon: `launchctl kickstart -k` on the hub's launchd job (a job that is not loaded is loaded from `~/Library/LaunchAgents`), then wait until the new daemon answers. Works with a `config.json` the other commands refuse to parse; a daemon that could not read a state file is named. A test directory (`AGENTHUB_HOME`) is refused — its daemon is started by hand. Exit code 0 only when a new daemon answered |
 | `agenthub version [--json]` | this code's version, where it runs from (install, Homebrew package, working folder) and the plugin contract version |
 | `agenthub pin-app <AgentHub.app> [--dry-run]` | pin a build by hand (`scripts/bundle.sh` calls it itself) |
 | `agenthub builtin [status]` | where the hub takes built-in plugins from and whether the `<home>/Builtin` copy is up to date |
 | `agenthub builtin update [--dry-run] [--from <dir>]` | refresh the `<home>/Builtin` copy (after editing built-in plugins) |
 | `agenthub install [--apply] [--no-launchd] [--app-cert-sha1 SHA1] [--registry-pubkey FILE] [--registry-url URL]` | the LaunchAgent, `config.json` and the built-in plugin copy from a working folder; without `--apply` — the plan only |
-| `agenthub uninstall [--apply] [--purge]` | remove the hub: daemon, app, launchd job, versions; `--purge` also removes settings, the journal and plugin data. `agenthub hub uninstall` is the same command |
+| `agenthub uninstall [--apply] [--purge]` | remove the hub: daemon, app, launchd job, versions; returns sleep and removes the awake sudoers rule (exit code 1 if either did not work); `--purge` also removes settings, the journal and plugin data. `agenthub hub uninstall` is the same command |
 | `agenthub plugins install <id>` | install a plugin from the signed registry (a permission window in the terminal; TTY only) |
 | `agenthub plugins install --from <folder>` | a request for an own plugin — a human installs it in the app |
 | `agenthub plugins remove <id> [--purge]` | remove a plugin (`--purge` — with its data) |

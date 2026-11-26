@@ -79,6 +79,8 @@ struct SettingsView: View {
                     }
                 }
                 card { LaunchAtLoginSettings(store: store) }
+                // only when there is a switch at all (a lid, and a daemon that knows about it)
+                if let awake = store.awake, awake.supported { card { AwakeSettings(store: store, info: awake) } }
                 card { NotificationsSettings(store: store, openJournal: openJournal) }.id(Anchor.notifications)
                 card { ConnectionsSettings(store: store) }.id(Anchor.connections)
                 if let h = store.hubUpdate { card { HubUpdateSettings(store: store, info: h) }.id(Anchor.hubUpdate) }
@@ -463,6 +465,32 @@ struct BridgeSettings: View {
     private func sinceText(_ b: BridgeInfo) -> String? {
         guard let s = b.since else { return nil }
         return ISODate.parse(s).map(Fmt.dateTime)
+    }
+}
+
+/// "Stay awake with the lid closed": nothing to set here — the switch itself is in the popover, the panel sidebar and
+/// the icon menu (`AwakeToggleRow`), and the charge below which the daemon brings sleep back is the daemon's own fixed
+/// number. The card says what the mode does (with that number, as the daemon sent it), what the computer runs on now,
+/// and, when the hub has no rights, the command to grant them as text that can be copied (a hint can't).
+struct AwakeSettings: View {
+    let store: HubStore
+    let info: AwakeInfo
+
+    var body: some View {
+        let live = store.connection.isLive
+        VStack(alignment: .leading, spacing: 6) {
+            Text(AwakeRow.title).font(.system(size: 13, weight: .semibold))
+            if live, let now = AwakeText.power(info) {
+                Text(now).font(.system(size: 12)).foregroundStyle(.white.opacity(0.7))
+            }
+            Text(AwakeText.about(threshold: info.threshold))
+                .font(.system(size: 11.5)).foregroundStyle(.white.opacity(0.55)).fixedSize(horizontal: false, vertical: true)
+            if live, !info.granted {
+                Text(info.on ? AwakeText.onWithoutRights(threshold: info.threshold, hub: store.state?.hub) : AwakeText.notGranted(hub: store.state?.hub))
+                    .font(.system(size: 11.5)).foregroundStyle(hexColor(0xFFC56B)).fixedSize(horizontal: false, vertical: true)
+                    .textSelection(.enabled)
+            }
+        }
     }
 }
 

@@ -59,6 +59,9 @@ export function hubDetail(ctx, bare) {
     const same = from?.version === ow[2] && from.from === ow[2];
     return t(ctx.lang?.() || "ru", "own.updated.detail", { title: ownTitle(ctx, ow[1]), version: ow[2], same });
   }
+  // "Charge 7% — below the 10% threshold…": both numbers are in the key itself (awake-low-battery:<charge>:<threshold>)
+  const lb = /^awake-low-battery:(\d{1,3}):(\d{1,3})$/.exec(bare);
+  if (lb) return t(ctx.lang?.() || "ru", "awake.low-battery.detail", { charge: Number(lb[1]), threshold: Number(lb[2]) });
   const hu = hubUpdateDetail(ctx, bare);
   if (hu !== undefined) return hu;
   if (bare === "app-restart-stopped") {
@@ -388,6 +391,15 @@ export async function start(ctx) {
     engine?.cleared({ plugin: HUB_SOURCE, key: crashKey });
   };
   ctx.on("app.restart-stopped", onCrash);
+  // The battery guard returned sleep (awake service): raise and clear right away — every trip is announced once.
+  const pct = (v) => Number.isInteger(v) && v >= 0 && v <= 100;
+  const onLowBattery = (ev) => {
+    if (!pct(ev?.charge) || !pct(ev?.threshold)) return;
+    const key = `${HUB_SOURCE}:awake-low-battery:${ev.charge}:${ev.threshold}`;
+    engine?.raised({ plugin: HUB_SOURCE, key, status: "block" });
+    engine?.cleared({ plugin: HUB_SOURCE, key });
+  };
+  ctx.on("awake.low-battery", onLowBattery);
   unsubscribe = () => {
     ctx.off("settings.changed", onSettings);
     ctx.off("hub-update.tag-moved", onHubMoved);
@@ -396,6 +408,7 @@ export async function start(ctx) {
     ctx.off("hub-update.installed", onHubInstalled);
     ctx.off("hub-update.failed", onHubFailed);
     ctx.off("app.restart-stopped", onCrash);
+    ctx.off("awake.low-battery", onLowBattery);
     ctx.off("plugins.update-available", onUpdate);
     ctx.off("plugins.own-unexpected", onOwnUnexpected);
     ctx.off("plugins.own-updated", onOwnUpdated);

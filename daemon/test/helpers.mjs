@@ -19,6 +19,19 @@ export const TEST_DIR = dirname(fileURLToPath(import.meta.url));
 export const FIXTURES = join(TEST_DIR, "fixtures");
 
 export const IS_DARWIN = process.platform === "darwin";
+
+// The awake switches of a developer's shell must never reach a test: with AGENTHUB_AWAKE_REAL=1 exported, a daemon or a
+// CLI started from a test would run sudo and pmset on this very machine, and the two doubles would point a test at
+// somebody else's files. They are removed from this process when the helpers load — every environment built from
+// process.env afterwards is clean — and once more by name in the helpers that build an environment for the CLI, so the
+// rule does not hang on the order of imports. A test that needs a double names it itself, after the scrub.
+export const AWAKE_ENV = Object.freeze(["AGENTHUB_AWAKE_REAL", "AGENTHUB_TEST_AWAKE_FILE", "AGENTHUB_TEST_SUDOERS_DIR"]);
+// → the same object, without the three variables
+export function scrubAwakeEnv(env) {
+  for (const k of AWAKE_ENV) delete env[k];
+  return env;
+}
+scrubAwakeEnv(process.env);
 // File modes (0600/0700) exist only on POSIX; on Windows access is decided by ACLs.
 export const FILE_MODES = usesFileModes();
 

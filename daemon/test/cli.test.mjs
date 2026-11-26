@@ -9,12 +9,12 @@ import { join } from "node:path";
 import { DAEMON_DIR } from "../lib/config.mjs";
 import { plistXml, localAppRequirement, LABEL } from "../lib/launchd.mjs";
 import { generateKeyPair } from "../lib/registry/minisign.mjs";
-import { cleanup, curl, FILE_MODES, onlyDarwin, tempHome, waitFor, withRepoPlist, writePlugin } from "./helpers.mjs";
+import { cleanup, curl, FILE_MODES, onlyDarwin, scrubAwakeEnv, tempHome, waitFor, withRepoPlist, writePlugin } from "./helpers.mjs";
 
 const BIN = join(DAEMON_DIR, "bin");
 
 function envFor(home, plugins) {
-  const e = { ...process.env, AGENTHUB_HOME: home, AGENTHUB_BUILTIN_PLUGINS: plugins, AGENTHUB_SERVICES: "none", AGENTHUB_TEST_EXEC_LOG: join(home, "exec.log") };
+  const e = scrubAwakeEnv({ ...process.env, AGENTHUB_HOME: home, AGENTHUB_BUILTIN_PLUGINS: plugins, AGENTHUB_SERVICES: "none", AGENTHUB_TEST_EXEC_LOG: join(home, "exec.log") });
   delete e.NODE_OPTIONS;
   return e;
 }
@@ -138,7 +138,7 @@ test("install --apply: the log directory from the plist is created before bootst
       const launchctl = join(fakeHome, "launchctl");
       // launchctl double: like the real launchd, the job won't start without a directory for StandardErrorPath (78)
       writeFileSync(launchctl, `#!/bin/sh\necho "$*" >> '${calls}'\nif [ "$1" = bootstrap ] && [ ! -d '${logs}' ]; then exit 78; fi\nexit 0\n`, { mode: 0o755 });
-      const env = { ...process.env, HOME: fakeHome, AGENTHUB_TEST_LAUNCHCTL: launchctl, AGENTHUB_INSTALL_WAIT_MS: "400", AGENTHUB_SERVICES: "none" };
+      const env = scrubAwakeEnv({ ...process.env, HOME: fakeHome, AGENTHUB_TEST_LAUNCHCTL: launchctl, AGENTHUB_INSTALL_WAIT_MS: "400", AGENTHUB_SERVICES: "none" });
       delete env.NODE_OPTIONS;
       delete env.AGENTHUB_HOME;
       const r = await run([join(BIN, "agenthub"), "install", "--apply"], env);

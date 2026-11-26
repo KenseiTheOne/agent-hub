@@ -232,6 +232,7 @@ Snapshot:
                     {"source":"plugin:builder","kind":"needs-on","text":"Build at 04:30 — needs the Mac on","target":"plugin:builder","plugin":"Builder","trusted":true},
                     {"source":"sessions","kind":"waiting","text":"1 session is waiting for an answer: my-session — you can answer after turning the Mac back on","target":"sessions"}],
            "checked":["Mail","Updates in progress"]},
+  "awake": {"supported":true,"granted":true,"on":false,"onBattery":false,"charge":80,"threshold":10},   // keep the Mac awake with the lid closed
   "bridge": {"online":false,"since":null,"version":null,"command":"/…/agent-hub/bridge/agenthub-bridge","home":"/tmp/ahl","defaultHome":false},
   "pluginUpdates": {"enabled":true,"setting":true,"config":true,"configured":true,
                     "checkedAt":"2026-11-05T21:05:51.676Z","nextCheckAt":"2026-11-06T03:21:40.000Z","error":null,
@@ -298,13 +299,22 @@ with `reason` `off` or `requires` (off wins over requires). A plugin held by `re
 missing path appears (the core watches it; at the latest on the next safety rescan, `plugins.rescanIntervalMs`), and is
 held again — stopped, its section gone — when the path disappears. Its files, `PluginData` and settings stay. Both
 lists change with the `plugins.held` event. An older daemon has neither field.
-Sections of services: `pluginUpdates`, `ownPlugins`, `registryKeys`, `hubUpdate`, `idle`, `connections` and `bridge` are
+Sections of services: `pluginUpdates`, `ownPlugins`, `registryKeys`, `hubUpdate`, `idle`, `awake`, `connections` and `bridge` are
 each filled by its service (`ctx.provideState`, [`extension-points.md`](extension-points.md)) and are `null` without it;
 the service also adds its fields to `launchAtLogin` (`launchAgent`) and `notifications` (`channels`). A service or an
 approved extension may register a section of its own: it comes after `hook`, so a client must ignore keys it does not
 know.
 `hubUpdate` — updating the hub itself (the hub-update service, section "Hub updates" below and
 [`hub-updates.md`](hub-updates.md); `null` — no such service).
+`awake` — **keep the Mac awake with the lid closed** (the awake service, section "Awake" below; `null` — no such
+service): `supported` — this Mac has a lid and the daemon may look at the system (`false` on a desktop Mac and in a
+test directory without a double: then `granted` and `on` are `false`, `onBattery` and `charge` are `null`); `granted` —
+the hub can switch: the rule file `/etc/sudoers.d/agenthub-sleep` is in place, `sudo` would run the switch for this
+account without a password, and it has not refused a switch since the file last changed (a password-free `sudo` without
+the file does not count); `on` — the system flag `SleepDisabled` as it is now, whoever set it;
+`onBattery` — the power source (`null` — unknown); `charge` — percent (`null` — unknown); `threshold` — the charge
+below which the hub returns sleep on the battery: always `10`, one fixed value, not a setting (it is in the section so
+that the app and the CLI print the number from one place). On every change of the section — the `awake` event.
 `idle` — **can the computer be shut down** (the idle service, `daemon/lib/idle.mjs`; `null` — no such service): one daemon
 answer for the popover, the menu bar icon and future notifications; on a change — the `idle.verdict` event. `verdict`:
 `quiet` — nothing is running and all participants answered; `quiet-needs-on` — quiet, but someone will need the computer
@@ -485,7 +495,7 @@ always below the new instance's start, so after a daemon restart the client gets
 | `hook.card` / `hook.card.removed` / `hook.paused` | session answer cards, metadata only ([`hook.md`](hook.md)) |
 | `app-pin.changed` | `{appPin: <as in /state>, old: "<fingerprint>"}` — `requirements.app` changed (a build was re-pinned) |
 | `app-pin.path-changed` | `{appPin: <as in /state, with path>, old: "<previous path>"\|null}` — `appPin.path` changed with the same requirement (the bundle the daemon launches); connections are not dropped |
-| `hub.stopping` | `{reason: "shutdown"}` — the daemon is stopping on `POST /shutdown` (the app is quitting); connections close next |
+| `hub.stopping` | `{reason: "shutdown" \| "login-off"}` — a final exit of the daemon, nothing will start it again: `shutdown` — on `POST /shutdown` (the app is quitting; sent once, also when a SIGTERM stop had already begun), `login-off` — launch at login is off and the app did not appear; connections close next |
 | `app.restart-stopped` | `{restarts, windowMs}` — the app keeps crashing, supervision (the app service) stopped restarting it; the push service → a notification |
 | `settings.changed` | `{lang: {setting, effective, system, locales}}` — the hub language changed; `{checkPluginUpdates: bool}` — the "Check for plugin updates" switch; `{notifications: <as in /state>}` — "Settings → Notifications"; `{builtinPlugins: <as in /state>}` — a built-in plugin was turned on or off |
 | `plugins.held` | `{builtinPlugins, heldPlugins}` (as in `/state`) — a scan held a plugin back or let it run: a built-in was turned off or on, a declared requirement disappeared or appeared |
@@ -497,6 +507,8 @@ always below the new instance's start, so after a daemon restart the client gets
 | `hub-update.ready` | `{label, op, waiting, notify}` — the version is built and verified, but cards are waiting: restart only via `POST /hub-update/switch`. `notify: true` — the first time for this version (`HubUpdate/check.json → readyNotified`, only `op: install`): push "A new Agent Hub version is built — waiting for restart" (`@hub:hub-update-ready:<label>`) |
 | `hub-update.tag-moved` | `{version, tag, old, new}` — the tag of the version the hub would offer moved to another commit; push "Agent Hub release tag moved" (immediately, during quiet hours, banner bypassing the shell) |
 | `connections.changed` | `{connections: <as in /state>}` — an OAuth connection changed state: sign-in started, completed, cancelled, expired, "Disconnect", a new MCP call (`calls24h`, `nextAt`, `why`); no tokens (section "Connections") |
+| `awake` | `{awake: <as in /state>}` — the section changed: the switch, the rule, the power source or the charge |
+| `awake.low-battery` | `{charge, threshold}` — the battery guard returned sleep (the awake service); the push service → a notification "Battery low — sleep is back" |
 | `idle.verdict` | `{idle: <as in /state>}` — the "can I shut down" verdict, its lines or "checked" changed (the idle service; recomputed on any bus event, at most once per tick) |
 | `action.started` | `{action, plugin, actionId}` — a plugin action started running; the end is the `action` event |
 | `plugins.busy` | `{busy: [{id, op: "install"\|"update", title, version, since}]}` — a plugin installation / update started or ended (downloading and checking the archive, writing files) |
@@ -1067,6 +1079,89 @@ writes into the file while the daemon runs approves nothing (it can only revoke)
 start — the same limit as for own-plugin consents and the app pin. `AGENTHUB_TEST_EXTENSIONS=1` with `AGENTHUB_HOME` (not
 the live directory) approves every file automatically (`testAutoApprove: true`, `autoApproved: true`) — tests only.
 
+### Awake — `GET /awake`, `POST /awake` (app, cli)
+"Keep the Mac awake with the lid closed" (the `awake` service, `daemon/lib/services/awake.mjs`; system commands —
+`daemon/lib/platform.mjs`). The switch is the system flag `pmset -a disablesleep 0|1`: machine-wide, it survives a
+reboot, and it is the only truth — the hub stores no wish of its own, and a flag set by hand in a terminal shows as on.
+The flag needs root, so the daemon runs `sudo -n /usr/bin/pmset -a disablesleep 0|1` and nothing else; `sudo -n` never
+asks for a password. What makes it work is one sudoers rule, `/etc/sudoers.d/agenthub-sleep` (root:wheel, 0440):
+
+```
+<user> ALL=(root) NOPASSWD: /usr/bin/pmset -a disablesleep 0, /usr/bin/pmset -a disablesleep 1
+```
+
+A human installs it once with their password — the question at the end of `agenthub setup` / the installer, or
+`agenthub awake grant` — and `agenthub awake revoke` / `agenthub uninstall` remove it (the rule text is checked with
+`visudo -cf` before it is installed; the short user name may have Latin letters of both cases, digits, `_`, `-` and a
+non-leading `.`, at most 32 characters, and must not consist of capitals only — sudoers reads such a word as an alias,
+and `ALL` as "everyone").
+
+`granted` is the file plus a probe: without the rule file it is `false` and no `sudo` is run at all; with the file the
+daemon asks `sudo -n -k -l /usr/bin/pmset -a disablesleep 1` (`-k` — cached credentials are ignored: a `sudo` typed a
+minute ago in some terminal must not pass for the rule). The probe can still say yes when the switch will not work — the
+file names another account and this one has some other password-free entry. So a switch that `sudo` itself refuses
+turns `granted` to `false` at once, and it stays `false` until the rule file changes. Without `granted` the switch is
+refused.
+
+`GET /awake` → `200 {"awake": <as in /state>}` after a fresh look at the system (the rule included; `/state` may be up
+to 5 min behind on a rule installed or removed outside the hub). `POST /awake {"on": true|false}` →
+`200 {"awake": {...}}`; asking for the state the flag already has is a `200` that changes nothing.
+
+| HTTP | `error` | When |
+|---|---|---|
+| 400 | `args:on:type` | `on` is not a boolean |
+| 409 | `awake:unsupported` | no lid, or a test directory without a double |
+| 409 | `awake:not-granted` | the rule file is not there, or `sudo` refused the switch (it wants a password: the rule does not work for this account) — `awake.granted` in the response is already `false` |
+| 500 | `awake:failed` | the rule works, but `pmset` failed or the flag did not change; also `on: true` while the daemon is on its final exit and is returning sleep |
+| 503 | `awake:disabled` | the awake service is off (`services.awake.enabled: false`) |
+
+The error responses of `POST /awake` carry `awake` too (except `args:on:type` and `awake:disabled`). hook and
+bridge — `403 peer:<class>`.
+
+**The battery guard.** While the flag is on, the daemon looks at the power source and the charge every 60 s
+(`pmset -g batt`); on the battery and below 10 % (`threshold`; exactly 10 % does not trip) it turns the flag off, writes `awake-low-battery` and emits
+`awake.low-battery` (a notification, rule `awake-low-battery`, kind `other`). On AC power, or with an unknown source or
+charge, nothing trips — but a source or a charge that cannot be read while the flag is on means the guard is not
+watching: one journal `warning` per run of such reads. A read that fails is "unknown", never "off": a failed read of
+the lid or of the flag keeps the last answer (a lid that could not be read at start is asked again every 60 s). After
+the guard switches the flag off, the trip is reported when the command succeeded and the flag does not read as on; a
+flag that cannot be read back then is not a failure. It never turns the flag back on. The 10 % is fixed: there is no setting, no route and no
+`config.json` key for it, and an `awakeBatteryThreshold` key left in `settings.json` by an earlier build is ignored.
+Turning the switch on while already below 10 % on the battery is answered with `200` and `on: false` — the guard returned it at once. A flag that is already on when the
+daemon starts is guarded the same way. While the flag is off the daemon looks every 5 min (a flag set outside the hub,
+a rule installed or removed). If the flag is on but there is no rule, the guard cannot return sleep: one
+`awake-failed` record per run of failures.
+
+**Stopping.** A final exit of the daemon — one after which nothing starts it again — returns sleep before the process
+is gone: nobody would guard the battery afterwards. Two exits are final: `POST /shutdown` (the human quits the hub; a
+logout, a restart and a power-off of the Mac look the same — the app quits) and `login-off` (launch at login is off and
+the app did not appear). Any other stop — a hub update, `agenthub restart`, a bare SIGTERM — leaves the flag as it is,
+and the next daemon picks it up. The quit fits into the daemon's exit: its commands have short timeouts (4.5 s in all
+at worst), and the 5 s hard-exit limit waits up to 3 s more for a quit that started late.
+
+What is not covered: the daemon must be alive and still listening to hear the app. At a logout launchd's SIGTERM can
+reach the daemon before the app's `POST /shutdown`. A request the daemon is already handling still returns sleep and is
+journaled, but a SIGTERM stop closes the socket first thing, so a request sent after that gets no connection; and after
+a SIGKILL or a crash nobody is asked at all. In these cases the flag stays on until the next daemon starts (it guards
+the battery again from its first check) or a human runs `sudo pmset -a disablesleep 0`.
+
+Journal: `awake-set {on, peer, pid}` (on a final exit — `{on: false, peer: "hub", reason: "quit", stop:
+"shutdown"|"login-off"}`) and `awake-low-battery {charge, threshold}` — both duplicated in the audit log;
+`awake-failed {on, reason: set|low-battery|quit, code, granted, …}` (`refused: true` — `sudo` itself said no; `stop` on
+a final exit); `warning` — the guard cannot read the power source or the charge; `threshold` in these records is
+always 10; installing and removing the rule — `hub-update-cli` with
+`op: "awake-grant" | "awake-revoke"` (`file`, `under`; revoke also `removed`, `sleepReturned`, `stillOn`).
+Settings in `config.json` — `services.awake`: `enabled`, `pollMs` (60000), `idlePollMs` (300000).
+
+Tests and stands: the daemon and the CLI run these commands only in the account's own live directory
+(`~/Library/Application Support/AgentHub` of the user the process runs as — wherever `HOME` points, and also when
+`AGENTHUB_HOME` names that directory). In any other directory they run none, and three variables take over — they are
+ignored in the live directory: `AGENTHUB_TEST_AWAKE_FILE` — a JSON double `{flag, granted, lid, charge, onBattery}`
+read and written instead of the system (also `refuse` — sudo says no, `fail` — the command fails, `blind` — the flag
+cannot be read, `lid: null` — the lid cannot be read, `inert` — an installed rule that sudo does not apply);
+`AGENTHUB_TEST_SUDOERS_DIR` — a directory instead of `/etc/sudoers.d` (the rule is copied there without `sudo`, still
+checked with `visudo -cf`); `AGENTHUB_AWAKE_REAL=1` — the real commands in a test directory (a manual stand check).
+
 ### `POST /shutdown` — app only (daemon and app lifecycle, 2026-11-06)
 "We close the hub — we close the daemon too": on quit (the "Quit Agent Hub" item in the icon menu and the popover, ⌘Q,
 logout) the pinned app asks the daemon to exit. No body needed. The response `202 {"ok":true,"stopping":true}` goes out
@@ -1074,7 +1169,11 @@ logout) the pinned app asks the daemon to exit. No body needed. The response `20
 LaunchAgent (`KeepAlive = {SuccessfulExit: false}`) does not restart a normal exit, but does restart a crash (code ≠ 0).
 cli, hook, bridge and an unpinned build get `403 peer:<class>` (`peer:app-signature`), and the daemon keeps running. A
 repeated request during the stop gets 202 again. The record `shutdown-requested` (`peer`, `pid`; duplicated in the audit
-log), the SSE event `hub.stopping {reason: "shutdown"}`, then `stop` with `reason: "shutdown"`.
+log), the SSE event `hub.stopping {reason: "shutdown"}`, then `stop` with `reason: "shutdown"`. A switched-on "keep the
+Mac awake with the lid closed" is turned off during this stop ("Awake" above). A request that is handled after a
+SIGTERM stop has begun (a logout: launchd was first) is recorded and announced the same way — once — and returns sleep
+too; the stop itself stays the SIGTERM one (`stop` with `reason: "SIGTERM"`). A request sent once the socket is closed
+gets no connection.
 
 What others see during the stop: connections close, the socket is removed. A pending `PermissionRequest` hook loses its
 connection — `agenthub-hook` prints `{}` and exits with code 0 (a fraction of a second), Claude Code shows its regular
@@ -1275,7 +1374,8 @@ One JSON line per record, mode 0600, rotated at 8 MB into `journal.jsonl.1`. `ty
 text (`detail` of `warning`, the `[hidden]`/`[скрыто]` placeholder) is rendered in the hub language when the record is
 written, so older records keep the language they were written in. The records `estop`, `estop-set`,
 `app-requirement-changed`, `app-pin-path-changed`, `shutdown-requested`, `app-restart-stopped`, `hub-update-cli`,
-`hub-update-tag-moved`, `bridge-op-late`, `registry-key-pinned`, `registry-key-changed` and `registry-key-accepted` are
+`hub-update-tag-moved`, `bridge-op-late`, `registry-key-pinned`, `registry-key-changed`, `registry-key-accepted`,
+`awake-set` and `awake-low-battery` are
 duplicated into `journal-audit.jsonl` (0600, rotated at 1 MB into `.1`): a flood of other records cannot push them out.
 Only rare records are audit types — the file is a single 1 MB generation; `terminal-send` (every line a plugin types
 into a tab) is **not** one and lives in the main journal only. Plugin warnings (`warning`) — at most
@@ -1334,7 +1434,8 @@ restarted a plugin with a fresh environment (`ctx.restartPlugin`, e.g. `SecretCh
 button over the socket — `action`, `action-denied`, `action-confirm-requested` carry `byPlugin` (the plugin id the server
 found for the peer) next to `peer: cli`; event subscriptions — `subscribe-dropped {plugin, dropped}` (over 600 messages a
 minute); non-Claude agent sessions — `agent-session {plugin, sessionId, pid, agent}` (registered or moved),
-`agent-session-gone {plugin, sessionId, pid}` (its process ended).
+`agent-session-gone {plugin, sessionId, pid}` (its process ended); awake — `awake-set {on, peer, pid}`,
+`awake-low-battery {charge, threshold}`, `awake-failed {on, reason, code, granted, refused?, stop?}` ("Awake" above).
 Metadata only (see [`extension-points.md`](extension-points.md), `journal.write`).
 
 ## Other files in the state directory

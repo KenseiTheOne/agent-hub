@@ -27,14 +27,14 @@ import { HubUpdater } from "../lib/hub-update/updater.mjs";
 import { daemonLocation, plistXml } from "../lib/launchd.mjs";
 import { hubDetail, hubLabel } from "../lib/services/push.mjs";
 import * as PLATFORM_MOD from "../lib/platform.mjs";
-import { cleanup, req, tempHome, waitFor } from "./helpers.mjs";
+import { cleanup, req, scrubAwakeEnv, tempHome, waitFor } from "./helpers.mjs";
 
 const A = "a".repeat(40); // cdhash of the previous build
 const B = "b".repeat(40); // cdhash of the new one
 const C = "c".repeat(40);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const env0 = () => {
-  const e = { ...process.env };
+  const e = scrubAwakeEnv({ ...process.env });
   delete e.NODE_OPTIONS;
   return e;
 };

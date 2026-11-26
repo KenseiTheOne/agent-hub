@@ -694,10 +694,14 @@ public enum Explain {
         "secrets:no-keychain", "secrets:keychain", "args:value:required", "args:value:chars", "args:value:length",
         "extensions:changed", "extensions:not-found", "extensions:disabled", "extensions:write-failed", "extensions:unsafe-file",
         "extensions:too-large",
+        "awake:unsupported", "awake:not-granted", "awake:failed", "awake:disabled", "args:on:type",
         "registry:key-changed", "registry:key-unchanged", "registry:key-format", "registry:expired",
         "terminal:binding-unknown", "terminal:binding-unknown:process", "terminal:binding-unknown:tab",
         "peer:bridge-launch", "peer:bridge-file",
     ]
+
+    /// What `POST /awake` refuses with ("Stay awake with the lid closed", Awake.swift).
+    static let awakeCodes: Set<String> = ["awake:unsupported", "awake:not-granted", "awake:failed", "awake:disabled", "args:on:type"]
 
     /// Whether the code has its own text (not the generic fallback).
     public static func covers(_ code: String) -> Bool { known(code, label: "x") != nil }
@@ -734,6 +738,16 @@ public enum Explain {
             return tr("Файл чужой или его могут менять другие пользователи — такой хаб не загрузит.", "The file belongs to someone else or others may write it — the hub won't load it.")
         case "extensions:too-large":
             return tr("Файл больше 1 МБ — хаб такой не загрузит.", "The file is over 1 MB — the hub won't load it.")
+        case "awake:unsupported":
+            return tr("У этого компьютера нет крышки — переключать нечего.", "This computer has no lid, so there's nothing to switch.")
+        case "awake:not-granted":
+            return AwakeText.notGranted(hub: nil)
+        case "awake:failed":
+            return tr("Система не дала сменить режим сна — ничего не изменилось. Попробуйте ещё раз.", "macOS didn't let the hub change the sleep mode — nothing changed. Try again.")
+        case "awake:disabled":
+            return tr("Эта возможность выключена в настройках хаба (config.json) — ничего не изменилось.", "This feature is turned off in the hub's config.json — nothing changed.")
+        case "args:on:type":
+            return tr("Хаб не понял, включить или выключить, — ничего не изменилось.", "The hub couldn't tell whether to turn it on or off — nothing changed.")
         case "facts:jobs-limit":
             return tr("\(q): у плагина уже работает максимум фоновых задач — дождитесь конца одной или остановите её.",
                       "\(q): the plugin already runs the maximum number of background jobs — wait for one to end or stop it.")
@@ -1024,6 +1038,35 @@ extension JournalEntry {
             let who = by == "app" ? tr("приложение", "app") : by == "cli" ? tr("терминал", "terminal") : nil
             let base = on ? tr("Пауза хаба включена", "Hub paused") : tr("Пауза хаба снята", "Hub resumed")
             return who.map { tr("\(base) (кем: \($0))", "\(base) (by \($0))") } ?? base
+        case "awake-set":
+            let on = fields["on"]?.boolValue ?? false
+            let by = fields["peer"]?.stringValue
+            // nobody switched it: the hub puts sleep back itself when it quits (`peer: "hub"`, `reason: "quit"`)
+            if by == "hub" {
+                if on { return tr("Хаб включил «Не спать с закрытой крышкой»", "The hub turned on Stay awake with the lid closed") }
+                return fields["reason"]?.stringValue == "quit" ? tr("Хаб вернул сон при выходе", "The hub brought sleep back on quit")
+                    : tr("Хаб вернул сон", "The hub brought sleep back")
+            }
+            let who = by == "app" ? tr("приложение", "app") : by == "cli" ? tr("терминал", "terminal") : nil
+            let base = on ? tr("«Не спать с закрытой крышкой» включено", "Stay awake with the lid closed: on") : tr("«Не спать с закрытой крышкой» выключено", "Stay awake with the lid closed: off")
+            return who.map { tr("\(base) (кем: \($0))", "\(base) (by \($0))") } ?? base
+        case "awake-low-battery":
+            // the battery guard: the daemon brought sleep back by itself
+            guard let charge = fields["charge"]?.intValue else { return tr("Мало заряда — сон возвращён", "Low battery — sleep is back") }
+            return tr("Заряд \(charge)% — сон возвращён", "Battery at \(charge)% — sleep is back")
+        case "awake-failed":
+            // the system flag stayed as it was; `reason` — what the hub was doing: a switch, the battery guard, quitting
+            let base: String
+            switch fields["reason"]?.stringValue {
+            case "low-battery": base = tr("Мало заряда, но вернуть сон не удалось", "Low battery, but sleep couldn't be brought back")
+            case "quit": base = tr("При выходе вернуть сон не удалось", "Couldn't bring sleep back on quit")
+            case "set":
+                base = fields["on"]?.boolValue == false ? tr("Не удалось выключить «Не спать с закрытой крышкой»", "Couldn't turn off Stay awake with the lid closed")
+                    : tr("Не удалось включить «Не спать с закрытой крышкой»", "Couldn't turn on Stay awake with the lid closed")
+            default: base = tr("Не удалось сменить режим сна", "Couldn't change the sleep mode")
+            }
+            // the usual cause, and the one a human can fix
+            return fields["granted"]?.boolValue == false ? tr("\(base): у хаба нет прав", "\(base): the hub has no rights") : base
         case "app-requirement-changed":
             // old/new are pin fingerprints (`none` means not pinned, `unknown` means the daemon does not remember the previous one,
             // daemon/lib/app-pin.mjs); a first pin follows the same rule as the banner and push (AppPinInfo)
@@ -1109,7 +1152,7 @@ extension JournalEntry {
     public var isAction: Bool {
         type.hasPrefix("action") || type.hasPrefix("estop") || type.hasPrefix("plugin-installed") || type.hasPrefix("plugin-updated")
             || type == "plugin-removed-by-user" || type == "app-requirement-changed" || type == "settings-changed"
-            || type == "shutdown-requested" || type == "app-launch"
+            || type == "shutdown-requested" || type == "app-launch" || type == "awake-set" || type == "awake-failed"
             || type == "hub-update-start" || type == "hub-update-switch" || type == "hub-update-installed" || type == "hub-update-failed"
     }
 

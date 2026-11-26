@@ -50,7 +50,7 @@ export function sanitize(entry) {
 // audit type: it stays in the main journal. bridge-op-late (contract 3) is: a bridge reply that arrived after the daemon
 // stopped waiting is an anomaly, not a routine. registry-key-* are the trust root of a plugin registry: the key remembered on
 // first use, a different key found in config.json, the human accepting it (lib/plugins.mjs, "accepted registry keys").
-export const AUDIT_TYPES = new Set(["estop", "estop-set", "app-requirement-changed", "app-pin-path-changed", "shutdown-requested", "app-restart-stopped", "hub-update-cli", "hub-update-tag-moved", "bridge-op-late", "registry-key-pinned", "registry-key-changed", "registry-key-accepted"]);
+export const AUDIT_TYPES = new Set(["estop", "estop-set", "app-requirement-changed", "app-pin-path-changed", "shutdown-requested", "app-restart-stopped", "hub-update-cli", "hub-update-tag-moved", "bridge-op-late", "registry-key-pinned", "registry-key-changed", "registry-key-accepted", "awake-set", "awake-low-battery"]);
 
 function appendRotating(path, line, maxBytes) {
   if (existsSync(path) && statSync(path).size + line.length > maxBytes) renameSync(path, path + ".1");

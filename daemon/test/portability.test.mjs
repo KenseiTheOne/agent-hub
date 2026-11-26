@@ -15,14 +15,14 @@ import { Settings } from "../lib/settings.mjs";
 import { writeAppRequirement } from "../lib/app-pin.mjs";
 import { hasLaunchd, LABEL } from "../lib/launchd.mjs";
 import * as openFile from "../lib/primitives/open.file.mjs";
-import { cleanup, onlyDarwin, tempHome, withRepoPlist } from "./helpers.mjs";
+import { cleanup, onlyDarwin, scrubAwakeEnv, tempHome, withRepoPlist } from "./helpers.mjs";
 
 const BIN = join(DAEMON_DIR, "bin");
 const BOM = "\uFEFF";
 
 function run(args, env, { timeout = 15_000 } = {}) {
   // the CLI speaks the hub language, and test mode makes the "system" language ru: these checks read the English CLI
-  const e = { ...process.env, AGENTHUB_SERVICES: "none", ...(/[\\/]agenthub$/.test(args[0] || "") ? { AGENTHUB_SYSTEM_LANG: "en" } : {}), ...env };
+  const e = { ...scrubAwakeEnv({ ...process.env }), AGENTHUB_SERVICES: "none", ...(/[\\/]agenthub$/.test(args[0] || "") ? { AGENTHUB_SYSTEM_LANG: "en" } : {}), ...env };
   delete e.NODE_OPTIONS;
   return new Promise((resolve) => {
     execFile(process.execPath, args, { env: e, timeout }, (err, stdout, stderr) => resolve({ code: err ? err.code : 0, stdout, stderr }));

@@ -1,6 +1,6 @@
 import Foundation
 
-// Hub-wide switches (pause, language, notifications, launch at login, connections) and the hub update.
+// Hub-wide switches (pause, language, notifications, launch at login, connections, stay awake) and the hub update.
 
 extension HubStore {
     /// Hub pause (internal name — estop, ESTOP file). Anyone can turn it on, only the pinned build can lift it.
@@ -100,6 +100,40 @@ extension HubStore {
         } catch {
             await reportOffline(error)
         }
+    }
+
+    // MARK: - stay awake with the lid closed (Awake.swift)
+
+    public var awake: AwakeInfo? { state?.awake }
+
+    /// The switch: the daemon sets the system flag (the app and the terminal both may), the reply is applied right away.
+    public func setAwake(_ on: Bool) async {
+        do {
+            let refusal = take(try await client.setAwake(on))
+            if journalVisible { await loadJournal() }
+            if let refusal { throw refusal }
+        } catch let e as HubError {
+            await presenter?.report(title: on ? tr("Режим «Не спать с закрытой крышкой» не включён", "Couldn't turn on Stay awake with the lid closed")
+                                        : tr("Режим «Не спать с закрытой крышкой» не выключен", "Couldn't turn off Stay awake with the lid closed"),
+                                    detail: awakeErrorDetail(e))
+        } catch {
+            await reportOffline(error)
+        }
+    }
+
+    /// The reply of `POST /awake` into the state: the section is taken from a refusal too (the daemon has just checked
+    /// the rights again — the row goes grey now, not with the event). → the refusal; nil — done.
+    func take(_ reply: AwakeReply) -> HubError? {
+        if let info = reply.awake { state?.awake = info }
+        return reply.ok ? nil : .http(status: reply.status, code: reply.code)
+    }
+
+    /// The refusal in plain words; "no rights" names the terminal command with this hub's own CLI path.
+    private func awakeErrorDetail(_ e: HubError) -> String {
+        guard let code = e.code else { return e.errorDescription ?? "" }
+        let text = code == "awake:not-granted" ? AwakeText.notGranted(hub: state?.hub)
+            : Explain.text(code: code, status: 0, label: AwakeRow.title)
+        return text + Self.codeNote(code)
     }
 
     // MARK: - hub update (docs/hub-updates.md)

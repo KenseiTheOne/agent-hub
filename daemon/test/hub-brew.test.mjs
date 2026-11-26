@@ -18,7 +18,7 @@ import { HubUpdater } from "../lib/hub-update/updater.mjs";
 import { currentLabel, readBuild, setLink, versionApp } from "../lib/hub-update/layout.mjs";
 import { buildToolProblems } from "../lib/hub-update/cli.mjs";
 import { builderArgv } from "../lib/services/hub-update.mjs";
-import { cleanup, tempHome } from "./helpers.mjs";
+import { cleanup, scrubAwakeEnv, tempHome } from "./helpers.mjs";
 
 const A = "a".repeat(40);
 const B = "b".repeat(40);
@@ -314,7 +314,7 @@ function cliWorld(root, lang = "en") {
   writeExec(join(fakebin, "xcrun"), '#!/bin/sh\ncase "$*" in\n  *--show-sdk-version*) echo "${FAKE_SDK:-26.0}" ;;\n  "--find swift") echo /usr/bin/swift ;;\n  "--find clang") echo /usr/bin/clang ;;\n  *) exit 1 ;;\nesac\n');
   const hub = mkdir(join(root, "hub"));
   const env = (extra = {}) => {
-    const e = { ...process.env, HOME: mkdir(join(root, "home")), AGENTHUB_HOME: hub, AGENTHUB_SYSTEM_LANG: lang, PATH: `${fakebin}:${dirname(process.execPath)}:/usr/bin:/bin`, TMPDIR: mkdir(join(root, "tmp")), ...extra };
+    const e = { ...scrubAwakeEnv({ ...process.env }), HOME: mkdir(join(root, "home")), AGENTHUB_HOME: hub, AGENTHUB_SYSTEM_LANG: lang, PATH: `${fakebin}:${dirname(process.execPath)}:/usr/bin:/bin`, TMPDIR: mkdir(join(root, "tmp")), ...extra };
     delete e.NODE_OPTIONS;
     delete e.AGENTHUB_LANG;
     delete e.AGENTHUB_TEST_LAUNCHCTL;

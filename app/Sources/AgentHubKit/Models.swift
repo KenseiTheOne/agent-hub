@@ -700,6 +700,9 @@ public struct HubState: Codable, Sendable, Hashable {
     public var builtinPlugins: [BuiltinPluginInfo]? = nil
     /// Plugins found but not run — turned off or missing a declared requirement (`GET /state.heldPlugins`, event `plugins.held`).
     public var heldPlugins: [HeldPluginInfo] = []
+    /// "Stay awake with the lid closed" (`GET /state.awake`, event `awake`; Awake.swift). nil — an older daemon: no
+    /// switch anywhere, the same as a machine without a lid.
+    public var awake: AwakeInfo? = nil
 
     public init(plugins: [PluginState] = [], sessions: [SessionInfo] = [], estop: Bool = false, seq: Int = 0) {
         self.version = nil; self.contract = nil; self.now = nil; self.pid = nil; self.seq = seq; self.estop = estop
@@ -746,6 +749,7 @@ public struct HubState: Codable, Sendable, Hashable {
         hook = try? c.decodeIfPresent(HookInfo.self, forKey: .hook)
         builtinPlugins = c.lossyList(BuiltinPluginInfo.self, forKey: .builtinPlugins)
         heldPlugins = c.lossyList(HeldPluginInfo.self, forKey: .heldPlugins) ?? []
+        awake = try? c.decodeIfPresent(AwakeInfo.self, forKey: .awake)
         status = (try? c.decode(HubStatus.self, forKey: .status)) ?? HubStatus.worst(plugins.map(\.status))
         waitingSessions = (try? c.decode(Int.self, forKey: .waitingSessions)) ?? sessions.filter(\.isWaiting).count
     }

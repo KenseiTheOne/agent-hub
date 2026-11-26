@@ -1,8 +1,8 @@
 import AgentHubKit
 import AppKit
 
-/// Context menu of the menu bar icon — right click or ⌃-click: "Panel", "Pause hub" / "Resume hub",
-/// "Quit Agent Hub". MenuBarExtra doesn't know about right clicks, so a local event monitor catches a click
+/// Context menu of the menu bar icon — right click or ⌃-click: "Panel", "Pause hub" / "Resume hub", "Stay awake with
+/// the lid closed" (when the daemon offers it), "Restart hub", "Quit Agent Hub". MenuBarExtra doesn't know about right clicks, so a local event monitor catches a click
 /// on the window of its own NSStatusItem button and swallows it (the popover doesn't open), and the menu is shown with
 /// `NSMenu.popUp` under the button. A left click without ⌃ passes through the monitor as is — SwiftUI opens the popover.
 @MainActor
@@ -96,6 +96,17 @@ final class StatusItemMenu: NSObject, NSMenuDelegate {
         // only the pinned build can resume
         pause.isEnabled = resume ? store.canAct : store.connection.isLive
         pause.toolTip = resume ? (store.canAct ? resumeHubHelp : ActionBlock.notPinned.help) : pauseHubHelp
+        // "Stay awake with the lid closed" — the same switch as in the popover (AwakeToggleRow), a check mark while on;
+        // no item when the daemon has no such section or the machine has no lid. After the pause item: its place in the
+        // menu is fixed. The intent is fixed when the menu is built, like the pause's: the flag may change while the
+        // menu is open (the terminal, the battery guard), and a click on an item that read "off" must not turn it off
+        if let row = AwakeRow.make(store.awake, live: store.connection.isLive, hub: store.state?.hub) {
+            let awake = item(m, AwakeRow.title, #selector(toggleAwake(_:)))
+            awake.state = row.isOn ? .on : .off
+            awake.representedObject = NSNumber(value: !row.isOn)
+            awake.isEnabled = row.enabled
+            awake.toolTip = row.help
+        }
         if store.canRestartHub { item(m, tr("Перезапустить хаб", "Restart hub"), #selector(restart)).toolTip = restartHubHelp }
         m.addItem(.separator())
         item(m, tr("Выйти из Agent Hub", "Quit Agent Hub"), #selector(quit))
@@ -116,6 +127,12 @@ final class StatusItemMenu: NSObject, NSMenuDelegate {
     @objc private func togglePause(_ sender: NSMenuItem) {
         guard let on = (sender.representedObject as? NSNumber)?.boolValue else { return }
         Task { await store.setEstop(on) }
+    }
+
+    /// On or off — as the item said when the menu was opened.
+    @objc private func toggleAwake(_ sender: NSMenuItem) {
+        guard let on = (sender.representedObject as? NSNumber)?.boolValue else { return }
+        Task { await store.setAwake(on) }
     }
 
     @objc private func quit() { NSApp.terminate(nil) }

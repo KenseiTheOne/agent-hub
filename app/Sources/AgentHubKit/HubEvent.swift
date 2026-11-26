@@ -39,6 +39,9 @@ public enum HubEvent: Sendable {
     case secretsChanged(plugin: String, key: String?)
     /// `sessions.external`: the whole `externalSessions` list after a change (non-Claude agent sessions).
     case externalSessions([ExternalSession])
+    /// "Stay awake with the lid closed" changed (`awake`): the flag, the rights, the power source or the threshold — the
+    /// whole `/state.awake` section each time.
+    case awake(AwakeInfo)
     /// Extension events (`push.sent`, `bridge.connected`, `plugins.installed`, …) and anything unknown.
     case other(type: String, data: JSONValue)
 
@@ -55,6 +58,7 @@ public enum HubEvent: Sendable {
     private struct UpdatesData: Decodable { var pluginUpdates: PluginUpdates }
     private struct HubUpdateData: Decodable { var hubUpdate: HubUpdateInfo }
     private struct RestartingData: Decodable { var label: String? }
+    private struct AwakeData: Decodable { var awake: AwakeInfo }
     private struct SecretData: Decodable { var plugin: String; var key: String? }
     private struct ExternalData: Decodable {
         var sessions: [ExternalSession]
@@ -116,6 +120,7 @@ public enum HubEvent: Sendable {
                 j.started = ev.event == "job.started"
                 return .job(j)
             case "sessions.external": return .externalSessions(try dec.decode(ExternalData.self, from: data).sessions)
+            case "awake": return .awake(try dec.decode(AwakeData.self, from: data).awake)
             case "secrets.changed":
                 let d = try dec.decode(SecretData.self, from: data)
                 return .secretsChanged(plugin: d.plugin, key: d.key)
@@ -156,6 +161,9 @@ extension HubState {
             idle = v
         case .externalSessions(let list):
             externalSessions = list
+        case .awake(let info):
+            guard awake != info else { return false }
+            awake = info
         case .job(let j):
             guard let i = plugins.firstIndex(where: { $0.id == j.plugin }) else { return false }
             if j.started {

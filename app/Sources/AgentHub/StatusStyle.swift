@@ -88,11 +88,33 @@ enum StatusImages {
     /// "Quiet" (the "safe to shut down" verdict) — the bot is dimmed (`glyphAlpha`), the emblem is a cutout (quiet) or indigo
     /// (quiet, but the computer will be needed later; emblem at full strength); work in progress — the emblem is blue. No connection — the bot
     /// is paler than "quiet", with a "?" mark on the right (`unknownMark`): "I know nothing" must not look like "safe to shut down".
+    ///
+    /// "Stay awake with the lid closed" is on (`awake`) — one more mark after those, the last on the right (`AwakeMark`),
+    /// in the menu bar text color at full strength whatever the look: the flag must not be forgotten. It combines with
+    /// every look (`MenuBarLook.sideMarks`); the calm icon stays a template, the mark is part of the template.
     static let pauseMarkWidth: CGFloat = 7
 
-    static func menuBarIcon(look: MenuBarLook, dark: Bool) -> NSImage {
+    /// The "stay awake with the lid closed" mark: everything that tunes it — the sign itself, its size and place.
+    enum AwakeMark {
+        /// SF Symbol. A cup of coffee is what "keep the Mac awake" tools usually show.
+        static let symbol = "cup.and.saucer.fill"
+        static let pointSize: CGFloat = 8.5
+        static let weight: NSFont.Weight = .semibold
+        /// From the bot (or from the "‖" / "?" mark before it) to the mark.
+        static let gap: CGFloat = 1.5
+        /// The mark's box: the image is wider by `gap + width`; a wider sign is scaled down into it.
+        static let width: CGFloat = 12
+        /// Up (+) or down (−) from the middle of the icon.
+        static let lift: CGFloat = 0
+
+        @MainActor static let image: NSImage? = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)?
+            .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: pointSize, weight: weight))
+    }
+
+    static func menuBarIcon(look: MenuBarLook, dark: Bool, awake: Bool = false) -> NSImage {
         guard let glyph = MenuBarArt.glyph else { return fallbackIcon(look) }
-        if look.isTemplate {
+        let template = look.isTemplate
+        if template, !awake {
             let img = glyph.copy() as! NSImage
             img.isTemplate = true
             img.accessibilityDescription = "Agent Hub"
@@ -107,34 +129,48 @@ enum StatusImages {
         case nil: nil
         }
         let alpha = look.glyphAlpha
-        let pause = look.pauseMark
-        let unknown = look.unknownMark
-        let size = NSSize(width: glyph.size.width + (pause || unknown ? pauseMarkWidth : 0), height: glyph.size.height)
+        // the marks to the right of the bot, in the order the Kit gives; the image is wider by each
+        let marks = look.sideMarks(awake: awake && AwakeMark.image != nil)
+        func width(_ m: MenuBarLook.SideMark) -> CGFloat { m == .awake ? AwakeMark.gap + AwakeMark.width : pauseMarkWidth }
+        let size = NSSize(width: glyph.size.width + marks.map(width).reduce(0, +), height: glyph.size.height)
         let img = NSImage(size: size, flipped: false) { rect in
-            let ink = menuBarInk(dark: dark).withAlphaComponent(menuBarInk(dark: dark).alphaComponent * alpha)
+            // a template is a mask: macOS paints it itself, so it is drawn in plain black
+            let full = template ? NSColor.black : menuBarInk(dark: dark)
+            let ink = full.withAlphaComponent(full.alphaComponent * alpha)
             let botRect = NSRect(origin: rect.origin, size: glyph.size)
             MenuBarArt.draw(glyph, tint: ink, in: botRect)
             if let emblemColor, let emblem = MenuBarArt.emblem {
                 MenuBarArt.draw(emblem, tint: emblemColor, in: botRect)
             }
-            if pause {
-                // "‖": two 1.75 × 8 pt bars centered vertically, to the right of the bot
-                ink.setFill()
-                let h: CGFloat = 8, w: CGFloat = 1.75, y = rect.midY - h / 2
-                let x0 = botRect.maxX + 1
-                NSBezierPath(roundedRect: NSRect(x: x0, y: y, width: w, height: h), xRadius: 0.6, yRadius: 0.6).fill()
-                NSBezierPath(roundedRect: NSRect(x: x0 + w + 1.75, y: y, width: w, height: h), xRadius: 0.6, yRadius: 0.6).fill()
-            }
-            if unknown {
-                // "?" to the right of the bot — no connection: the menu bar text color without dimming, so the mark is readable
-                let q = NSAttributedString(string: "?", attributes: [.font: NSFont.systemFont(ofSize: 10, weight: .heavy),
-                                                                    .foregroundColor: menuBarInk(dark: dark)])
-                let qs = q.size()
-                q.draw(at: NSPoint(x: botRect.maxX + (pauseMarkWidth - qs.width) / 2 + 0.5, y: rect.midY - qs.height / 2))
+            var x = botRect.maxX
+            for mark in marks {
+                switch mark {
+                case .pause:
+                    // "‖": two 1.75 × 8 pt bars centered vertically, to the right of the bot
+                    ink.setFill()
+                    let h: CGFloat = 8, w: CGFloat = 1.75, y = rect.midY - h / 2
+                    let x0 = x + 1
+                    NSBezierPath(roundedRect: NSRect(x: x0, y: y, width: w, height: h), xRadius: 0.6, yRadius: 0.6).fill()
+                    NSBezierPath(roundedRect: NSRect(x: x0 + w + 1.75, y: y, width: w, height: h), xRadius: 0.6, yRadius: 0.6).fill()
+                case .unknown:
+                    // "?" to the right of the bot — no connection: the menu bar text color without dimming, so the mark is readable
+                    let q = NSAttributedString(string: "?", attributes: [.font: NSFont.systemFont(ofSize: 10, weight: .heavy),
+                                                                        .foregroundColor: full])
+                    let qs = q.size()
+                    q.draw(at: NSPoint(x: x + (pauseMarkWidth - qs.width) / 2 + 0.5, y: rect.midY - qs.height / 2))
+                case .awake:
+                    // never dimmed with the bot: a forgotten flag has to stay visible on a "quiet" icon too
+                    guard let cup = AwakeMark.image else { break }
+                    let k = min(1, AwakeMark.width / max(cup.size.width, 1))
+                    let s = NSSize(width: cup.size.width * k, height: cup.size.height * k)
+                    let box = NSRect(x: x + AwakeMark.gap, y: rect.minY, width: AwakeMark.width, height: rect.height)
+                    MenuBarArt.draw(cup, tint: full, in: NSRect(x: box.midX - s.width / 2, y: box.midY - s.height / 2 + AwakeMark.lift, width: s.width, height: s.height))
+                }
+                x += width(mark)
             }
             return true
         }
-        img.isTemplate = false
+        img.isTemplate = template
         img.accessibilityDescription = "Agent Hub"
         return img
     }

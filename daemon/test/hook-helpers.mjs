@@ -10,6 +10,7 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { REPO_DIR, DEFAULTS } from "../lib/config.mjs";
 import { defaultSys } from "../lib/peer.mjs";
+import { scrubAwakeEnv } from "./helpers.mjs";
 
 export const HOOK_SCRIPT = join(REPO_DIR, "hook", "agenthub-hook");
 export const FAKE_CLAUDE = "/fake/.local/share/claude/versions/9.9.9";
@@ -99,7 +100,7 @@ export function asApp(sys) {
 
 // An environment without NODE_OPTIONS (the cmux preload crashes child node processes).
 export function childEnv(extra = {}) {
-  const e = { ...process.env, ...extra };
+  const e = { ...scrubAwakeEnv({ ...process.env }), ...extra };
   delete e.NODE_OPTIONS;
   return e;
 }

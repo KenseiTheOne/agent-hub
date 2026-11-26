@@ -6,6 +6,20 @@ The plugin contract has its own version history in
 
 ## Unreleased
 
+### Added
+
+- **Keep the Mac awake with the lid closed.** A switch (and `agenthub awake on | off | status`) for long agent runs on a
+  closed laptop: the system flag `pmset -a disablesleep`. The flag needs root, so the hub switches it through one narrow
+  sudoers rule — `/etc/sudoers.d/agenthub-sleep`, exactly `pmset -a disablesleep 0` and `1` for your account — that you
+  install once with your password: `agenthub setup` and the installer ask on a laptop, `agenthub awake grant` does it
+  later, `agenthub awake revoke` removes it. Without the rule the switch is unavailable. On the battery the hub checks
+  the charge every minute and returns sleep below 10 % with a notification
+  "Battery low — sleep is back" (kind "Other"); it never turns the switch back on by itself. Quitting the hub returns
+  sleep, and so does the daemon exiting because launch at login is off; an update or a restart leaves the switch as it
+  is. `agenthub uninstall` returns sleep and removes the rule before it deletes anything, and exits with code 1 and a
+  plain last line if sleep is still disabled or the rule is still there; removing the Homebrew package alone does not. API: `/state.awake`, the
+  `awake` event, `GET | POST /awake` ([`docs/api.md`](docs/api.md), "Awake").
+
 ### Changed
 
 - **Plugins in the popover are rows, not tiles.** With ten-plus plugins the 3-column grid of short captions ("Quota",

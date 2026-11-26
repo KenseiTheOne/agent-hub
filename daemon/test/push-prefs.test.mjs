@@ -79,6 +79,9 @@ test("kinds: core table, plugin rules, fallback to the table, untrusted is \"oth
   assert.equal(kind("hub-update-failed:0.4.0"), "updates");
   assert.equal(kind("plugin-own-updated:mine:1.2.0"), "updates", "an own plugin updated from its folder — the same switch as other updates");
   assert.equal(kind("source-broken"), "problems");
+  // the battery guard of "keep awake with the lid closed" — a hub event under the "other" switch
+  assert.equal(kind("awake-low-battery:7:10"), "other");
+  assert.equal(matchRule(DEFAULT_RULES, "awake-low-battery:7:10").name, "awake-low-battery");
   // quota is declared by the builtin quota plugin with its own tags — the core table does not have it
   assert.equal(kind("week-80:20261108"), "other");
   assert.equal(kind("week-80:20261108", OWN.quota), "problems");

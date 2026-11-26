@@ -242,9 +242,13 @@ struct Sidebar: View {
             }
             .scrollIndicators(.hidden)
             .scrollBounceBehavior(.basedOnSize)
-            HStack(spacing: 6) {
-                PauseHubButton(store: store, height: 36, concentric: true)
-                RestartHubButton(store: store, height: 36, concentric: true)
+            VStack(spacing: 6) {
+                // above "Pause hub": the pause stays at the card's bottom edge, where it has always been
+                AwakeToggleRow(store: store, height: 36, concentric: true)
+                HStack(spacing: 6) {
+                    PauseHubButton(store: store, height: 36, concentric: true)
+                    RestartHubButton(store: store, height: 36, concentric: true)
+                }
             }
             .labelStyle(.titleAndIcon)
             .padding(.top, 4)
