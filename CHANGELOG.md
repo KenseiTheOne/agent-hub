@@ -6,6 +6,8 @@ The plugin contract has its own version history in
 
 ## Unreleased
 
+## 0.1.15 — 2026-11-26
+
 ### Added
 
 - **Keep the Mac awake with the lid closed.** A switch (and `agenthub awake on | off | status`) for long agent runs on a
