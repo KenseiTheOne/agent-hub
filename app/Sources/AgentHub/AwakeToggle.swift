@@ -7,7 +7,8 @@ import SwiftUI
 ///
 /// A capsule like its neighbours with a small switch at the right edge; the sign is the one the menu bar icon carries
 /// while the flag is on (`StatusImages.AwakeMark`), so the mark up there is recognised. No rights — the whole row is
-/// greyed and doesn't click, the hint names the terminal command. On without rights — the same grey row with the
+/// greyed and doesn't switch; a click copies the terminal command that grants them (the hint names it and says so),
+/// and the title says "copied" for a moment. On without rights — the same grey row with the
 /// switch on, and a warning sign in color (`Warning`) where the row's own sign was: a grey knob on the other side
 /// alone is easy to miss, and this is the case where the hub can't bring sleep back when the battery runs low.
 struct AwakeToggleRow: View {
@@ -23,13 +24,21 @@ struct AwakeToggleRow: View {
         static var color: Color { Color(nsColor: .systemYellow) }
     }
 
+    /// The grant command was just copied by a click on the greyed row: the title says so for a moment.
+    /// `@State` without the macro (built without Xcode, see MenuContent).
+    private let copiedStore = State(initialValue: false)
+    private var copied: Bool { get { copiedStore.wrappedValue } nonmutating set { copiedStore.wrappedValue = newValue } }
+
     var body: some View {
         if let row = AwakeRow.make(store.awake, live: store.connection.isLive, hub: store.state?.hub) {
             let warns = row.look == .unavailable(on: true)
+            // no rights: the row can't switch, so a click hands over the command that grants them
+            let copies = !row.look.isAvailable
+            let live = store.connection.isLive
             Button { Task { await store.setAwake(!row.isOn) } } label: {
                 HStack(spacing: 8) {
                     Label {
-                        Text(AwakeRow.title)
+                        Text(copied ? AwakeText.copied : AwakeRow.title)
                     } icon: {
                         // The warning takes the place of the row's sign instead of a place of its own: in the
                         // sidebar the title fills the row to the switch, a sign next to it would cut the title.
@@ -57,7 +66,21 @@ struct AwakeToggleRow: View {
                 }
                 .allowsHitTesting(false)
             }
-            .tip(row.help)
+            // a disabled button takes no clicks: the copying click is caught over it
+            .overlay {
+                if copies {
+                    Color.clear.contentShape(Rectangle()).onTapGesture {
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(AwakeText.grantCommand(hub: store.state?.hub), forType: .string)
+                        copied = true
+                        Task {
+                            try? await Task.sleep(for: .seconds(1.6))
+                            copied = false
+                        }
+                    }
+                }
+            }
+            .tip(copies && live ? row.help + " " + AwakeText.clickCopies : row.help)
         }
     }
 }

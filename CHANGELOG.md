@@ -6,6 +6,14 @@ The plugin contract has its own version history in
 
 ## Unreleased
 
+## 0.1.16 — 2026-11-26
+
+### Changed
+
+- **The greyed "Stay awake with the lid closed" row copies the command.** Without the rights the switch can't be
+  turned, so a click on the row now copies `agenthub awake grant` to the clipboard and the title says "Command copied"
+  for a moment; the hint says so too.
+
 ## 0.1.15 — 2026-11-26
 
 ### Added

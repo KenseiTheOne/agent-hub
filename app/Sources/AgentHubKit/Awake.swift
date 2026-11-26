@@ -115,6 +115,12 @@ public enum AwakeText {
         return "\(home)env -u NODE_OPTIONS node \(q(cli)) awake grant"
     }
 
+    /// Added to the hint of the greyed row: what a click on it does.
+    public static var clickCopies: String { tr("Щелчок по строке копирует эту команду.", "A click on the row copies this command.") }
+
+    /// The row's title right after that click.
+    public static var copied: String { tr("Команда скопирована", "Command copied") }
+
     public static func help(threshold: Int) -> String {
         tr("Компьютер не уснёт, когда крышка закрыта, — сессии продолжат работать. На батарее хаб сам вернёт сон, когда заряд упадёт ниже \(threshold)%.",
            "The computer stays awake when the lid is closed, so sessions keep working. On battery the hub brings sleep back by itself once the charge drops below \(threshold)%.")
