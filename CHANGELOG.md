@@ -6,6 +6,14 @@ The plugin contract has its own version history in
 
 ## Unreleased
 
+## 0.1.17 — 2026-11-26
+
+### Changed
+
+- **The icon menu copies the grant command too.** Without the rights the "Stay awake with the lid closed" item in the
+  right-click menu of the icon is no longer greyed out: it reads "… — copy the command" and a click puts
+  `agenthub awake grant` on the clipboard, like the greyed row in the popover.
+
 ## 0.1.16 — 2026-11-26
 
 ### Changed

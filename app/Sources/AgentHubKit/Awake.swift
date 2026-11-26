@@ -118,6 +118,11 @@ public enum AwakeText {
     /// Added to the hint of the greyed row: what a click on it does.
     public static var clickCopies: String { tr("Щелчок по строке копирует эту команду.", "A click on the row copies this command.") }
 
+    /// Title of the icon menu item while the hub has no rights: a click copies the grant command instead of switching.
+    public static var menuCopies: String {
+        tr("Не спать с закрытой крышкой — скопировать команду", "Stay awake with the lid closed — copy the command")
+    }
+
     /// The row's title right after that click.
     public static var copied: String { tr("Команда скопирована", "Command copied") }
 

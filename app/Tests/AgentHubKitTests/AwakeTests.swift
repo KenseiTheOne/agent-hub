@@ -132,6 +132,7 @@ private let fullJSON = #"{"supported":true,"granted":true,"on":true,"onBattery":
         #expect(AwakeText.notGranted(hub: HubInfo(home: "/h", cli: "/x/agenthub.mjs")).contains("node /x/agenthub.mjs awake grant"))
         // the greyed row copies that command on a click and says so
         #expect(AwakeText.clickCopies == "Щелчок по строке копирует эту команду." && AwakeText.copied == "Команда скопирована")
+        #expect(AwakeText.menuCopies == "Не спать с закрытой крышкой — скопировать команду")
     }
 
     @Test func powerLineInSettings() {

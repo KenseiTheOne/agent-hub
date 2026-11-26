@@ -101,10 +101,14 @@ final class StatusItemMenu: NSObject, NSMenuDelegate {
         // menu is fixed. The intent is fixed when the menu is built, like the pause's: the flag may change while the
         // menu is open (the terminal, the battery guard), and a click on an item that read "off" must not turn it off
         if let row = AwakeRow.make(store.awake, live: store.connection.isLive, hub: store.state?.hub) {
-            let awake = item(m, AwakeRow.title, #selector(toggleAwake(_:)))
+            // without the rights the switch can't be flipped: the item stays clickable and copies the grant command
+            // instead, as the greyed row in the popover does, and its title says so (a menu item has no "copied" flash)
+            let copies = !row.look.isAvailable
+            let awake = copies ? item(m, AwakeText.menuCopies, #selector(copyAwakeCommand(_:)))
+                               : item(m, AwakeRow.title, #selector(toggleAwake(_:)))
             awake.state = row.isOn ? .on : .off
-            awake.representedObject = NSNumber(value: !row.isOn)
-            awake.isEnabled = row.enabled
+            awake.representedObject = copies ? AwakeText.grantCommand(hub: store.state?.hub) as NSString : NSNumber(value: !row.isOn)
+            awake.isEnabled = copies || row.enabled
             awake.toolTip = row.help
         }
         if store.canRestartHub { item(m, tr("Перезапустить хаб", "Restart hub"), #selector(restart)).toolTip = restartHubHelp }
@@ -133,6 +137,13 @@ final class StatusItemMenu: NSObject, NSMenuDelegate {
     @objc private func toggleAwake(_ sender: NSMenuItem) {
         guard let on = (sender.representedObject as? NSNumber)?.boolValue else { return }
         Task { await store.setAwake(on) }
+    }
+
+    /// The grant command — as it was when the menu was opened.
+    @objc private func copyAwakeCommand(_ sender: NSMenuItem) {
+        guard let command = sender.representedObject as? String else { return }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(command, forType: .string)
     }
 
     @objc private func quit() { NSApp.terminate(nil) }
